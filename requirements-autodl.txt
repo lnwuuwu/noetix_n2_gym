@@ -1,0 +1,15 @@
+# Install PyTorch and Isaac Gym Preview 4 separately; see docs/AUTODL_STAIRS.md.
+numpy==1.23.5
+scipy==1.10.1
+PyYAML==6.0.1
+GitPython==3.1.43
+tensorboard==2.14.0
+tqdm==4.66.4
+onnx==1.14.1
+pynput==1.7.7
+opencv-python==4.8.1.78
+mujoco==2.3.6
+pybullet==3.2.6
+mujoco-python-viewer==0.1.4
+matplotlib==3.7.5
+wandb==0.16.6

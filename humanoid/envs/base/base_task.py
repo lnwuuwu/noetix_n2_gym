@@ -86,13 +86,9 @@ class BaseTask():
                 self.envs[0], camera_properties)
             self.camera_handle = camera_handle
         else:
-            # pass
-            camera_properties = gymapi.CameraProperties()
-            camera_properties.width = 720
-            camera_properties.height = 480
-            camera_handle = self.gym.create_camera_sensor(
-                self.envs[0], camera_properties)
-            self.camera_handle = camera_handle
+            # Headless training does not render or record frames. Avoid
+            # allocating an unused camera sensor on a graphics-disabled sim.
+            self.camera_handle = None
 
     def get_observations(self):
         return self.obs_buf

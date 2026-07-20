@@ -73,32 +73,57 @@ def parse_sim_params(args, cfg):
     return sim_params
 
 def get_load_path(root, load_run=-1, checkpoint=-1):
-    try:
-        runs = os.listdir(root)
-        #TODO sort by date to handle change of month
-        runs.sort()
-        if 'exported' in runs: runs.remove('exported')
-        last_run = os.path.join(root, runs[-1])
-    except:
-        raise ValueError("No runs in this directory: " + root)
-    if load_run==-1:
-        load_run = last_run
-    else:
-        load_run = os.path.join(root, load_run)
+    """Resolve a run/checkpoint, accepting both integer and CLI string ``-1``."""
+    if root is None:
+        raise ValueError("A log root is required when loading a checkpoint")
 
-    if checkpoint==-1:
-        models = [file for file in os.listdir(load_run) if 'model' in file]
-        models.sort(key=lambda m: '{0:0>15}'.format(m))
-        model = models[-1]
+    def checkpoint_files(directory):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return []
+        return [
+            name
+            for name in names
+            if name.startswith("model_")
+            and name.endswith(".pt")
+            and name[6:-3].isdigit()
+        ]
+
+    use_latest_run = load_run in (-1, "-1", None)
+    if use_latest_run:
+        try:
+            runs = [
+                os.path.join(root, entry)
+                for entry in os.listdir(root)
+                if os.path.isdir(os.path.join(root, entry))
+                and checkpoint_files(os.path.join(root, entry))
+            ]
+            load_run = max(runs, key=os.path.getmtime)
+        except (OSError, ValueError):
+            raise ValueError("No runs in this directory: " + root)
+    elif not os.path.isabs(str(load_run)):
+        load_run = os.path.join(root, str(load_run))
+
+    if checkpoint in (-1, "-1", None):
+        try:
+            models = checkpoint_files(load_run)
+            model = max(models, key=lambda name: int(name[6:-3]))
+        except (OSError, ValueError):
+            raise ValueError("No checkpoints in run directory: " + str(load_run))
     else:
-        model = "model_{}.pt".format(checkpoint) 
+        model = "model_{}.pt".format(checkpoint)
 
     load_path = os.path.join(load_run, model)
+    if not os.path.isfile(load_path):
+        raise ValueError("Checkpoint does not exist: " + load_path)
     return load_path
 
 def update_cfg_from_args(env_cfg, cfg_train, args):
     # seed
     if env_cfg is not None:
+        if args.seed is not None:
+            env_cfg.seed = args.seed
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
@@ -121,9 +146,9 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
     return env_cfg, cfg_train
 
-def get_args():
+def get_args(additional_parameters=None):
     custom_parameters = [
-        {"name": "--task", "type": str, "default": "go2", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
+        {"name": "--task", "type": str, "default": "n2", "help": "Registered task name."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
@@ -137,6 +162,12 @@ def get_args():
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
     ]
+    if additional_parameters:
+        existing_names = {parameter["name"] for parameter in custom_parameters}
+        for parameter in additional_parameters:
+            if parameter["name"] in existing_names:
+                raise ValueError("Duplicate command-line parameter: " + parameter["name"])
+            custom_parameters.append(parameter)
     # parse arguments
     args = gymutil.parse_arguments(
         description="RL Policy",
@@ -247,4 +278,3 @@ class _OnnxPolicyExporter(torch.nn.Module):
                 output_names=["policy_output"],
                 dynamic_axes={},
             )
-

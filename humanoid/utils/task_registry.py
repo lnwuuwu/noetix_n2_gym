@@ -55,6 +55,10 @@ class TaskRegistry():
         if env_cfg is None:
             # load config files
             env_cfg, _ = self.get_cfgs(name)
+        # Persist the registered task identity in stair checkpoints. This lets
+        # same-task resumes restore curriculum state while baseline -> robust
+        # transfers start from the robust task's configured level distribution.
+        env_cfg.env.task_name = name
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
@@ -69,7 +73,7 @@ class TaskRegistry():
         self.env_cfg_for_wandb = env_cfg
         return env, env_cfg
 
-    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default") -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
+    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default", load_optimizer=True) -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
         """ Creates the training algorithm  either from a registered namme or from the provided config file.
 
         Args:
@@ -103,13 +107,27 @@ class TaskRegistry():
         # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
+        default_log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
         if log_root=="default":
-            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
+            log_root = default_log_root
             log_dir = os.path.join(log_root, datetime.now().strftime('%m%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         elif log_root is None:
             log_dir = None
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%m%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+
+        # Resolve before serializing the configuration so train_cfg.json and
+        # evaluation reports record the exact checkpoint, not just ``-1``.
+        resume = train_cfg.runner.resume
+        resume_path = None
+        if resume:
+            resume_root = default_log_root if log_root is None else log_root
+            resume_path = get_load_path(
+                resume_root,
+                load_run=train_cfg.runner.load_run,
+                checkpoint=train_cfg.runner.checkpoint,
+            )
+            train_cfg.runner.resume_path = resume_path
         
         train_cfg_dict = class_to_dict(train_cfg)
         env_cfg_dict = class_to_dict(self.env_cfg_for_wandb)
@@ -118,12 +136,10 @@ class TaskRegistry():
         runner_class = eval(train_cfg_dict["runner_class_name"])
         runner = runner_class(env, all_cfg, log_dir, device=args.rl_device)
         #save resume path before creating a new log_dir
-        resume = train_cfg.runner.resume
         if resume:
             # load previously trained model
-            resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
             print(f"Loading model from: {resume_path}")
-            runner.load(resume_path, load_optimizer=False)
+            runner.load(resume_path, load_optimizer=load_optimizer)
         return runner, train_cfg
 
 # make global task registry

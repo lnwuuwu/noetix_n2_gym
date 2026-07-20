@@ -60,9 +60,14 @@ class LeggedRobot(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
-        # dynamic randomization
-        if not self.cfg.env.test:
-            delay = torch.rand((self.num_envs, 1), device=self.device)
+        # Dynamic action-delay randomization. Individual tasks can disable or
+        # narrow it without changing the legacy task defaults.
+        use_action_delay = getattr(self.cfg.domain_rand, "action_delay", True)
+        if not self.cfg.env.test and use_action_delay:
+            delay_range = getattr(self.cfg.domain_rand, "action_delay_range", [0.0, 1.0])
+            delay = torch_rand_float(
+                delay_range[0], delay_range[1], (self.num_envs, 1), device=self.device
+            )
             actions = (1 - delay) * actions + delay * self.actions
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
@@ -94,6 +99,9 @@ class LeggedRobot(BaseTask):
         """ check terminations, compute observations and rewards
             calls self._post_physics_step_callback() for common computations 
         """
+        # Episode information is event data for this step only. Keeping the
+        # previous dictionary caused TensorBoard to count one reset repeatedly.
+        self.extras = {}
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
@@ -107,7 +115,13 @@ class LeggedRobot(BaseTask):
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_euler_xyz[:] = get_euler_xyz_tensor(self.base_quat)
-        self.contacts = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 5.
+        if self.foot_force_sensor_forces is not None:
+            self.gym.refresh_force_sensor_tensor(self.sim)
+            self.contacts = self.foot_force_sensor_forces[:, :, 2] > 5.0
+        else:
+            self.contacts = torch.norm(
+                self.contact_forces[:, self.feet_indices, :3], dim=2
+            ) > 5.0
 
         self._post_physics_step_callback()
 
@@ -131,6 +145,9 @@ class LeggedRobot(BaseTask):
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
         self.last_contacts[:] = self.contacts[:]
+        # Contact forces above belong to the episode that just ended; do not
+        # leak them into the first filtered-contact step after a reset.
+        self.last_contacts[env_ids] = False
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
@@ -193,7 +210,10 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_motor_strength:
             self.motor_strength[env_ids] = torch_rand_float(self.cfg.domain_rand.motor_strength_range[0], self.cfg.domain_rand.motor_strength_range[1], (len(env_ids), self.num_actions), device=self.device)
 
-        self._refresh_actor_rigid_shape_props(env_ids)
+        if getattr(
+            self.cfg.domain_rand, "randomize_rigid_shape_props_on_reset", True
+        ):
+            self._refresh_actor_rigid_shape_props(env_ids)
         self._refresh_cmd_resample_time(env_ids)
 
         # fill extras
@@ -298,10 +318,12 @@ class LeggedRobot(BaseTask):
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
                 friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets, 1), device='cpu')
                 friction_coeffs = friction_buckets[bucket_ids]
-                self.friction_coeffs = friction_coeffs[:, 0].to(self.device)
+                # Keep privileged randomization observations two-dimensional
+                # (N, 1); N2Env concatenates them with other feature matrices.
+                self.friction_coeffs = friction_coeffs.to(self.device)
 
             for s in range(len(props)):
-                props[s].friction = self.friction_coeffs[env_id]
+                props[s].friction = self.friction_coeffs[env_id, 0].item()
         
         if self.cfg.domain_rand.randomize_restitution:
             if env_id==0:
@@ -311,10 +333,10 @@ class LeggedRobot(BaseTask):
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
                 restitution_buckets = torch_rand_float(restitution_range[0], restitution_range[1], (num_buckets, 1), device='cpu')
                 restitution_coeffs = restitution_buckets[bucket_ids]
-                self.restitution_coeffs = restitution_coeffs[:, 0].to(self.device)
+                self.restitution_coeffs = restitution_coeffs.to(self.device)
 
             for s in range(len(props)):
-                props[s].restitution = self.restitution_coeffs[env_id]
+                props[s].restitution = self.restitution_coeffs[env_id, 0].item()
         return props
 
     def _process_dof_props(self, props, env_id):
@@ -347,12 +369,16 @@ class LeggedRobot(BaseTask):
 
     def _process_rigid_body_props(self, props, env_id):
         if self.cfg.domain_rand.randomize_base_mass:
-            props[0].mass += self.payload[env_id, 0]
+            props[0].mass += self.payload[env_id, 0].item()
         
         if self.cfg.domain_rand.randomize_com_displacement:
             # props[0].com += gymapi.Vec3(self.com_displacement[env_id, 0], self.com_displacement[env_id, 1],
             #                         self.com_displacement[env_id, 2])
-            props[0].com += gymapi.Vec3(self.com_displacement[env_id, 0], 0, self.com_displacement[env_id, 2])
+            props[0].com += gymapi.Vec3(
+                self.com_displacement[env_id, 0].item(),
+                0.0,
+                self.com_displacement[env_id, 2].item(),
+            )
 
         total_mass = 0
         for i, p in enumerate(props):
@@ -365,19 +391,26 @@ class LeggedRobot(BaseTask):
             bucket_ids = torch.randint(0, num_buckets, (len(env_ids), 1))
             friction_buckets = torch_rand_float(self.cfg.domain_rand.friction_range[0], self.cfg.domain_rand.friction_range[1], (num_buckets, 1), device='cpu')
             friction_coeffs = friction_buckets[bucket_ids]
-            self.friction_coeffs[env_ids] = friction_coeffs[:, 0].to(self.device)
+            self.friction_coeffs[env_ids] = friction_coeffs.to(self.device)
         if self.cfg.domain_rand.randomize_restitution:
             bucket_ids = torch.randint(0, num_buckets, (len(env_ids), 1))
             restitution_buckets = torch_rand_float(self.cfg.domain_rand.restitution_range[0], self.cfg.domain_rand.restitution_range[1], (num_buckets, 1), device='cpu')
             restitution_coeffs = restitution_buckets[bucket_ids]
-            self.restitution_coeffs[env_ids] = restitution_coeffs[:, 0].to(self.device)
+            self.restitution_coeffs[env_ids] = restitution_coeffs.to(self.device)
         
-        for env_id in env_ids:
-            rigid_shape_props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], 0)
+        for env_id_tensor in env_ids:
+            env_id = int(env_id_tensor.item())
+            rigid_shape_props = self.gym.get_actor_rigid_shape_properties(
+                self.envs[env_id], 0
+            )
 
             for i in range(len(rigid_shape_props)):
-                    rigid_shape_props[i].friction = self.friction_coeffs[env_id]
-                    rigid_shape_props[i].restitution = self.restitution_coeffs[env_id]
+                rigid_shape_props[i].friction = self.friction_coeffs[
+                    env_id, 0
+                ].item()
+                rigid_shape_props[i].restitution = self.restitution_coeffs[
+                    env_id, 0
+                ].item()
 
             self.gym.set_actor_rigid_shape_properties(self.envs[env_id], 0, rigid_shape_props)
     
@@ -493,13 +526,20 @@ class LeggedRobot(BaseTask):
         if self.custom_origins:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            self.root_states[env_ids, :2] += torch_rand_float(-1., 1., (len(env_ids), 2), device=self.device) # xy position within 1m of the center
-            self.root_states[env_ids, 2:3] += 0.05
+            xy_noise = getattr(self.cfg.init_state, "reset_xy_noise", [1.0, 1.0])
+            random_xy = torch_rand_float(-1., 1., (len(env_ids), 2), device=self.device)
+            random_xy *= torch.tensor(xy_noise, device=self.device)
+            self.root_states[env_ids, :2] += random_xy
+            height_offset = getattr(self.cfg.init_state, "reset_height_offset", 0.05)
+            self.root_states[env_ids, 2:3] += height_offset
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base velocities
-        self.root_states[env_ids, 7:13] = torch_rand_float(-0.05, 0.05, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
+        velocity_noise = getattr(self.cfg.init_state, "reset_velocity_noise", 0.05)
+        self.root_states[env_ids, 7:13] = torch_rand_float(
+            -velocity_noise, velocity_noise, (len(env_ids), 6), device=self.device
+        ) # [7:10]: lin vel, [10:13]: ang vel
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self.root_states),
@@ -558,7 +598,9 @@ class LeggedRobot(BaseTask):
 
         # 对新进入干扰状态的环境生成恒定的 disturbance_force 和 disturbance_torque
         if new_disturbance_mask.any():
-            num_new_disturbances = new_disturbance_mask.sum()
+            # Shape arguments must be host integers; a CUDA scalar here can
+            # otherwise fail when robust randomization first triggers.
+            num_new_disturbances = int(new_disturbance_mask.sum().item())
             new_disturbance_force = torch.where(
                 torch.rand((num_new_disturbances, 1), device=self.device) < 0.5,
                 torch_rand_float(-self.cfg.domain_rand.push_force_range[0], -self.cfg.domain_rand.push_force_range[1], (num_new_disturbances, 3), device=self.device),
@@ -646,6 +688,21 @@ class LeggedRobot(BaseTask):
         self.base_euler_xyz = get_euler_xyz_tensor(self.base_quat)
         self.base_pos = self.root_states[:self.num_envs, 0:3]
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
+        self.foot_force_sensor_forces = None
+        if getattr(self.cfg.asset, "use_foot_force_sensors", False):
+            force_sensor_tensor = self.gym.acquire_force_sensor_tensor(self.sim)
+            self.gym.refresh_force_sensor_tensor(self.sim)
+            force_sensor_readings = gymtorch.wrap_tensor(force_sensor_tensor)
+            expected_values = self.num_envs * len(self.feet_indices) * 6
+            if force_sensor_readings.numel() != expected_values:
+                raise RuntimeError(
+                    "Expected {} foot force-sensor values, received {}".format(
+                        expected_values, force_sensor_readings.numel()
+                    )
+                )
+            self.foot_force_sensor_forces = force_sensor_readings.view(
+                self.num_envs, len(self.feet_indices), 6
+            )[..., :3]
 
         # initialize some data used later on
         self.common_step_counter = 0
@@ -833,6 +890,27 @@ class LeggedRobot(BaseTask):
         self.num_bodies = len(self.body_names)
         self.num_dofs = len(self.dof_names)
         feet_names = [s for s in self.body_names if self.cfg.asset.foot_name in s]
+        if getattr(self.cfg.asset, "use_foot_force_sensors", False):
+            sensor_pose = gymapi.Transform()
+            sensor_options = gymapi.ForceSensorProperties()
+            # Report only solver/contact forces in the world frame. Including
+            # forward-dynamics forces would add gravity and bias contact state.
+            sensor_options.enable_forward_dynamics_forces = False
+            sensor_options.enable_constraint_solver_forces = True
+            sensor_options.use_world_frame = True
+            for foot_name in feet_names:
+                body_index = self.gym.find_asset_rigid_body_index(
+                    robot_asset, foot_name
+                )
+                if body_index < 0:
+                    raise RuntimeError(
+                        "Unable to attach foot force sensor to '{}'".format(
+                            foot_name
+                        )
+                    )
+                self.gym.create_asset_force_sensor(
+                    robot_asset, body_index, sensor_pose, sensor_options
+                )
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
             penalized_contact_names.extend([s for s in self.body_names if name in s])
@@ -866,7 +944,14 @@ class LeggedRobot(BaseTask):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
             pos = self.env_origins[i].clone()
-            pos[:2] += torch_rand_float(-1., 1., (2,1), device=self.device).squeeze(1)
+            xy_noise = getattr(self.cfg.init_state, "reset_xy_noise", [1.0, 1.0])
+            initial_xy = torch_rand_float(-1., 1., (2, 1), device=self.device).squeeze(1)
+            initial_xy *= torch.tensor(xy_noise, device=self.device)
+            pos[:2] += initial_xy
+            # Actor creation previously ignored init_state.pos[2]. The runner
+            # resets before training, but honoring it avoids an initial mesh
+            # penetration and is consistent with _reset_root_states().
+            pos[2] += self.base_init_state[2]
             start_pose.p = gymapi.Vec3(*pos)
                 
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)

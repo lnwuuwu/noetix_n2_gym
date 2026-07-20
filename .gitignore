@@ -62,7 +62,10 @@ Thumbs.db
 logs
 runs
 videos
-docs
+server_logs/
+reports/
+docs/*
+!docs/AUTODL_STAIRS.md
 # resources
 
 # other

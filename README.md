@@ -1,3 +1,29 @@
+# Noetix N2 Humanoid Gym
+
+## Dedicated upstairs PPO task
+
+The repository includes an isolated `n2_stairs` task (plus optional
+`n2_stairs_robust`) while retaining `n2`, `n2_10dof`, and `n2_mimic`.
+
+```bash
+# From-scratch upstairs curriculum
+python humanoid/scripts/train.py --task=n2_stairs --headless
+
+# Visualize a checkpoint at 6 cm and 0.25 m/s
+python humanoid/scripts/play.py --task=n2_stairs --resume \
+  --load_run=<run_name_or_absolute_path> --checkpoint=-1 \
+  --terrain_level=2 --command_speed=0.25
+
+# Batch metrics over all five stair heights
+python humanoid/scripts/eval_stairs.py --task=n2_stairs --resume \
+  --load_run=<run_name_or_absolute_path> --checkpoint=-1 \
+  --num_envs=128 --headless
+```
+
+See [docs/AUTODL_STAIRS.md](docs/AUTODL_STAIRS.md) for the implementation
+audit, observation/reward definitions, staged randomization, checkpoint
+recovery, evaluation metrics, and copy-ready AutoDL RTX 4090 commands.
+
 ## Installation
 ## ubuntu 20.04
 1. Install Isaac Gym:
@@ -7,11 +33,12 @@
    - Consult `isaacgym/docs/index.html` for troubleshooting.
 2. Install noetix_rl_gym:
    - Clone this repository.
-   - `cd noetix_n2_gym && pip install -e .
+   - `cd noetix_n2_gym && pip install -e .`
 
-## install pytorch
-## if GPU Name is RTX 4070  (NVIDIA-SMI 535.230.02     Driver Version: 535.230.02   CUDA Version: 12.2)
- conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 cudatoolkit=11.8 -c pytorch -c nvidia
+For the pinned Python 3.8 / PyTorch 1.13.1 environment and Isaac Gym install
+order, use [docs/AUTODL_STAIRS.md](docs/AUTODL_STAIRS.md). PyTorch 1.13.1
+does not publish an official `cu118` wheel; the deployment guide uses its
+official `cu117` build with a compatible NVIDIA driver.
 
 ## Usage Guide
 
@@ -23,8 +50,8 @@
 # In the subdirectory noetix_n2_gym
 python humanoid/scripts/train.py --task=n2 --headless --num_envs 4096
 
-# Additionally, it automatically exports a JIT model, suitable for deployment purposes.
-python humanoid/scripts/play.py --task=n2
+# Load the latest checkpoint and explicitly export JIT/ONNX for deployment.
+python humanoid/scripts/play.py --task=n2 --resume --checkpoint=-1 --export_policy
 
 ```
 
@@ -32,24 +59,24 @@ python humanoid/scripts/play.py --task=n2
 - **Training Command**: For training the PPO policy, execute:
   ## env n2_mimic
   ```
-  python humanoid/scripts/train.py --task=n2_mimic --load_run log_file_path 
+  python humanoid/scripts/train.py --task=n2_mimic --resume --load_run=log_file_path
   ```
 
   ## env n2_10dof
   ```
-  python humanoid/scripts/train.py --task=n2_10dof --load_run log_file_path 
+  python humanoid/scripts/train.py --task=n2_10dof --resume --load_run=log_file_path
   ```
 
 
 - **Running a Trained Policy**: To deploy a trained PPO policy, use:
   ## env n2_mimic
   ```
-  python humanoid/scripts/play.py --task=n2_mimic --load_run log_file_path
+  python humanoid/scripts/play.py --task=n2_mimic --load_run=log_file_path
   ```
 
   ## env n2_10dof
   ```
-  python humanoid/scripts/play.py --task=n2_10dof --load_run log_file_path
+  python humanoid/scripts/play.py --task=n2_10dof --load_run=log_file_path
   ```
 
 
@@ -65,10 +92,10 @@ command below:
 
 
 #### 3. Parameters
-- **CPU and GPU Usage**: To run simulations on the CPU, set both `--sim_device=cpu` and `--rl_device=cpu`. For GPU operations, specify `--sim_device=cuda:{0,1,2...}` and `--rl_device={0,1,2...}` accordingly. Please note that `CUDA_VISIBLE_DEVICES` is not applicable, and it's essential to match the `--sim_device` and `--rl_device` settings.
+- **CPU and GPU Usage**: To run simulations on the CPU, set both `--sim_device=cpu` and `--rl_device=cpu`. For GPU operations, specify matching values such as `--sim_device=cuda:0 --rl_device=cuda:0`.
 - **Headless Operation**: Include `--headless` for operations without rendering.
 - **Rendering Control**: Press 'v' to toggle rendering during training.
-- **Policy Location**: Trained policies are saved in `humanoid/logs/<experiment_name>/<date_time>_<run_name>/model_<iteration>.pt`.
+- **Policy Location**: Trained policies are saved in `logs/<experiment_name>/<date_time>_<run_name>/model_<iteration>.pt`.
 
 #### 4. Command-Line Arguments
 For RL training, please refer to `humanoid/utils/helpers.py#L161`.
@@ -119,10 +146,7 @@ AttributeError: module 'distutils' has no attribute 'version'
 ImportError: /home/roboterax/anaconda3/../../nvidia/cusparse/lib/libcusparse.so.12: undefined symbol: __nvJitLinkAddData_12_1, version libnvJitLink.so.12
 
 # solution
-# install pytorch 1.12.0
-#conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch
-#if GPU Name is RTX 4070  (NVIDIA-SMI 535.230.02             Driver Version: 535.230.02   CUDA Version: 12.2)
- conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 cudatoolkit=11.8 -c pytorch -c nvidia
+# Recreate the pinned environment using docs/AUTODL_STAIRS.md.
 
 # error, results from libstdc++ version distributed with conda differing from the one used on your system to build Isaac Gym
 ImportError: /home/roboterax/anaconda3/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.20` not found (required by /home/roboterax/carbgym/python/isaacgym/_bindings/linux64/gym_36.so)
@@ -138,8 +162,8 @@ RuntimeError: nvrtc: error: invalid value for --gpu-architecture (-arch)
 
 # solution
 conda uninstall pytorch torchvision torchaudio cudatoolkit
-pip uninstall torch torchvision torchaudio 
-conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 cudatoolkit=11.8 -c pytorch -c nvidia
+pip uninstall torch torchvision torchaudio
+# Reinstall the official PyTorch 1.13.1 cu117 build shown in docs/AUTODL_STAIRS.md.
 rm -rf /home/ubuntu/.cache/torch_extensions/py38_cu113/gymtorch/  
 rm -rf /home/ubuntu/.cache/torch_extensions/py38_cu118/gymtorch/  
 export CUDA_ARCH_LIST="sm_89"  #RTX 4070

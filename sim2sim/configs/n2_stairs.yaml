@@ -1,26 +1,20 @@
-# 
-policy_path: "{LEGGED_GYM_ROOT_DIR}/sim2sim/policy/policy.pt"
+# JIT exported by: python humanoid/scripts/play.py --task=n2_stairs ... --export_policy
+policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/n2_stairs/exported/policies/policy.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/n2_18dof.xml"
 
-# Total simulation time
 simulation_duration: 60.0
-# Simulation time step
 simulation_dt: 0.002
-# Controller update frequency (meets the requirement of simulation_dt * controll_decimation=0.02; 50Hz)
 control_decimation: 10
 
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20,
       30, 30, 30, 30, 80, 80, 120, 120, 20]
 kds: [1, 1, 1, 1, 5, 5, 5, 5, 2,
       1, 1, 1, 1, 5, 5, 5, 5, 2]
-
 default_angles: [0.0, 0.2, 0.0, 0.0,
                  0.0, 0.0, -0.1495, 0.3215, -0.1720,
                  0.0, -0.2, 0.0, 0.0,
                  0.0, 0.0, -0.1495, 0.3215, -0.1720]
 
-# Explicit policy order; sim2sim resolves named MuJoCo qpos/qvel/actuators rather
-# than assuming the last N state entries happen to be in Isaac Gym order.
 joint_order: [L_arm_shoulder_pitch_joint, L_arm_shoulder_roll_joint,
               L_arm_shoulder_yaw_joint, L_arm_elbow_joint,
               L_leg_hip_yaw_joint, L_leg_hip_roll_joint,
@@ -40,8 +34,24 @@ clip_observations: 18.0
 clip_actions: 18.0
 cmd_scale: [2.0, 2.0, 1.0]
 num_actions: 18
-num_single_obs: 63
-frame_stack: 10
-num_obs: 630 # num_single_obs * frame_stack
+num_single_obs: 75
+frame_stack: 5
+num_obs: 375
+cmd_init: [0.25, 0.0, 0.0]
 
-cmd_init: [0, 0, 0]
+# This replaces the historical MJCF boxes at runtime and reproduces one exact
+# training level. Change step_height to one of 0.02/0.04/0.06/0.08/0.10.
+stairs:
+  start_x: 0.60
+  step_width: 0.30
+  step_height: 0.06
+  num_steps: 6
+  stair_width: 2.0
+  top_platform_length: 1.5
+  friction: "0.8 0.005 0.0001"
+
+height_measurements:
+  points_x: [0.25, 0.45, 0.65, 0.85]
+  points_y: [-0.24, 0.0, 0.24]
+  sensor_offset: 0.5
+  scale: 5.0

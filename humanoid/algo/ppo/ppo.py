@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from itertools import chain
+from typing import Optional
 
 from humanoid.algo.ppo.actor_critic import ActorCritic
 from humanoid.algo.ppo.rollout_storage import RolloutStorage
@@ -38,7 +39,7 @@ class PPO:
         desired_kl=0.01,                 # 期望的KL散度
         device="cpu",                    # 计算设备
         normalize_advantage_per_mini_batch=False,  # 是否按小批次归一化优势函数
-        multi_gpu_cfg: dict | None = None,         # 多GPU配置
+        multi_gpu_cfg: Optional[dict] = None,      # 多GPU配置
     ):
         """
         初始化PPO算法
@@ -118,7 +119,7 @@ class PPO:
             actor_obs_shape,
             critic_obs_shape,
             actions_shape,
-            self.device,
+            device=self.device,
         )
 
     def act(self, obs, critic_obs):
@@ -385,8 +386,6 @@ class PPO:
         """将模型参数广播到所有GPU"""
         # 获取当前GPU上的模型参数
         model_params = [self.policy.state_dict()]
-        if self.rnd:
-            model_params.append(self.rnd.predictor.state_dict())
         # 广播模型参数
         torch.distributed.broadcast_object_list(model_params, src=0)
         # 从源GPU加载所有GPU上的模型参数
@@ -399,8 +398,6 @@ class PPO:
         """
         # 创建张量来存储梯度
         grads = [param.grad.view(-1) for param in self.policy.parameters() if param.grad is not None]
-        if self.rnd:
-            grads += [param.grad.view(-1) for param in self.rnd.parameters() if param.grad is not None]
         all_grads = torch.cat(grads)
 
         # 在所有GPU间平均梯度

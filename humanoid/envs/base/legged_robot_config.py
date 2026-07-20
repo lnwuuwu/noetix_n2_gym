@@ -59,6 +59,10 @@ class LeggedRobotCfg(BaseConfig):
         rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
+        # Reset randomization. Defaults preserve the original environments.
+        reset_xy_noise = [1.0, 1.0]
+        reset_height_offset = 0.05
+        reset_velocity_noise = 0.05
         default_joint_angles = { # target angles when action = 0.0
             "joint_a": 0., 
             "joint_b": 0.}
@@ -87,6 +91,9 @@ class LeggedRobotCfg(BaseConfig):
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = True # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = True # Some .obj meshes must be flipped from y-up to z-up
+        # Optional constraint-only foot sensors. Disabled by default so legacy
+        # tasks retain their existing net-contact-force behaviour.
+        use_foot_force_sensors = False
         
         density = 0.001
         angular_damping = 0.
@@ -98,6 +105,12 @@ class LeggedRobotCfg(BaseConfig):
 
 
     class domain_rand:
+        # Blend the new action with the previous action to emulate command delay.
+        # [0, 1] preserves the historical behaviour of this repository.
+        action_delay = True
+        action_delay_range = [0.0, 1.0]
+        randomize_rigid_shape_props_on_reset = True
+
         randomize_gains = False
         p_gain_range = [0.8, 1.2]
         d_gain_range = [0.8, 1.2]

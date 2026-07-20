@@ -34,6 +34,7 @@ import numpy as np
 
 from isaacgym import terrain_utils
 from humanoid.envs.base.legged_robot_config import LeggedRobotCfg
+from humanoid.utils.stairs_terrain import build_directional_stairs
 
 def add_roughness(terrain, noise_magnitude=0.02):
     terrain_utils.random_uniform_terrain(
@@ -246,3 +247,70 @@ class HumanoidTerrain(Terrain):
         else:
             pass
         return terrain
+
+
+class N2StairsTerrain(Terrain):
+    """Deterministic, directional stairs for the dedicated N2 curriculum.
+
+    Every column contains the same upstairs geometry. Rows map one-to-one to
+    configured step heights, so a terrain level has an unambiguous meaning.
+    """
+
+    def __init__(self, cfg: LeggedRobotCfg.terrain, num_robots) -> None:
+        step_heights = list(cfg.step_heights)
+        if len(step_heights) != cfg.num_rows:
+            raise ValueError(
+                "n2_stairs requires one step height per terrain row: {} != {}".format(
+                    len(step_heights), cfg.num_rows
+                )
+            )
+        self.stair_step_heights = np.zeros((cfg.num_rows, cfg.num_cols), dtype=np.float32)
+        self.stair_top_heights = np.zeros((cfg.num_rows, cfg.num_cols), dtype=np.float32)
+        self.stair_top_x = np.zeros((cfg.num_rows, cfg.num_cols), dtype=np.float32)
+        self.stair_start_x = np.zeros((cfg.num_rows, cfg.num_cols), dtype=np.float32)
+        super().__init__(cfg, num_robots)
+
+    def curiculum(self):
+        # Keep the misspelled method name for compatibility with Terrain.__init__.
+        for col in range(self.cfg.num_cols):
+            for row in range(self.cfg.num_rows):
+                field, metadata = build_directional_stairs(
+                    terrain_length=self.env_length,
+                    terrain_width=self.env_width,
+                    horizontal_scale=self.horizontal_scale,
+                    vertical_scale=self.vertical_scale,
+                    start_platform_length=self.cfg.start_platform_length,
+                    step_width=self.cfg.step_width,
+                    step_height=self.cfg.step_heights[row],
+                    num_steps=self.cfg.num_steps,
+                )
+                self._add_stairs_to_map(field, metadata, row, col)
+
+    def randomized_terrain(self):
+        # Evaluation may set curriculum=False to freeze levels, but geometry
+        # must remain stairs rather than falling back to mixed random terrain.
+        self.curiculum()
+
+    def _add_stairs_to_map(self, field, metadata, row, col):
+        start_x = self.border + row * self.length_per_env_pixels
+        end_x = self.border + (row + 1) * self.length_per_env_pixels
+        start_y = self.border + col * self.width_per_env_pixels
+        end_y = self.border + (col + 1) * self.width_per_env_pixels
+        expected_shape = (self.length_per_env_pixels, self.width_per_env_pixels)
+        if field.shape != expected_shape:
+            raise ValueError(
+                "stair field shape {} does not match terrain tile {}".format(
+                    field.shape, expected_shape
+                )
+            )
+        self.height_field_raw[start_x:end_x, start_y:end_y] = field
+
+        tile_x = row * self.env_length
+        tile_y = col * self.env_width
+        spawn_x = tile_x + self.cfg.spawn_x
+        spawn_y = tile_y + self.env_width / 2.0
+        self.env_origins[row, col] = [spawn_x, spawn_y, 0.0]
+        self.stair_start_x[row, col] = tile_x + metadata["start_x"]
+        self.stair_top_x[row, col] = tile_x + metadata["success_x"]
+        self.stair_top_heights[row, col] = metadata["top_height"]
+        self.stair_step_heights[row, col] = metadata["step_height"]

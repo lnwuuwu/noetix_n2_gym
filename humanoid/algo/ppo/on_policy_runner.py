@@ -11,6 +11,7 @@ import time
 import torch
 import json
 from collections import deque
+from typing import Optional
 
 import humanoid
 from humanoid.algo.ppo.ppo import PPO
@@ -23,7 +24,13 @@ from humanoid.utils.utils import store_code_state
 class OnPolicyRunner:
     """On-policy训练和评估的运行器类"""
 
-    def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
+    def __init__(
+        self,
+        env: VecEnv,
+        train_cfg: dict,
+        log_dir: Optional[str] = None,
+        device="cpu",
+    ):
         """
         初始化OnPolicyRunner
         
@@ -250,15 +257,23 @@ class OnPolicyRunner:
 
             stop = time.time()  # 记录结束时间
             learn_time = stop - start  # 学习时间
-            self.current_learning_iteration = it  # 更新当前迭代次数
+            # Store the number of completed iterations. This avoids repeating
+            # the last PPO update after resume and makes --max_iterations an
+            # exact total target.
+            self.current_learning_iteration = it + 1
             
             # 记录日志信息
             if self.log_dir is not None and not self.disable_logs:
                 # 记录信息
                 self.log(locals())
                 # 保存模型
-                if it % self.save_interval == 0:
-                    self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                if self.current_learning_iteration % self.save_interval == 0:
+                    self.save(
+                        os.path.join(
+                            self.log_dir,
+                            f"model_{self.current_learning_iteration}.pt",
+                        )
+                    )
 
             # 清理episode信息
             ep_infos.clear()
@@ -317,6 +332,7 @@ class OnPolicyRunner:
 
         mean_std = self.alg.policy.action_std.mean()  # 平均动作标准差
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))  # 每秒帧数
+        collection_fps = int(collection_size / max(locs["collection_time"], 1.0e-9))
 
         # -- 损失值
         for key, value in locs["loss_dict"].items():
@@ -328,6 +344,7 @@ class OnPolicyRunner:
 
         # -- 性能
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
+        self.writer.add_scalar("Perf/collection_fps", collection_fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
@@ -396,6 +413,8 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,  # 当前迭代次数
             "infos": infos,  # 附加信息
         }
+        if hasattr(self.env, "get_checkpoint_state"):
+            saved_dict["env_state"] = self.env.get_checkpoint_state()
         # -- 如果使用了观测归一化，则保存归一化器
         if self.empirical_normalization:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()  # 观测归一化器状态
@@ -405,7 +424,11 @@ class OnPolicyRunner:
         torch.save(saved_dict, path)
 
         # 上传模型到外部日志服务
-        if self.logger_type in ["neptune", "wandb"] and not self.disable_logs:
+        if (
+            getattr(self, "logger_type", "tensorboard") in ["neptune", "wandb"]
+            and not self.disable_logs
+            and self.writer is not None
+        ):
             self.writer.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True):
@@ -419,7 +442,12 @@ class OnPolicyRunner:
         Returns:
             加载的信息
         """
-        loaded_dict = torch.load(path, weights_only=False, map_location=self.device)
+        # PyTorch 1.13 (the Isaac Gym Preview 4 target) does not accept the
+        # newer ``weights_only`` keyword.
+        try:
+            loaded_dict = torch.load(path, weights_only=False, map_location=self.device)
+        except TypeError:
+            loaded_dict = torch.load(path, map_location=self.device)
         # -- 加载模型
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
         # -- 如果使用了观测归一化，则加载归一化器
@@ -441,6 +469,10 @@ class OnPolicyRunner:
         # -- 加载当前学习迭代次数
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
+        if "env_state" in loaded_dict and hasattr(
+            self.env, "load_checkpoint_state"
+        ):
+            self.env.load_checkpoint_state(loaded_dict["env_state"])
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):

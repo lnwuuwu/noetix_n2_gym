@@ -15,10 +15,18 @@ kds: [5, 5, 5, 5, 2, 5, 5, 5, 5, 2]
 default_angles: [0.0, 0.0, -0.1495, 0.3215, -0.1720,
                  0.0, 0.0, -0.1495, 0.3215, -0.1720]
 
+joint_order: [L_leg_hip_yaw_joint, L_leg_hip_roll_joint,
+              L_leg_hip_pitch_joint, L_leg_knee_joint, L_leg_ankle_joint,
+              R_leg_hip_yaw_joint, R_leg_hip_roll_joint,
+              R_leg_hip_pitch_joint, R_leg_knee_joint, R_leg_ankle_joint]
+torque_limits: [90, 90, 150, 150, 70, 90, 90, 150, 150, 70]
+
 ang_vel_scale: 1.0
 dof_pos_scale: 1.0
 dof_vel_scale: 0.05
 action_scale: 0.25
+clip_observations: 18.0
+clip_actions: 18.0
 cmd_scale: [2.0, 2.0, 1.0]
 num_actions: 10 #18
 num_single_obs: 39 #63
