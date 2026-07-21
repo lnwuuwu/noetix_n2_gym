@@ -132,6 +132,10 @@ class StairConfigurationTests(unittest.TestCase):
         expected_critic = 63 + 3 + 1 + 1 + 1 + 18 + 18 + 18 + 2 + critic_heights
         self.assertEqual(env["num_privileged_obs"], expected_critic)
         self.assertEqual(env["num_actions"], 18)
+        self.assertEqual(env["stall_timeout_s"], 6.0)
+        self.assertEqual(env["progress_epsilon"], 0.04)
+        self.assertEqual(env["flight_grace_s"], 0.5)
+        self.assertEqual(env["max_double_flight_s"], 0.08)
 
     def test_original_n2_discrete_terrain_mix_is_audited(self):
         n2_tree = parse_tree("humanoid/envs/n2/n2_config.py")
@@ -290,14 +294,21 @@ class StairConfigurationTests(unittest.TestCase):
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
         self.assertEqual(scales["stairs_vertical_progress"], 1.0)
+        self.assertEqual(scales["stairs_foot_step_progress"], 1.0)
+        self.assertEqual(scales["stairs_double_flight"], -4.0)
+        self.assertEqual(scales["stairs_single_support"], 0.80)
         self.assertEqual(scales["stairs_success"], 25.0)
         self.assertEqual(scales["termination"], -10.0)
         stairs_source = (
             ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
         ).read_text()
-        self.assertGreaterEqual(stairs_source.count("/ self.dt"), 3)
+        self.assertGreaterEqual(stairs_source.count("/ self.dt"), 5)
         self.assertIn("self.progress_checkpoint", stairs_source)
         self.assertIn("self.foot_force_sensor_forces", stairs_source)
+        self.assertIn("opposite_was_supported", stairs_source)
+        self.assertIn("one_new_contact", stairs_source)
+        self.assertIn("self.double_flight_time", stairs_source)
+        self.assertIn("stairs_first_step_rate", stairs_source)
 
     def test_tasks_are_registered(self):
         registration = (ROOT / "humanoid" / "envs" / "__init__.py").read_text()

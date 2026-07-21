@@ -100,6 +100,12 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         ),
                         "fall": float(env.last_episode_fall[env_id].item()),
                         "stall": float(env.last_episode_stall[env_id].item()),
+                        "first_step": float(
+                            env.last_episode_first_step[env_id].item()
+                        ),
+                        "max_foot_height_m": float(
+                            env.last_episode_max_foot_height[env_id].item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -132,6 +138,8 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "fall_rate": mean("fall"),
         "top_reached_rate": mean("top_reached"),
         "stall_rate": mean("stall"),
+        "first_step_rate": mean("first_step"),
+        "mean_max_foot_height_m": mean("max_foot_height_m"),
     }
 
 
@@ -200,7 +208,8 @@ def evaluate(args):
         print(
             "level={terrain_level} height={step_height_m:.2f}m "
             "success={success_rate:.1%} distance={mean_forward_distance_m:.3f}m "
-            "climb={mean_climb_height_m:.3f}m fall={fall_rate:.1%}".format(
+            "climb={mean_climb_height_m:.3f}m first_step={first_step_rate:.1%} "
+            "fall={fall_rate:.1%}".format(
                 **result
             )
         )

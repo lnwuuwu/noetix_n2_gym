@@ -127,6 +127,16 @@ class N2StairsEnv(N2Env):
             self.num_envs, dtype=torch.long, device=self.device
         )
         self.terrain_height_delta = torch.zeros_like(self.best_forward_progress)
+        self.double_flight_time = torch.zeros_like(self.best_forward_progress)
+        self.foot_contact_height_delta = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.max_foot_contact_height = torch.zeros_like(
+            self.foot_contact_height_delta
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -159,6 +169,12 @@ class N2StairsEnv(N2Env):
         )
         self.last_episode_fall = torch.zeros_like(self.best_forward_progress)
         self.last_episode_stall = torch.zeros_like(self.best_forward_progress)
+        self.last_episode_first_step = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_max_foot_height = torch.zeros_like(
+            self.best_forward_progress
+        )
 
     def _get_noise_scale_vec(self, cfg):
         """Noise layout for 63 proprioceptive + compact terrain observations."""
@@ -341,6 +357,58 @@ class N2StairsEnv(N2Env):
         py = torch.clamp(points[..., 1], 0, self.height_samples.shape[1] - 1)
         return self.height_samples[px, py] * self.terrain.cfg.vertical_scale
 
+    def _update_foot_step_progress(self):
+        """Track stable, alternating foot placements on newly higher treads."""
+        foot_surface_height = self._sample_terrain_height_xy(
+            self.feet_pos[:, :, :2]
+        ) - self.env_origins[:, 2].unsqueeze(1)
+        foot_surface_height = torch.clamp(foot_surface_height, min=0.0)
+        horizontal_speed = torch.norm(self.feet_vel[:, :, :2], dim=2)
+
+        if self.foot_force_sensor_forces is not None:
+            horizontal_force = torch.norm(
+                self.foot_force_sensor_forces[:, :, :2], dim=2
+            )
+            vertical_force = torch.abs(self.foot_force_sensor_forces[:, :, 2])
+            vertical_support = vertical_force > horizontal_force
+        else:
+            vertical_support = torch.ones_like(self.contacts)
+
+        stable_support = (
+            self.contacts
+            & vertical_support
+            & (horizontal_speed < 0.20)
+        )
+        attained_height = torch.where(
+            stable_support,
+            foot_surface_height,
+            self.max_foot_contact_height,
+        )
+        raw_delta = torch.clamp(
+            attained_height - self.max_foot_contact_height, min=0.0
+        )
+
+        # A valid step landing has exactly one newly contacting foot and the
+        # opposite foot supported on the preceding frame. Synchronous hopping
+        # and impacts into a vertical riser therefore receive no event reward.
+        new_contact = self.contacts & ~self.last_contacts
+        one_new_contact = torch.sum(new_contact.int(), dim=1) == 1
+        opposite_was_supported = torch.flip(self.last_contacts, dims=[1])
+        alternating_landing = (
+            new_contact
+            & opposite_was_supported
+            & one_new_contact.unsqueeze(1)
+            & stable_support
+        )
+        self.foot_contact_height_delta[:] = (
+            raw_delta * alternating_landing.float()
+        )
+        # Even an invalid simultaneous landing consumes that height event, so
+        # hopping cannot land once and collect it later by lifting one foot.
+        self.max_foot_contact_height[:] = torch.maximum(
+            self.max_foot_contact_height, attained_height
+        )
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
 
@@ -363,6 +431,7 @@ class N2StairsEnv(N2Env):
         self.max_climb_height[:] = torch.maximum(
             self.max_climb_height, current_climb_height
         )
+        self._update_foot_step_progress()
 
         top_x, top_height, _ = self._current_stair_targets()
         reached_position_and_height = torch.logical_and(
@@ -475,6 +544,14 @@ class N2StairsEnv(N2Env):
         climb = self.max_climb_height[env_ids].clone() * valid.float()
         survival = self.episode_length_buf[env_ids].float() * self.dt * valid.float()
         episode_command = self.commands[env_ids, 0].clone() * valid.float()
+        _, _, episode_step_height = self._current_stair_targets(env_ids)
+        max_foot_height = torch.max(
+            self.max_foot_contact_height[env_ids], dim=1
+        ).values
+        first_step = (
+            max_foot_height
+            >= episode_step_height - self.cfg.terrain.success_height_tolerance
+        ).float() * valid.float()
 
         self.last_episode_success[env_ids] = success
         self.last_episode_top_reached[env_ids] = top_reached
@@ -483,6 +560,10 @@ class N2StairsEnv(N2Env):
         self.last_episode_survival_time[env_ids] = survival
         self.last_episode_fall[env_ids] = fall
         self.last_episode_stall[env_ids] = stall
+        self.last_episode_first_step[env_ids] = first_step
+        self.last_episode_max_foot_height[env_ids] = (
+            max_foot_height * valid.float()
+        )
 
         super().reset_idx(env_ids)
 
@@ -499,8 +580,10 @@ class N2StairsEnv(N2Env):
                 "stairs_top_rate": masked_mean(top_reached),
                 "stairs_fall_rate": masked_mean(fall),
                 "stairs_stall_rate": masked_mean(stall),
+                "stairs_first_step_rate": masked_mean(first_step),
                 "stairs_forward_distance": masked_mean(forward),
                 "stairs_climb_height": masked_mean(climb),
+                "stairs_max_foot_height": masked_mean(max_foot_height),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -517,6 +600,9 @@ class N2StairsEnv(N2Env):
         self.max_climb_height[env_ids] = 0.0
         self.last_progress_step[env_ids] = 0
         self.terrain_height_delta[env_ids] = 0.0
+        self.double_flight_time[env_ids] = 0.0
+        self.foot_contact_height_delta[env_ids] = 0.0
+        self.max_foot_contact_height[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.stall_buf[env_ids] = False
@@ -616,6 +702,19 @@ class N2StairsEnv(N2Env):
         # the actual reward per newly attained riser.
         return normalized_rise * moving_forward * upright * supported / self.dt
 
+    def _reward_stairs_foot_step_progress(self):
+        """Reward one-shot, alternating landings on a newly higher tread."""
+        _, _, step_height = self._current_stair_targets()
+        normalized_rise = torch.clamp(
+            self.foot_contact_height_delta
+            / torch.clamp(step_height.unsqueeze(1), min=0.02),
+            0.0,
+            1.0,
+        )
+        upright = (-self.projected_gravity[:, 2] > 0.80).float()
+        # This is a discrete landing event, so cancel reward preparation's dt.
+        return torch.sum(normalized_rise, dim=1) * upright / self.dt
+
     def _reward_stairs_success(self):
         # One-shot terminal event; see the dt note above.
         return self.top_reached_buf.float() / self.dt
@@ -646,9 +745,25 @@ class N2StairsEnv(N2Env):
         return (active & slow & ~self.top_reached_buf).float()
 
     def _reward_stairs_double_flight(self):
-        grace_steps = int(self.cfg.env.progress_grace_s / self.dt)
         both_airborne = ~torch.any(self.contacts, dim=1)
-        return (both_airborne & (self.episode_length_buf > grace_steps)).float()
+        self.double_flight_time += self.dt
+        self.double_flight_time *= both_airborne.float()
+        allowed = float(self.cfg.env.max_double_flight_s)
+        severity = torch.clamp(
+            (self.double_flight_time - allowed) / max(allowed, self.dt),
+            min=0.0,
+            max=1.0,
+        )
+        grace_steps = int(self.cfg.env.flight_grace_s / self.dt)
+        return severity * (self.episode_length_buf > grace_steps).float()
+
+    def _reward_stairs_single_support(self):
+        """Prefer a moving single-support gait over dual-foot hopping."""
+        contact_filt = torch.logical_or(self.contacts, self.last_contacts)
+        single_support = torch.sum(contact_filt.int(), dim=1) == 1
+        moving_forward = self.root_states[:, 7] > 0.02
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return (single_support & moving_forward & upright).float()
 
     def _reward_stairs_swing_clearance(self):
         _, _, step_height = self._current_stair_targets()
@@ -699,11 +814,21 @@ class N2StairsEnv(N2Env):
     def _reward_feet_air_time(self):
         contact_filt = torch.logical_or(self.contacts, self.last_contacts)
         self.feet_air_time += self.dt
-        first_contact = contact_filt & (self.feet_air_time > 0.0)
+        first_contact = self.contacts & ~self.last_contacts
+        one_landing = torch.sum(first_contact.int(), dim=1) == 1
+        opposite_was_supported = torch.flip(self.last_contacts, dims=[1])
+        alternating_landing = (
+            first_contact
+            & opposite_was_supported
+            & one_landing.unsqueeze(1)
+        )
         reward = torch.sum(
-            torch.clamp(self.feet_air_time - 0.15, min=0.0, max=0.35)
-            * first_contact.float(),
+            torch.clamp(self.feet_air_time - 0.10, min=0.0, max=0.25)
+            * alternating_landing.float(),
             dim=1,
         )
         self.feet_air_time *= ~contact_filt
-        return reward * (self.root_states[:, 7] > 0.03).float()
+        moving = (self.root_states[:, 7] > 0.02).float()
+        upright = (-self.projected_gravity[:, 2] > 0.80).float()
+        # Landing bonus is an event, so cancel reward preparation's dt.
+        return reward * moving * upright / self.dt

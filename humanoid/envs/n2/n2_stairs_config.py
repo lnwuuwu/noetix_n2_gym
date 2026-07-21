@@ -34,8 +34,15 @@ class N2StairsCfg(N2_18DofCfg):
         # Progress watchdog. A fall, top completion, or prolonged lack of
         # forward progress ends an episode before the 30 s timeout.
         progress_grace_s = 2.0
-        stall_timeout_s = 4.0
-        progress_epsilon = 0.06
+        # Give an exploratory policy time to place a foot on the first riser;
+        # 4 s caused nearly every early episode to reset at the stair face.
+        stall_timeout_s = 6.0
+        progress_epsilon = 0.04
+
+        # A brief contact-filter gap is harmless, but sustained double flight
+        # is a jump rather than the continuous-support gait wanted here.
+        flight_grace_s = 0.5
+        max_double_flight_s = 0.08
 
     class viewer(N2_18DofCfg.viewer):
         # A close side view of the launch platform and first stair flight.
@@ -169,6 +176,7 @@ class N2StairsCfg(N2_18DofCfg):
             stairs_forward_progress = 2.0
             # Event functions cancel the framework's dt multiplier, so these
             # are actual per-riser / terminal magnitudes rather than rates.
+            stairs_foot_step_progress = 1.0
             stairs_vertical_progress = 1.0
             stairs_success = 25.0
             termination = -10.0
@@ -176,16 +184,18 @@ class N2StairsCfg(N2_18DofCfg):
             # Balance, posture, and anti-cheating terms.
             orientation = 1.0
             base_height = -8.0
-            lin_vel_z = -1.0
+            lin_vel_z = -2.0
             ang_vel_xy = -0.10
             stairs_lateral_drift = -1.0
             stairs_no_progress = -2.0
-            stairs_double_flight = -0.50
+            stairs_double_flight = -4.0
+            stairs_single_support = 0.80
 
-            # Swing and stable stair contact. Air time is intentionally small.
-            feet_air_time = 0.15
+            # Only an alternating landing with the other foot supporting can
+            # receive the air-time event reward; simultaneous landings cannot.
+            feet_air_time = 0.25
             stairs_swing_clearance = 0.25
-            stairs_stable_contact = 0.50
+            stairs_stable_contact = 0.75
             contact_no_vel = -1.0
             feet_contact_forces = -0.01
             collision = -2.0
@@ -240,7 +250,7 @@ class N2StairsCfgPPO(N2_18DofCfgPPO):
         # classify many freshly reset environments as stalled.
         init_at_random_ep_len = False
         experiment_name = "n2_stairs"
-        run_name = "baseline"
+        run_name = "baseline_gait_v2"
 
 
 class N2StairsRobustCfg(N2StairsCfg):
