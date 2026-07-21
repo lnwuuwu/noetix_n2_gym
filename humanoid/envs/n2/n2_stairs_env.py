@@ -177,6 +177,24 @@ class N2StairsEnv(N2Env):
         )
         return noise_vec
 
+    def _reshape_critic_feature(self, name, value, expected_width):
+        """Return one privileged-observation component as an ``(N, F)`` matrix."""
+        raw_shape = tuple(value.shape)
+        if value.shape[0] != self.num_envs:
+            raise RuntimeError(
+                "Critic feature '{}' has {} environments, expected {}".format(
+                    name, value.shape[0], self.num_envs
+                )
+            )
+        value = value.reshape(self.num_envs, -1)
+        if value.shape[1] != expected_width:
+            raise RuntimeError(
+                "Critic feature '{}' has width {}, expected {} (raw shape {})".format(
+                    name, value.shape[1], expected_width, raw_shape
+                )
+            )
+        return value
+
     def compute_observations(self):
         proprio = torch.cat(
             (
@@ -194,23 +212,33 @@ class N2StairsEnv(N2Env):
             -1.0,
             1.0,
         ) * self.obs_scales.height_measurements
+        critic_height_count = len(self.cfg.terrain.measured_points_x) * len(
+            self.cfg.terrain.measured_points_y
+        )
+        all_heights = self._reshape_critic_feature(
+            "terrain_heights", all_heights, critic_height_count
+        )
         actor_heights = all_heights[:, self.actor_height_indices]
         obs_now = torch.cat((proprio, actor_heights), dim=-1)
 
+        critic_features = (
+            ("proprio", proprio, self._PROPRIO_OBS),
+            ("base_lin_vel", self.base_lin_vel * self.obs_scales.lin_vel, 3),
+            ("payload", self.payload * 0.5, 1),
+            ("friction", self.friction_coeffs, 1),
+            ("restitution", self.restitution_coeffs, 1),
+            ("kp_factor", self.Kp_factors, self.num_actions),
+            ("kd_factor", self.Kd_factors, self.num_actions),
+            ("motor_strength", self.motor_strength, self.num_actions),
+            ("foot_contacts", self.contacts, len(self.feet_indices)),
+            ("terrain_heights", all_heights, critic_height_count),
+        )
         self.privileged_obs_buf = torch.cat(
-            (
-                proprio,
-                self.base_lin_vel * self.obs_scales.lin_vel,
-                self.payload * 0.5,
-                self.friction_coeffs,
-                self.restitution_coeffs,
-                self.Kp_factors,
-                self.Kd_factors,
-                self.motor_strength,
-                self.contacts,
-                all_heights,
+            tuple(
+                self._reshape_critic_feature(name, value, width)
+                for name, value, width in critic_features
             ),
-            dim=-1,
+            dim=1,
         )
 
         if obs_now.shape[1] != self.cfg.env.num_single_obs:

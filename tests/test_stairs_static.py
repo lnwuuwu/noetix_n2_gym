@@ -464,6 +464,30 @@ class SourceCompatibilityTests(unittest.TestCase):
         sim2sim_source = (ROOT / "sim2sim" / "sim2sim.py").read_text()
         self.assertIn("seen_ground_plane", sim2sim_source)
 
+    def test_randomized_surface_properties_stay_two_dimensional(self):
+        base_source = (
+            ROOT / "humanoid" / "envs" / "base" / "legged_robot.py"
+        ).read_text()
+        self.assertGreaterEqual(
+            base_source.count(
+                "torch.randint(0, num_buckets, (self.num_envs,))"
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            base_source.count("torch.randint(0, num_buckets, (len(env_ids),))"),
+            2,
+        )
+        stairs_source = (
+            ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        ).read_text()
+        self.assertIn("def _reshape_critic_feature", stairs_source)
+        self.assertIn('("friction", self.friction_coeffs, 1)', stairs_source)
+        self.assertIn(
+            '("foot_contacts", self.contacts, len(self.feet_indices))',
+            stairs_source,
+        )
+
     def test_latest_checkpoint_resolution_ignores_report_directories(self):
         fake_isaacgym = types.ModuleType("isaacgym")
         fake_isaacgym.gymapi = types.ModuleType("isaacgym.gymapi")

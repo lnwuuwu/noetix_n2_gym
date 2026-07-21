@@ -315,11 +315,13 @@ class LeggedRobot(BaseTask):
                 # prepare friction randomization
                 friction_range = self.cfg.domain_rand.friction_range
                 num_buckets = 256
-                bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
+                # Indexing a (num_buckets, 1) table with (N, 1) indices
+                # produces an unintended (N, 1, 1) tensor.  Keep the bucket
+                # ids one-dimensional so privileged observations remain
+                # feature matrices with shape (N, 1).
+                bucket_ids = torch.randint(0, num_buckets, (self.num_envs,))
                 friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets, 1), device='cpu')
                 friction_coeffs = friction_buckets[bucket_ids]
-                # Keep privileged randomization observations two-dimensional
-                # (N, 1); N2Env concatenates them with other feature matrices.
                 self.friction_coeffs = friction_coeffs.to(self.device)
 
             for s in range(len(props)):
@@ -330,7 +332,7 @@ class LeggedRobot(BaseTask):
                 # prepare restitution randomization
                 restitution_range = self.cfg.domain_rand.restitution_range
                 num_buckets = 256
-                bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
+                bucket_ids = torch.randint(0, num_buckets, (self.num_envs,))
                 restitution_buckets = torch_rand_float(restitution_range[0], restitution_range[1], (num_buckets, 1), device='cpu')
                 restitution_coeffs = restitution_buckets[bucket_ids]
                 self.restitution_coeffs = restitution_coeffs.to(self.device)
@@ -388,12 +390,12 @@ class LeggedRobot(BaseTask):
     def _refresh_actor_rigid_shape_props(self, env_ids):
         num_buckets = 256
         if self.cfg.domain_rand.randomize_friction:
-            bucket_ids = torch.randint(0, num_buckets, (len(env_ids), 1))
+            bucket_ids = torch.randint(0, num_buckets, (len(env_ids),))
             friction_buckets = torch_rand_float(self.cfg.domain_rand.friction_range[0], self.cfg.domain_rand.friction_range[1], (num_buckets, 1), device='cpu')
             friction_coeffs = friction_buckets[bucket_ids]
             self.friction_coeffs[env_ids] = friction_coeffs.to(self.device)
         if self.cfg.domain_rand.randomize_restitution:
-            bucket_ids = torch.randint(0, num_buckets, (len(env_ids), 1))
+            bucket_ids = torch.randint(0, num_buckets, (len(env_ids),))
             restitution_buckets = torch_rand_float(self.cfg.domain_rand.restitution_range[0], self.cfg.domain_rand.restitution_range[1], (num_buckets, 1), device='cpu')
             restitution_coeffs = restitution_buckets[bucket_ids]
             self.restitution_coeffs[env_ids] = restitution_coeffs.to(self.device)
