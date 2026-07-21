@@ -24,9 +24,14 @@ class BaseTask():
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
+        # Headless training normally disables graphics.  Evaluation tools can
+        # explicitly keep the graphics device for off-screen camera sensors
+        # without creating Isaac Gym's Vulkan viewer window.
+        self.enable_camera_sensors = bool(
+            getattr(cfg.env, "enable_camera_sensors", False)
+        )
         self.graphics_device_id = self.sim_device_id
-        if self.headless == True:
+        if self.headless and not self.enable_camera_sensors:
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs
@@ -85,6 +90,22 @@ class BaseTask():
             camera_handle = self.gym.create_camera_sensor(
                 self.envs[0], camera_properties)
             self.camera_handle = camera_handle
+        elif self.enable_camera_sensors:
+            # Create off-screen sensors before the first simulation step.  A
+            # headless evaluation script can render this camera without the
+            # Vulkan viewer/X11 path used above.
+            camera_properties = gymapi.CameraProperties()
+            camera_properties.width = getattr(cfg.env, "camera_width", 960)
+            camera_properties.height = getattr(cfg.env, "camera_height", 540)
+            camera_properties.horizontal_fov = getattr(
+                cfg.env, "camera_horizontal_fov", 75.0
+            )
+            camera_properties.enable_tensors = False
+            self.camera_handle = self.gym.create_camera_sensor(
+                self.envs[0], camera_properties
+            )
+            if self.camera_handle < 0:
+                raise RuntimeError("Failed to create the off-screen camera sensor")
         else:
             # Headless training does not render or record frames. Avoid
             # allocating an unused camera sensor on a graphics-disabled sim.

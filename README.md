@@ -18,7 +18,17 @@ python humanoid/scripts/play.py --task=n2_stairs --resume \
 python humanoid/scripts/eval_stairs.py --task=n2_stairs --resume \
   --load_run=<run_name_or_absolute_path> --checkpoint=-1 \
   --num_envs=128 --headless
+
+# Real-time browser view (works when the Vulkan viewer is black over VNC)
+python humanoid/scripts/stream_stairs.py --task=n2_stairs --resume \
+  --load_run=<run_name_or_absolute_path> --checkpoint=-1 \
+  --terrain_level=0 --command_speed=0.18 --stream_port=8080 --headless
 ```
+
+The stream listens only on server localhost. Forward it from the local machine
+with `ssh -N -L 8080:127.0.0.1:8080 -p <ssh_port> root@<ssh_host>`, then open
+`http://127.0.0.1:8080/` in a browser. This uses an off-screen Isaac Gym camera
+sensor and does not require VNC or an interactive Vulkan viewer.
 
 See [docs/AUTODL_STAIRS.md](docs/AUTODL_STAIRS.md) for the implementation
 audit, observation/reward definitions, staged randomization, checkpoint

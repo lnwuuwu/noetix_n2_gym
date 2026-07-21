@@ -424,16 +424,35 @@ class Sim2SimConsistencyTests(unittest.TestCase):
 class SourceCompatibilityTests(unittest.TestCase):
     def test_modified_python_sources_compile_without_importing_isaacgym(self):
         paths = [
+            "humanoid/envs/base/base_task.py",
             "humanoid/envs/n2/n2_stairs_config.py",
             "humanoid/envs/n2/n2_stairs_env.py",
             "humanoid/scripts/eval_stairs.py",
             "humanoid/scripts/play.py",
+            "humanoid/scripts/stream_stairs.py",
             "humanoid/utils/stairs_terrain.py",
             "sim2sim/sim2sim.py",
         ]
         for relative_path in paths:
             path = ROOT / relative_path
             compile(path.read_text(), str(path), "exec")
+
+    def test_browser_stream_uses_headless_camera_sensor(self):
+        base_source = (
+            ROOT / "humanoid" / "envs" / "base" / "base_task.py"
+        ).read_text()
+        stream_source = (
+            ROOT / "humanoid" / "scripts" / "stream_stairs.py"
+        ).read_text()
+        self.assertIn('getattr(cfg.env, "enable_camera_sensors", False)', base_source)
+        self.assertIn("if self.headless and not self.enable_camera_sensors", base_source)
+        self.assertIn("create_camera_sensor", base_source)
+        self.assertIn("env_cfg.env.enable_camera_sensors = True", stream_source)
+        self.assertIn("args.headless = True", stream_source)
+        self.assertIn("args.num_envs = 1", stream_source)
+        self.assertIn("render_all_camera_sensors", stream_source)
+        self.assertIn("get_camera_image", stream_source)
+        self.assertIn('ThreadingHTTPServer(("127.0.0.1", args.stream_port)', stream_source)
 
     def test_ppo_storage_and_checkpoint_iteration_fixes_are_present(self):
         ppo_source = (ROOT / "humanoid" / "algo" / "ppo" / "ppo.py").read_text()

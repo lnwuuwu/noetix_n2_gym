@@ -331,6 +331,54 @@ checkpoint 编号表示已经完成的 PPO iteration 数。恢复会加载优化
 
 ## 7. 可视化和批量评估
 
+### 7.1 推荐：浏览器实时画面（容器/VNC 环境）
+
+Isaac Gym Preview 4 的交互 Viewer 使用 Vulkan。在普通 TurboVNC/Xvnc
+桌面中，桌面和 OpenGL 测试可能正常，但 Viewer 仍可能是全黑窗口。项目提供的
+`stream_stairs.py` 不创建 Viewer，而是让 Isaac Gym GPU 离屏相机直接生成画面并通过
+MJPEG 实时发送，因此无需在容器中配置 GPU-backed Xorg。
+
+先在服务器安装轻量 JPEG 编码依赖（已经安装时会直接提示 satisfied）：
+
+```bash
+conda activate n2
+python -m pip install Pillow
+```
+
+服务器终端运行（进程必须保持运行）：
+
+```bash
+cd /root/autodl-tmp/noetix_n2_gym
+conda activate n2
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:/usr/local/cuda/lib64"
+python humanoid/scripts/stream_stairs.py \
+  --task=n2_stairs \
+  --resume \
+  --load_run=/root/autodl-tmp/noetix_n2_gym/logs/n2_stairs/<run目录> \
+  --checkpoint=-1 \
+  --headless \
+  --sim_device=cuda:0 \
+  --rl_device=cuda:0 \
+  --terrain_level=0 \
+  --command_speed=0.18 \
+  --stream_port=8080 \
+  --seed=42
+```
+
+然后在本地电脑另开一个终端建立隧道：
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 \
+  -p 21508 root@connect.cqa1.seetacloud.com
+```
+
+SSH 终端登录后一直没有新输出是正常的，表示隧道正在工作。保持它不关闭，在本地浏览器
+打开 `http://127.0.0.1:8080/` 即可实时观看。服务器端按 `Ctrl-C` 停止仿真。
+HTTP 服务只绑定服务器 `127.0.0.1`，不会直接暴露公网端口。需要降低带宽时可增加
+`--camera_width=640 --camera_height=360 --jpeg_quality=65`。
+
+### 7.2 交互 Viewer（仅 GPU 图形桌面可用时）
+
 10 cm 台阶、0.25 m/s、单机器人可视化：
 
 ```bash
@@ -347,6 +395,8 @@ python humanoid/scripts/play.py \
   --command_speed=0.25 \
   --seed=42
 ```
+
+### 7.3 批量指标
 
 5 个高度、128 环境、每个环境 3 回合的 headless 统计：
 
