@@ -231,6 +231,10 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertLessEqual(
                 walk_cfg.env.success_max_double_flight_fraction, 0.08
             )
+            self.assertLessEqual(walk_cfg.env.top_speed_tolerance, 0.06)
+            self.assertLessEqual(
+                walk_cfg.env.success_max_mean_command_error, 0.06
+            )
             self.assertEqual(train_cfg.runner.experiment_name, "n2_stairs")
             self.assertEqual(
                 walk_train_cfg.runner.experiment_name, "n2_stairs_walk"
@@ -368,6 +372,7 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertEqual(walk_missing, [])
         for required_reward in (
             "stairs_overspeed",
+            "stairs_command_speed_error",
             "stairs_phase_contact",
             "stairs_phase_contact_mismatch",
             "stairs_heading_alignment",

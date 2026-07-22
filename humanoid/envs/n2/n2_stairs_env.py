@@ -664,6 +664,10 @@ class N2StairsEnv(N2Env):
             elapsed_steps = torch.clamp(
                 self.episode_length_buf.float(), min=1.0
             )
+            command_consistent = (
+                self.command_error_sum / elapsed_steps
+                <= float(self.cfg.env.success_max_mean_command_error)
+            )
             gait_consistent = (
                 self.phase_match_sum / elapsed_steps
                 >= float(self.cfg.env.success_min_phase_contact_match)
@@ -675,6 +679,7 @@ class N2StairsEnv(N2Env):
                 centered
                 & facing_forward
                 & command_matched
+                & command_consistent
                 & path_consistent
                 & gait_consistent
             )
@@ -1010,7 +1015,8 @@ class N2StairsEnv(N2Env):
         error = torch.sum(
             torch.square(self.commands[:, :2] - world_velocity), dim=1
         )
-        score = torch.exp(-5.0 * error)
+        tracking_sharpness = 20.0 if self.enforce_walk_gait else 5.0
+        score = torch.exp(-tracking_sharpness * error)
         target = torch.clamp(self.commands[:, 0], min=0.05)
         progress_gate = torch.clamp(
             world_velocity[:, 0] / (0.5 * target), min=0.0, max=1.0
@@ -1025,12 +1031,16 @@ class N2StairsEnv(N2Env):
         return score * progress_gate * upright * supported * heading_gate
 
     def _reward_stairs_overspeed(self):
-        allowed_speed = 1.35 * self.commands[:, 0] + 0.05
+        allowed_speed = 1.15 * self.commands[:, 0] + 0.02
         excess_forward = torch.clamp(
             self.root_states[:, 7] - allowed_speed, min=0.0
         )
         lateral_speed = self.root_states[:, 8]
         return torch.square(excess_forward) + torch.square(lateral_speed)
+
+    def _reward_stairs_command_speed_error(self):
+        forward_error = self.root_states[:, 7] - self.commands[:, 0]
+        return torch.square(forward_error)
 
     def _reward_stairs_vertical_progress(self):
         _, _, step_height = self._current_stair_targets()

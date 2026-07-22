@@ -316,7 +316,8 @@ class N2StairsWalkCfg(N2StairsCfg):
         # A completion must settle on the top while centered, facing +X, and
         # moving close to the command. Reaching the height alone is not enough.
         top_dwell_s = 0.30
-        top_speed_tolerance = 0.15
+        top_speed_tolerance = 0.06
+        success_max_mean_command_error = 0.06
         success_lateral_tolerance = 0.12
         success_yaw_tolerance = 0.15
         success_max_lateral_deviation = 0.20
@@ -352,7 +353,8 @@ class N2StairsWalkCfg(N2StairsCfg):
             tracking_lin_vel = 4.0
             tracking_ang_vel = 0.5
             stairs_forward_progress = 0.75
-            stairs_overspeed = -8.0
+            stairs_command_speed_error = -12.0
+            stairs_overspeed = -30.0
 
             # Completion remains useful but no longer dominates several
             # seconds of gait, speed, and alignment penalties.
