@@ -306,9 +306,12 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertLessEqual(
                 walk_cfg.env.success_max_double_flight_fraction, 0.08
             )
-            self.assertLessEqual(walk_cfg.env.top_speed_tolerance, 0.06)
+            self.assertGreater(
+                walk_cfg.env.completion_dwell_s,
+                walk_cfg.env.top_dwell_s,
+            )
             self.assertLessEqual(
-                walk_cfg.env.success_max_mean_command_error, 0.06
+                walk_cfg.env.success_max_mean_speed_bias, 0.05
             )
             self.assertGreaterEqual(
                 walk_cfg.env.success_min_alternating_tread_count, 4
@@ -494,6 +497,10 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_sagittal_foot_phase_error",
             "stairs_next_tread_target",
             "stairs_next_tread_target_error",
+            "stairs_foothold_lateral",
+            "stairs_foothold_lateral_error",
+            "stairs_completion",
+            "stairs_curriculum_completion",
             "stairs_heading_alignment",
             "stairs_leg_alignment",
             "stairs_feet_yaw",
@@ -508,9 +515,9 @@ class StairConfigurationTests(unittest.TestCase):
         ):
             self.assertIn(required_reward, walk_scales)
 
-        self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 5.0)
-        self.assertLessEqual(walk_scales["stairs_repeated_lead"], -5.0)
-        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -5.0)
+        self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 7.0)
+        self.assertLessEqual(walk_scales["stairs_repeated_lead"], -7.0)
+        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -7.0)
         self.assertLessEqual(walk_scales["stairs_overstride"], -8.0)
         self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
         self.assertGreater(walk_scales["stairs_sagittal_foot_phase"], 0.0)
@@ -518,6 +525,19 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(walk_scales["stairs_next_tread_target"], 3.5)
         self.assertLessEqual(
             walk_scales["stairs_next_tread_target_error"], -2.5
+        )
+        self.assertGreater(walk_scales["stairs_foothold_lateral"], 0.0)
+        self.assertLess(
+            walk_scales["stairs_foothold_lateral_error"], 0.0
+        )
+        self.assertGreater(walk_scales["stairs_completion"], 0.0)
+        self.assertGreater(
+            walk_scales["stairs_curriculum_completion"],
+            walk_scales["stairs_completion"],
+        )
+        self.assertGreater(
+            walk_scales["stairs_success"],
+            walk_scales["stairs_curriculum_completion"],
         )
         self.assertLess(
             walk_env["next_tread_target_start_phase"],
@@ -556,10 +576,21 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("self.stair_start_x[levels, types]", stairs_source)
         self.assertIn("self.last_advanced_tread + 1", stairs_source)
         self.assertIn("landing_weight = torch.square", stairs_source)
+        self.assertIn("def _next_tread_swing_state", stairs_source)
+        self.assertIn("actually_airborne", stairs_source)
+        self.assertIn("opposite_supported", stairs_source)
+        self.assertIn("def _next_tread_lateral_target_state", stairs_source)
+        self.assertIn("self.completion_buf.float() / self.dt", stairs_source)
         self.assertIn(
-            "success = self._terrain_curriculum_success_mask(env_ids) & valid",
+            "self.curriculum_completion_buf.float() / self.dt",
             stairs_source,
         )
+        self.assertIn("success_max_mean_speed_bias", stairs_source)
+        self.assertIn(
+            "success = self.curriculum_completion_buf[env_ids] & valid",
+            stairs_source,
+        )
+        self.assertIn('"stairs_completion_rate"', stairs_source)
         self.assertIn('"stairs_curriculum_pass_rate"', stairs_source)
         self.assertIn(
             "self.tread_advance_count + self.same_tread_join_count",
@@ -602,6 +633,8 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("env_cfg.env.test = False", eval_source)
         self.assertIn('"n2_stairs_walk"', eval_source)
         for metric in (
+            "completion_rate",
+            "curriculum_completion_rate",
             "mean_forward_speed_m_s",
             "mean_command_error_m_s",
             "mean_phase_contact_match",

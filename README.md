@@ -7,7 +7,8 @@ The repository includes isolated `n2_stairs`, `n2_stairs_robust`, and
 `n2_stairs_walk` is the recommended task when a geometric stair-completion
 policy learns to bunny-hop or drift diagonally: it adds a deployable gait
 clock, velocity/centerline/heading observations, successive-tread foot
-alternation, swing-knee/arm coordination, and strict path/success checks.
+alternation, phase-aware X/Y footholds, swing-knee/arm coordination, and
+separate physical-completion, curriculum, and strict-success checks.
 Legacy strict-task checkpoints are retimed gradually rather than receiving an
 abrupt gait-clock change on their first resumed step.
 

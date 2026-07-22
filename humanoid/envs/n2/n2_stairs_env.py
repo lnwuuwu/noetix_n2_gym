@@ -116,6 +116,18 @@ class N2StairsEnv(N2Env):
                     len(self.feet_indices)
                 )
             )
+        foot_body_names = [
+            self.body_names[index] for index in self.feet_indices.tolist()
+        ]
+        if not (
+            foot_body_names[0].startswith("L_")
+            and foot_body_names[1].startswith("R_")
+        ):
+            raise RuntimeError(
+                "n2_stairs expects [left, right] foot order, found {}".format(
+                    foot_body_names
+                )
+            )
         self.contacts = torch.zeros(
             self.num_envs,
             len(self.feet_indices),
@@ -263,6 +275,13 @@ class N2StairsEnv(N2Env):
             self.num_envs, dtype=torch.bool, device=self.device
         )
         self.top_position_reached_buf = torch.zeros_like(self.top_reached_buf)
+        self.completion_buf = torch.zeros_like(self.top_reached_buf)
+        self.curriculum_completion_buf = torch.zeros_like(
+            self.top_reached_buf
+        )
+        self.completion_stable_time = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.stall_buf = torch.zeros_like(self.top_reached_buf)
         self.fall_event_buf = torch.zeros_like(self.top_reached_buf)
         self.episode_started = torch.zeros_like(self.top_reached_buf)
@@ -277,6 +296,12 @@ class N2StairsEnv(N2Env):
         # Persistent per-environment results are consumed by eval_stairs.py
         # after reset_idx() has already placed the robot in its next episode.
         self.last_episode_success = torch.zeros_like(self.best_forward_progress)
+        self.last_episode_completion = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_curriculum_completion = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.last_episode_top_reached = torch.zeros_like(
             self.best_forward_progress
         )
@@ -851,6 +876,43 @@ class N2StairsEnv(N2Env):
         score, _ = self._sagittal_foot_phase_state()
         return score
 
+    def _next_tread_swing_state(self):
+        """Return the next foot and a cheat-resistant single-support mask."""
+        expected_foot = torch.clamp(
+            1 - self.last_advanced_foot, min=0, max=1
+        )
+        scheduled_swing = torch.gather(
+            (~self.desired_contacts).long(),
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1).bool()
+        contact_filt = torch.logical_or(self.contacts, self.last_contacts)
+        actually_airborne = torch.gather(
+            (~contact_filt).long(),
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1).bool()
+        opposite_foot = 1 - expected_foot
+        opposite_supported = torch.gather(
+            contact_filt.long(),
+            1,
+            opposite_foot.unsqueeze(1),
+        ).squeeze(1).bool()
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = (
+            (self.last_advanced_tread >= 1)
+            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+            & scheduled_swing
+            & actually_airborne
+            & opposite_supported
+            & (self.episode_length_buf > grace_steps)
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return expected_foot, active
+
     def _next_tread_foot_target_state(self):
         """Target the center of the next riser with the opposite swing foot.
 
@@ -872,9 +934,7 @@ class N2StairsEnv(N2Env):
             next_tread.float() - 0.5
         ) * step_width
 
-        expected_foot = torch.clamp(
-            1 - self.last_advanced_foot, min=0, max=1
-        )
+        expected_foot, active = self._next_tread_swing_state()
         expected_foot_x = torch.gather(
             self.feet_pos[:, :, 0], 1, expected_foot.unsqueeze(1)
         ).squeeze(1)
@@ -886,11 +946,6 @@ class N2StairsEnv(N2Env):
         sharpness = float(self.cfg.env.next_tread_target_sharpness)
         score = torch.exp(-sharpness * torch.square(normalized_error))
 
-        expected_is_swing = torch.gather(
-            (~self.desired_contacts).long(),
-            1,
-            expected_foot.unsqueeze(1),
-        ).squeeze(1).bool()
         phase = self._get_gait_phase()
         right_swing_progress = 2.0 * phase
         left_swing_progress = 2.0 * (phase - 0.5)
@@ -912,18 +967,32 @@ class N2StairsEnv(N2Env):
         landing_weight = torch.square(landing_weight) * (
             3.0 - 2.0 * landing_weight
         )
-        grace_steps = int(
-            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
-        )
-        active = (
-            (self.last_advanced_tread >= 1)
-            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
-            & expected_is_swing
-            & (self.episode_length_buf > grace_steps)
-            & (self.root_states[:, 7] > 0.03)
-            & (-self.projected_gravity[:, 2] > 0.80)
-        )
         return score, normalized_error, landing_weight * active.float()
+
+    def _next_tread_lateral_target_state(self):
+        """Keep the scheduled swing foot at its natural side of the tread."""
+        expected_foot, active = self._next_tread_swing_state()
+        expected_foot_y = torch.gather(
+            self.feet_pos[:, :, 1], 1, expected_foot.unsqueeze(1)
+        ).squeeze(1)
+        lateral_offset = max(
+            float(self.cfg.env.foothold_lateral_offset), 1.0e-3
+        )
+        target_sign = torch.where(
+            expected_foot == 0,
+            torch.ones_like(expected_foot_y),
+            -torch.ones_like(expected_foot_y),
+        )
+        target_y = self.env_origins[:, 1] + target_sign * lateral_offset
+        normalized_error = (expected_foot_y - target_y) / lateral_offset
+        error_clip = float(self.cfg.env.foothold_lateral_error_clip)
+        normalized_error = torch.clamp(
+            normalized_error, min=-error_clip, max=error_clip
+        )
+        sharpness = float(self.cfg.env.foothold_lateral_sharpness)
+        score = torch.exp(-sharpness * torch.square(normalized_error))
+
+        return score, normalized_error, active.float()
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
@@ -1015,17 +1084,23 @@ class N2StairsEnv(N2Env):
             dim=1,
         )
         self.top_position_reached_buf[:] = reached_position_and_height
-        stable_top = self.top_position_reached_buf & upright & stable_support
+        physical_stable_top = (
+            self.top_position_reached_buf & upright & stable_support
+        )
+        stable_top = physical_stable_top.clone()
         if self.enforce_walk_gait:
+            self.completion_stable_time += self.dt
+            self.completion_stable_time *= physical_stable_top.float()
+            self.completion_buf[:] = physical_stable_top & (
+                self.completion_stable_time
+                >= float(self.cfg.env.completion_dwell_s)
+            )
             centered = torch.abs(lateral_position) <= float(
                 self.cfg.env.success_lateral_tolerance
             )
             facing_forward = torch.abs(yaw_error) <= float(
                 self.cfg.env.success_yaw_tolerance
             )
-            command_matched = torch.abs(
-                forward_speed - self.commands[:, 0]
-            ) <= float(self.cfg.env.top_speed_tolerance)
             path_consistent = (
                 self.max_lateral_deviation
                 <= float(self.cfg.env.success_max_lateral_deviation)
@@ -1036,9 +1111,10 @@ class N2StairsEnv(N2Env):
             elapsed_steps = torch.clamp(
                 self.episode_length_buf.float(), min=1.0
             )
+            mean_forward_speed = self.forward_speed_sum / elapsed_steps
             command_consistent = (
-                self.command_error_sum / elapsed_steps
-                <= float(self.cfg.env.success_max_mean_command_error)
+                torch.abs(mean_forward_speed - self.commands[:, 0])
+                <= float(self.cfg.env.success_max_mean_speed_bias)
             )
             gait_consistent = (
                 self.phase_match_sum / elapsed_steps
@@ -1086,7 +1162,6 @@ class N2StairsEnv(N2Env):
             stable_top &= (
                 centered
                 & facing_forward
-                & command_matched
                 & command_consistent
                 & path_consistent
                 & gait_consistent
@@ -1097,9 +1172,18 @@ class N2StairsEnv(N2Env):
             self.top_reached_buf[:] = stable_top & (
                 self.top_stable_time >= float(self.cfg.env.top_dwell_s)
             )
+            # Strict success is also a physical completion, even though its
+            # shorter dwell may fire before the non-strict completion timer.
+            self.completion_buf |= self.top_reached_buf
         else:
             self.top_stable_time[:] = 0.0
+            self.completion_stable_time[:] = 0.0
+            self.completion_buf[:] = stable_top
             self.top_reached_buf[:] = stable_top
+
+        self.curriculum_completion_buf[:] = (
+            self._terrain_curriculum_success_mask(None)
+        )
 
         grace_steps = int(self.cfg.env.progress_grace_s / self.dt)
         stall_steps = int(self.cfg.env.stall_timeout_s / self.dt)
@@ -1107,7 +1191,7 @@ class N2StairsEnv(N2Env):
             self.episode_length_buf > grace_steps,
             (self.episode_length_buf - self.last_progress_step) > stall_steps,
         )
-        self.stall_buf &= ~self.top_reached_buf
+        self.stall_buf &= ~self.completion_buf
 
     def check_termination(self):
         super().check_termination()
@@ -1125,50 +1209,53 @@ class N2StairsEnv(N2Env):
         # Keep the raw position/height flag for evaluation: reaching the top
         # and falling there should count as top_reached but not as success.
         self.top_reached_buf &= ~physical_failure
+        self.completion_buf &= ~physical_failure
+        self.curriculum_completion_buf &= ~physical_failure
         self.stall_buf &= ~physical_failure
         self.path_failure_buf &= ~physical_failure
-        # Reaching the top is a true terminal state and must not receive
-        # timeout bootstrapping in PPO. A physical failure on the final time
-        # step is likewise a failure, not a benign timeout.
-        self.time_out_buf &= ~self.top_reached_buf
+        # A stable physical completion is a true terminal state and must not
+        # receive timeout bootstrapping in PPO. A physical failure on the final
+        # time step is likewise a failure, not a benign timeout.
+        self.time_out_buf &= ~self.completion_buf
         self.time_out_buf &= ~physical_failure
         self.reset_buf |= self.stall_buf
         self.reset_buf |= self.path_failure_buf
-        self.reset_buf |= self.top_reached_buf
+        self.reset_buf |= self.completion_buf
 
     def _terrain_curriculum_success_mask(self, env_ids):
         """Return the training promotion gate without weakening evaluation."""
+        index = slice(None) if env_ids is None else env_ids
         if not self.enforce_walk_gait:
-            return self.top_reached_buf[env_ids]
+            return self.top_reached_buf[index]
 
         episode_steps = torch.clamp(
-            self.episode_length_buf[env_ids].float(), min=1.0
+            self.episode_length_buf[index].float(), min=1.0
         )
         sequence_denominator = torch.clamp(
-            self.tread_advance_count[env_ids]
-            + self.same_tread_join_count[env_ids],
+            self.tread_advance_count[index]
+            + self.same_tread_join_count[index],
             min=1.0,
         )
         alternating_rate = (
-            self.alternating_tread_count[env_ids] / sequence_denominator
+            self.alternating_tread_count[index] / sequence_denominator
         )
         same_tread_join_rate = (
-            self.same_tread_join_count[env_ids] / sequence_denominator
+            self.same_tread_join_count[index] / sequence_denominator
         )
         skipped_tread_rate = (
-            self.skipped_tread_count[env_ids] / sequence_denominator
+            self.skipped_tread_count[index] / sequence_denominator
         )
-        phase_match = self.phase_match_sum[env_ids] / episode_steps
+        phase_match = self.phase_match_sum[index] / episode_steps
         double_flight_fraction = (
-            self.double_flight_step_count[env_ids] / episode_steps
+            self.double_flight_step_count[index] / episode_steps
         )
 
         return (
-            self.top_position_reached_buf[env_ids]
-            & ~self.fall_event_buf[env_ids]
-            & ~self.path_failure_buf[env_ids]
+            self.completion_buf[index]
+            & ~self.fall_event_buf[index]
+            & ~self.path_failure_buf[index]
             & (
-                self.alternating_tread_count[env_ids]
+                self.alternating_tread_count[index]
                 >= float(
                     self.cfg.env.curriculum_min_alternating_tread_count
                 )
@@ -1199,7 +1286,7 @@ class N2StairsEnv(N2Env):
 
     def _update_terrain_curriculum(self, env_ids):
         valid = self.episode_started[env_ids]
-        success = self._terrain_curriculum_success_mask(env_ids) & valid
+        success = self.curriculum_completion_buf[env_ids] & valid
 
         failure = (
             self.fall_event_buf[env_ids]
@@ -1249,8 +1336,9 @@ class N2StairsEnv(N2Env):
 
         valid = self.episode_started[env_ids].clone()
         success = (self.top_reached_buf[env_ids] & valid).float()
+        completion = (self.completion_buf[env_ids] & valid).float()
         curriculum_pass = (
-            self._terrain_curriculum_success_mask(env_ids) & valid
+            self.curriculum_completion_buf[env_ids] & valid
         ).float()
         top_reached = (
             self.top_position_reached_buf[env_ids] & valid
@@ -1335,6 +1423,8 @@ class N2StairsEnv(N2Env):
         ) * valid.float()
 
         self.last_episode_success[env_ids] = success
+        self.last_episode_completion[env_ids] = completion
+        self.last_episode_curriculum_completion[env_ids] = curriculum_pass
         self.last_episode_top_reached[env_ids] = top_reached
         self.last_episode_forward_progress[env_ids] = forward
         self.last_episode_climb_height[env_ids] = climb
@@ -1417,6 +1507,7 @@ class N2StairsEnv(N2Env):
         self.extras["episode"].update(
             {
                 "stairs_success_rate": masked_mean(success),
+                "stairs_completion_rate": masked_mean(completion),
                 "stairs_curriculum_pass_rate": masked_mean(curriculum_pass),
                 "stairs_top_rate": masked_mean(top_reached),
                 "stairs_fall_rate": masked_mean(fall),
@@ -1505,6 +1596,7 @@ class N2StairsEnv(N2Env):
         self.same_tread_join_count[env_ids] = 0.0
         self.skipped_tread_count[env_ids] = 0.0
         self.top_stable_time[env_ids] = 0.0
+        self.completion_stable_time[env_ids] = 0.0
         self.path_failure_buf[env_ids] = False
         self.forward_speed_sum[env_ids] = 0.0
         self.command_error_sum[env_ids] = 0.0
@@ -1519,6 +1611,8 @@ class N2StairsEnv(N2Env):
         self.arm_swing_match_sum[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
+        self.completion_buf[env_ids] = False
+        self.curriculum_completion_buf[env_ids] = False
         self.stall_buf[env_ids] = False
         self.fall_event_buf[env_ids] = False
         self.contacts[env_ids] = False
@@ -1799,10 +1893,18 @@ class N2StairsEnv(N2Env):
         # One-shot terminal event; see the dt note above.
         return self.top_reached_buf.float() / self.dt
 
+    def _reward_stairs_completion(self):
+        """Reward a stable physical climb, independent of style gates."""
+        return self.completion_buf.float() / self.dt
+
+    def _reward_stairs_curriculum_completion(self):
+        """Reward completion with the intermediate curriculum gait gates."""
+        return self.curriculum_completion_buf.float() / self.dt
+
     def _reward_termination(self):
         # In this completion task, an unfinished time limit is also a failure
         # even though PPO still bootstraps its critic value at that time limit.
-        failure = self.reset_buf.bool() & ~self.top_reached_buf
+        failure = self.reset_buf.bool() & ~self.completion_buf
         return failure.float() / self.dt
 
     def _reward_stairs_lateral_drift(self):
@@ -1827,7 +1929,13 @@ class N2StairsEnv(N2Env):
             -4.0 * torch.square(lateral_position)
         )
         upright = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
-        return aligned * upright
+        target_speed = torch.clamp(self.commands[:, 0], min=0.05)
+        progress_gate = torch.clamp(
+            self.root_states[:, 7] / (0.5 * target_speed),
+            min=0.0,
+            max=1.0,
+        )
+        return aligned * upright * progress_gate
 
     def _reward_stairs_leg_alignment(self):
         joint_error = self.dof_pos[:, self.leg_alignment_idxs] - (
@@ -1911,6 +2019,16 @@ class N2StairsEnv(N2Env):
             self._next_tread_foot_target_state()
         )
         return torch.square(normalized_error) * target_weight
+
+    def _reward_stairs_foothold_lateral(self):
+        """Reward left/right swing-foot placement around the centerline."""
+        score, _, active = self._next_tread_lateral_target_state()
+        return score * active
+
+    def _reward_stairs_foothold_lateral_error(self):
+        """Penalize crossing or widening the scheduled swing foothold."""
+        _, normalized_error, active = self._next_tread_lateral_target_state()
+        return torch.square(normalized_error) * active
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""

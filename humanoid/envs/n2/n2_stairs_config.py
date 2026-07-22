@@ -327,11 +327,18 @@ class N2StairsWalkCfg(N2StairsCfg):
         gait_reward_grace_s = 0.50
         randomize_gait_phase = True
 
-        # A completion must settle on the top while centered, facing +X, and
-        # moving close to the command. Reaching the height alone is not enough.
+        # Strict natural-gait success must settle on the top while centered,
+        # facing +X, and moving close to the command. Reaching height alone is
+        # recorded separately as raw top reach and physical completion.
         top_dwell_s = 0.30
-        top_speed_tolerance = 0.06
-        success_max_mean_command_error = 0.06
+        # A non-strict physical completion waits slightly longer, giving the
+        # strict gate time to settle before the episode is truncated.
+        completion_dwell_s = 0.60
+        # Natural walking contains within-stride speed oscillation. Acceptance
+        # therefore uses episode mean-speed bias rather than requiring every
+        # instant of the final stride to match the command. Dense rewards still
+        # penalize instantaneous error on every policy step.
+        success_max_mean_speed_bias = 0.05
         success_lateral_tolerance = 0.12
         success_yaw_tolerance = 0.15
         success_max_lateral_deviation = 0.20
@@ -391,6 +398,12 @@ class N2StairsWalkCfg(N2StairsCfg):
         sagittal_foot_phase_error_clip = 2.0
         next_tread_target_sharpness = 2.0
         next_tread_target_error_clip = 2.0
+        # The N2 hip anchors are approximately +/-0.091 m from the centerline.
+        # Targeting that width on each tread prevents crossed or splayed feet
+        # from satisfying an X-only foothold objective.
+        foothold_lateral_offset = 0.09
+        foothold_lateral_sharpness = 2.0
+        foothold_lateral_error_clip = 2.0
         # Preserve a natural early swing and introduce the absolute landing
         # target only after the foot has crossed the stance leg.
         next_tread_target_start_phase = 0.50
@@ -426,14 +439,18 @@ class N2StairsWalkCfg(N2StairsCfg):
             # larger than the discrete tread-sequence signal and preserved a
             # fast step-to gait. Keep command following useful without letting
             # it dominate how the six risers are negotiated.
-            tracking_lin_vel = 3.0
+            tracking_lin_vel = 3.5
             tracking_ang_vel = 0.5
             stairs_forward_progress = 0.50
-            stairs_command_speed_error = -12.0
+            stairs_command_speed_error = -16.0
             stairs_overspeed = -30.0
 
             # Completion remains useful but no longer dominates several
             # seconds of gait, speed, and alignment penalties.
+            # Tiered terminal rewards remove the former contradiction where
+            # a physically completed climb was later treated as a timeout.
+            stairs_completion = 4.0
+            stairs_curriculum_completion = 8.0
             stairs_success = 12.0
 
             # Explicit alternating support/swing schedule.
@@ -446,14 +463,16 @@ class N2StairsWalkCfg(N2StairsCfg):
             # The phase ramp above still protects the natural early swing.
             stairs_next_tread_target = 3.50
             stairs_next_tread_target_error = -2.50
+            stairs_foothold_lateral = 1.50
+            stairs_foothold_lateral_error = -1.50
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10
             stairs_foot_step_progress = 2.00
-            stairs_alternating_tread = 5.00
-            stairs_repeated_lead = -5.00
-            stairs_same_tread_join = -5.00
-            stairs_skipped_tread = -3.00
+            stairs_alternating_tread = 7.00
+            stairs_repeated_lead = -7.00
+            stairs_same_tread_join = -7.00
+            stairs_skipped_tread = -4.00
             stairs_stable_contact = 0.50
 
             # Natural joint coordination: bend the airborne knee, avoid a
@@ -469,10 +488,10 @@ class N2StairsWalkCfg(N2StairsCfg):
             default_up_joint_pos = 0.0
 
             # Straight stair approach and neutral leg/foot yaw.
-            stairs_lateral_drift = -8.0
-            stairs_heading_alignment = 2.0
-            stairs_leg_alignment = -2.0
-            stairs_feet_yaw = -2.0
+            stairs_lateral_drift = -12.0
+            stairs_heading_alignment = 3.0
+            stairs_leg_alignment = -2.5
+            stairs_feet_yaw = -2.5
             lin_vel_z = -3.0
 
     class noise(N2StairsCfg.noise):
@@ -484,7 +503,7 @@ class N2StairsWalkCfgPPO(N2StairsCfgPPO):
         init_noise_std = 0.60
 
     class algorithm(N2StairsCfgPPO.algorithm):
-        entropy_coef = 0.005
+        entropy_coef = 0.002
 
     class runner(N2StairsCfgPPO.runner):
         experiment_name = "n2_stairs_walk"

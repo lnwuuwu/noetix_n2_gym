@@ -86,6 +86,14 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                 records.append(
                     {
                         "success": float(env.last_episode_success[env_id].item()),
+                        "completion": float(
+                            env.last_episode_completion[env_id].item()
+                        ),
+                        "curriculum_completion": float(
+                            env.last_episode_curriculum_completion[
+                                env_id
+                            ].item()
+                        ),
                         "top_reached": float(
                             env.last_episode_top_reached[env_id].item()
                         ),
@@ -195,6 +203,8 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "command_speed_m_s": command_speed,
         "episodes": int(count),
         "success_rate": mean("success"),
+        "completion_rate": mean("completion"),
+        "curriculum_completion_rate": mean("curriculum_completion"),
         "mean_forward_distance_m": mean("forward_distance_m"),
         "mean_climb_height_m": mean("climb_height_m"),
         "mean_survival_time_s": mean("survival_time_s"),
@@ -297,7 +307,9 @@ def evaluate(args):
         summaries.append(result)
         print(
             "level={terrain_level} height={step_height_m:.2f}m "
-            "success={success_rate:.1%} distance={mean_forward_distance_m:.3f}m "
+            "success={success_rate:.1%} completion={completion_rate:.1%} "
+            "curriculum={curriculum_completion_rate:.1%} "
+            "distance={mean_forward_distance_m:.3f}m "
             "climb={mean_climb_height_m:.3f}m first_step={first_step_rate:.1%} "
             "speed={mean_forward_speed_m_s:.3f}m/s "
             "lateral={mean_max_lateral_deviation_m:.3f}m "
