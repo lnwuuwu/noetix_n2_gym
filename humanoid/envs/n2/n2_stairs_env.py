@@ -180,6 +180,12 @@ class N2StairsEnv(N2Env):
         self.last_advanced_foot = torch.full(
             (self.num_envs,), -1, dtype=torch.long, device=self.device
         )
+        # A trailing foot may join an advanced tread at most once. Without
+        # this memory, every later stride on the flat top platform is
+        # repeatedly mislabeled as another step-to join.
+        self.last_joined_tread = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
         self.alternating_tread_event = torch.zeros_like(
             self.best_forward_progress
         )
@@ -735,6 +741,7 @@ class N2StairsEnv(N2Env):
                 candidate_foot,
                 previous_tread,
                 previous_foot,
+                self.last_joined_tread,
             )
 
             self.alternating_tread_event[:] = alternating_advance.float()
@@ -746,6 +753,9 @@ class N2StairsEnv(N2Env):
             self.repeated_lead_count += repeated_lead.float()
             self.same_tread_join_count += same_tread_join.float()
             self.skipped_tread_count += skipped_tread.float()
+            self.last_joined_tread[same_tread_join] = candidate_tread[
+                same_tread_join
+            ]
 
             event_one_hot = torch.nn.functional.one_hot(
                 candidate_foot, num_classes=len(self.feet_indices)
@@ -1289,6 +1299,7 @@ class N2StairsEnv(N2Env):
         self.max_foot_contact_height[env_ids] = 0.0
         self.last_advanced_tread[env_ids] = 0
         self.last_advanced_foot[env_ids] = -1
+        self.last_joined_tread[env_ids] = -1
         self.alternating_tread_event[env_ids] = 0.0
         self.repeated_lead_event[env_ids] = 0.0
         self.same_tread_join_event[env_ids] = 0.0

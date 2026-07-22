@@ -113,6 +113,7 @@ class StairGeometryTests(unittest.TestCase):
         def run_sequence(landings):
             previous_tread = 0
             previous_foot = -1
+            previous_joined_tread = -1
             counts = np.zeros(5, dtype=np.int64)
             for tread, foot in landings:
                 result = self.geometry.classify_tread_transition(
@@ -121,12 +122,15 @@ class StairGeometryTests(unittest.TestCase):
                     np.asarray([foot]),
                     np.asarray([previous_tread]),
                     np.asarray([previous_foot]),
+                    np.asarray([previous_joined_tread]),
                 )
                 flags = np.asarray([bool(value[0]) for value in result])
                 counts += flags.astype(np.int64)
                 if flags[0]:
                     previous_tread = tread
                     previous_foot = foot
+                if flags[3]:
+                    previous_joined_tread = tread
             return counts
 
         # advanced, alternating, repeated-lead, same-tread-join, skipped
@@ -147,6 +151,17 @@ class StairGeometryTests(unittest.TestCase):
 
         skipped = run_sequence([(1, 0), (3, 1)])
         np.testing.assert_array_equal(skipped, [2, 1, 0, 0, 1])
+
+        # Normal alternating strides after reaching the top platform must
+        # not be counted as an unlimited series of same-tread joins.
+        top_platform_walk = run_sequence(
+            [
+                (1, 0), (2, 1), (3, 0),
+                (4, 1), (5, 0), (6, 1),
+                (6, 0), (6, 1), (6, 0), (6, 1),
+            ]
+        )
+        np.testing.assert_array_equal(top_platform_walk, [6, 6, 0, 1, 0])
 
 
 class StairConfigurationTests(unittest.TestCase):

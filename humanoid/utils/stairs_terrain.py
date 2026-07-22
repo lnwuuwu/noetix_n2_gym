@@ -15,6 +15,7 @@ def classify_tread_transition(
     candidate_foot,
     previous_tread,
     previous_foot,
+    previous_joined_tread,
 ):
     """Classify one landing using NumPy- or Torch-compatible operators.
 
@@ -34,6 +35,7 @@ def classify_tread_transition(
         & (previous_tread > 0)
         & (candidate_tread == previous_tread)
         & (candidate_foot != previous_foot)
+        & (candidate_tread != previous_joined_tread)
     )
     return (
         advanced,
