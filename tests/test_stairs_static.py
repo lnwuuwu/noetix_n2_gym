@@ -483,9 +483,16 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_skipped_tread",
             "stairs_overstride",
             "stairs_swing_knee_flexion",
+            "stairs_swing_knee_deficit",
             "stairs_arm_swing",
         ):
             self.assertIn(required_reward, walk_scales)
+
+        self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 5.0)
+        self.assertLessEqual(walk_scales["stairs_repeated_lead"], -5.0)
+        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -3.0)
+        self.assertLessEqual(walk_scales["stairs_overstride"], -8.0)
+        self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
 
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
@@ -520,7 +527,12 @@ class StairConfigurationTests(unittest.TestCase):
             ROOT / "humanoid" / "scripts" / "train.py"
         ).read_text()
         self.assertIn("--reset_optimizer", train_source)
+        self.assertIn("--command_speed", train_source)
+        self.assertIn("--learning_rate", train_source)
+        self.assertIn("--action_noise_std", train_source)
         self.assertIn("load_optimizer=not args.reset_optimizer", train_source)
+        self.assertIn('param_group["lr"] = learning_rate', train_source)
+        self.assertIn("policy.std.fill_(action_noise_std)", train_source)
         self.assertIn("refusing to silently train from zero", train_source)
         registry_source = (
             ROOT / "humanoid" / "utils" / "task_registry.py"

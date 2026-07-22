@@ -18,6 +18,13 @@ python humanoid/scripts/train.py --task=n2_stairs --headless
 # Human-like stair-over-stair curriculum (strict checkpoints can resume)
 python humanoid/scripts/train.py --task=n2_stairs_walk --headless
 
+# Conservative final-clock gait fine-tuning from a compatible checkpoint.
+# Keep the optimizer; do not add --reset_optimizer for this migration.
+python humanoid/scripts/train.py --task=n2_stairs_walk --resume \
+  --load_run=<absolute_run_path> --checkpoint=<iteration> --headless \
+  --fixed_terrain_level=0 --command_speed=0.18 \
+  --learning_rate=3e-5 --action_noise_std=0.45
+
 # Visualize a checkpoint at 6 cm and 0.25 m/s
 python humanoid/scripts/play.py --task=n2_stairs --resume \
   --load_run=<run_name_or_absolute_path> --checkpoint=-1 \

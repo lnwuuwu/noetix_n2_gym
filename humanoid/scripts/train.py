@@ -1,8 +1,11 @@
+import math
 import os
 import signal
 
 # 导入所有环境相关模块
 from humanoid.envs import *
+# Isaac Gym Preview 4 must load its bindings before importing torch.
+import torch
 # 导入参数解析和任务注册工具
 from humanoid.utils import get_args, task_registry
 
@@ -27,14 +30,22 @@ def train(args):
     # env: 环境对象，用于模拟和交互
     # env_cfg: 环境配置对象，包含环境的具体配置参数
     env_cfg = None
-    if args.fixed_terrain_level is not None:
-        if args.task not in (
-            "n2_stairs",
-            "n2_stairs_robust",
-            "n2_stairs_walk",
-        ):
-            raise ValueError("--fixed_terrain_level is only valid for n2_stairs tasks")
+    stair_tasks = (
+        "n2_stairs",
+        "n2_stairs_robust",
+        "n2_stairs_walk",
+    )
+    if (
+        args.fixed_terrain_level is not None
+        or args.command_speed is not None
+    ):
+        if args.task not in stair_tasks:
+            raise ValueError(
+                "--fixed_terrain_level and --command_speed are only valid "
+                "for n2_stairs tasks"
+            )
         env_cfg, _ = task_registry.get_cfgs(name=args.task)
+    if args.fixed_terrain_level is not None:
         if not 0 <= args.fixed_terrain_level < env_cfg.terrain.num_rows:
             raise ValueError(
                 "--fixed_terrain_level must be in [0, {}]".format(
@@ -51,6 +62,20 @@ def train(args):
         env_cfg.commands.ranges.lin_vel_x[1] = min(
             env_cfg.commands.max_curriculum, fixed_speed_max
         )
+        env_cfg.commands.curriculum = False
+    if args.command_speed is not None:
+        command_speed = float(args.command_speed)
+        command_min = float(env_cfg.commands.ranges.lin_vel_x[0])
+        command_max = float(env_cfg.commands.max_curriculum)
+        if not math.isfinite(command_speed) or not (
+            command_min <= command_speed <= command_max
+        ):
+            raise ValueError(
+                "--command_speed must be in [{:.3f}, {:.3f}]".format(
+                    command_min, command_max
+                )
+            )
+        env_cfg.commands.ranges.lin_vel_x = [command_speed, command_speed]
         env_cfg.commands.curriculum = False
     env, env_cfg = task_registry.make_env(
         name=args.task, args=args, env_cfg=env_cfg
@@ -70,6 +95,30 @@ def train(args):
             "Resume requested but checkpoint iteration is not positive; "
             "refusing to silently train from zero."
         )
+    if args.learning_rate is not None:
+        learning_rate = float(args.learning_rate)
+        if not math.isfinite(learning_rate) or learning_rate <= 0.0:
+            raise ValueError("--learning_rate must be positive and finite")
+        ppo_runner.alg.learning_rate = learning_rate
+        for param_group in ppo_runner.alg.optimizer.param_groups:
+            param_group["lr"] = learning_rate
+        print("Learning-rate override: {:.3e}".format(learning_rate))
+    if args.action_noise_std is not None:
+        action_noise_std = float(args.action_noise_std)
+        if not math.isfinite(action_noise_std) or action_noise_std <= 0.0:
+            raise ValueError("--action_noise_std must be positive and finite")
+        policy = ppo_runner.alg.policy
+        with torch.no_grad():
+            if policy.noise_std_type == "scalar":
+                policy.std.fill_(action_noise_std)
+            elif policy.noise_std_type == "log":
+                policy.log_std.fill_(math.log(action_noise_std))
+            else:
+                raise ValueError(
+                    "Unsupported policy noise type: "
+                    + str(policy.noise_std_type)
+                )
+        print("Action-noise std override: {:.3f}".format(action_noise_std))
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.
@@ -127,6 +176,24 @@ if __name__ == '__main__':
                     "Load policy/curriculum from a checkpoint but start with "
                     "a fresh optimizer (useful after reward changes)."
                 ),
+            },
+            {
+                "name": "--command_speed",
+                "type": float,
+                "default": None,
+                "help": "Fix the forward command for stair specialization.",
+            },
+            {
+                "name": "--learning_rate",
+                "type": float,
+                "default": None,
+                "help": "Override PPO learning rate after checkpoint load.",
+            },
+            {
+                "name": "--action_noise_std",
+                "type": float,
+                "default": None,
+                "help": "Override policy exploration std after checkpoint load.",
             },
         ]
     )

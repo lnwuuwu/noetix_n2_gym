@@ -390,40 +390,48 @@ class N2StairsWalkCfg(N2StairsCfg):
         class scales(N2StairsCfg.rewards.scales):
             # Command following must dominate the former race-to-the-top
             # shortcut. Progress saturates at the commanded walking speed.
-            tracking_lin_vel = 4.0
+            # After the gait-clock migration, pure velocity tracking was much
+            # larger than the discrete tread-sequence signal and preserved a
+            # fast step-to gait. Keep command following useful without letting
+            # it dominate how the six risers are negotiated.
+            tracking_lin_vel = 3.0
             tracking_ang_vel = 0.5
-            stairs_forward_progress = 0.75
+            stairs_forward_progress = 0.50
             stairs_command_speed_error = -12.0
             stairs_overspeed = -30.0
 
             # Completion remains useful but no longer dominates several
             # seconds of gait, speed, and alignment penalties.
-            stairs_success = 8.0
+            stairs_success = 12.0
 
             # Explicit alternating support/swing schedule.
-            stairs_phase_contact = 1.50
-            stairs_phase_contact_mismatch = -2.0
+            stairs_phase_contact = 2.00
+            stairs_phase_contact_mismatch = -3.0
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10
-            stairs_foot_step_progress = 1.00
-            stairs_alternating_tread = 1.50
-            stairs_repeated_lead = -2.00
-            stairs_same_tread_join = -1.00
-            stairs_skipped_tread = -1.50
+            stairs_foot_step_progress = 2.00
+            stairs_alternating_tread = 5.00
+            stairs_repeated_lead = -5.00
+            stairs_same_tread_join = -3.00
+            stairs_skipped_tread = -3.00
             stairs_stable_contact = 0.50
 
             # Natural joint coordination: bend the airborne knee, avoid a
             # large sagittal split, and move the arms contralaterally.
-            stairs_overstride = -4.0
-            stairs_swing_knee_flexion = 1.0
-            stairs_arm_swing = 0.75
+            stairs_overstride = -8.0
+            stairs_swing_knee_flexion = 2.0
+            # The exponential target alone has little gradient when the
+            # nearly-straight legacy knee is far from its target. This
+            # asymmetric deficit term supplies a usable recovery gradient.
+            stairs_swing_knee_deficit = -6.0
+            stairs_arm_swing = 0.50
             default_joint_pos = 0.10
             default_up_joint_pos = 0.0
 
             # Straight stair approach and neutral leg/foot yaw.
-            stairs_lateral_drift = -6.0
-            stairs_heading_alignment = 1.5
+            stairs_lateral_drift = -8.0
+            stairs_heading_alignment = 2.0
             stairs_leg_alignment = -2.0
             stairs_feet_yaw = -2.0
             lin_vel_z = -3.0

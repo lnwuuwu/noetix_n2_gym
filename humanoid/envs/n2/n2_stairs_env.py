@@ -1548,28 +1548,43 @@ class N2StairsEnv(N2Env):
             torch.square(offset_excess / normalizer), dim=1
         ) + torch.square(separation_excess / normalizer)
 
-    def _reward_stairs_swing_knee_flexion(self):
-        """Guide the airborne leg to bend rather than reach out straight."""
-        swing, knees = self._swing_knee_state()
+    def _swing_knee_target(self):
+        """Return the per-environment knee target for the current riser."""
         _, _, step_height = self._current_stair_targets()
-        target = torch.clamp(
+        return torch.clamp(
             float(self.cfg.env.swing_knee_base_target)
             + float(self.cfg.env.swing_knee_height_gain) * step_height,
             max=float(self.cfg.env.swing_knee_max_target),
         ).unsqueeze(1)
-        sharpness = float(self.cfg.env.swing_knee_tracking_sharpness)
-        score = torch.exp(-sharpness * torch.square(knees - target))
+
+    def _active_swing_knee_average(self, values, swing):
+        """Average a per-knee quantity only over scheduled airborne legs."""
         swing_count = torch.sum(swing.float(), dim=1)
-        score = torch.sum(score * swing.float(), dim=1) / torch.clamp(
+        average = torch.sum(values * swing.float(), dim=1) / torch.clamp(
             swing_count, min=1.0
         )
         moving = self.root_states[:, 7] > 0.03
         upright = -self.projected_gravity[:, 2] > 0.80
-        return (
-            score
-            * (swing_count > 0).float()
-            * moving.float()
-            * upright.float()
+        active = (swing_count > 0) & moving & upright
+        return average * active.float()
+
+    def _reward_stairs_swing_knee_flexion(self):
+        """Guide the airborne leg to bend rather than reach out straight."""
+        swing, knees = self._swing_knee_state()
+        target = self._swing_knee_target()
+        sharpness = float(self.cfg.env.swing_knee_tracking_sharpness)
+        score = torch.exp(-sharpness * torch.square(knees - target))
+        return self._active_swing_knee_average(score, swing)
+
+    def _reward_stairs_swing_knee_deficit(self):
+        """Penalize an under-flexed swing knee with a non-vanishing gradient."""
+        swing, knees = self._swing_knee_state()
+        target = self._swing_knee_target()
+        normalized_deficit = torch.clamp(
+            target - knees, min=0.0
+        ) / torch.clamp(target, min=0.10)
+        return self._active_swing_knee_average(
+            torch.square(normalized_deficit), swing
         )
 
     def _reward_stairs_arm_swing(self):
