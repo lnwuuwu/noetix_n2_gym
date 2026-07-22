@@ -377,6 +377,8 @@ class N2StairsWalkCfg(N2StairsCfg):
         sagittal_foot_phase_amplitude = 0.26
         sagittal_foot_phase_sharpness = 12.0
         sagittal_foot_phase_error_clip = 2.0
+        next_tread_target_sharpness = 2.0
+        next_tread_target_error_clip = 2.0
 
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
@@ -417,6 +419,8 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_phase_contact_mismatch = -3.0
             stairs_sagittal_foot_phase = 2.00
             stairs_sagittal_foot_phase_error = -0.75
+            stairs_next_tread_target = 2.50
+            stairs_next_tread_target_error = -1.50
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10

@@ -145,6 +145,9 @@ class N2StairsEnv(N2Env):
         self.stair_top_x = torch.tensor(
             self.terrain.stair_top_x, dtype=torch.float, device=self.device
         )
+        self.stair_start_x = torch.tensor(
+            self.terrain.stair_start_x, dtype=torch.float, device=self.device
+        )
         self.stair_top_heights = torch.tensor(
             self.terrain.stair_top_heights, dtype=torch.float, device=self.device
         )
@@ -847,6 +850,59 @@ class N2StairsEnv(N2Env):
     def _sagittal_foot_phase_score(self):
         score, _ = self._sagittal_foot_phase_state()
         return score
+
+    def _next_tread_foot_target_state(self):
+        """Target the center of the next riser with the opposite swing foot.
+
+        This target activates only after the first stair has been reached, so
+        it cannot make the robot reach across the flat approach platform. A
+        step-to landing leaves the target one full tread ahead and therefore
+        keeps a dense correction signal until that foot actually advances.
+        """
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        next_tread = torch.clamp(
+            self.last_advanced_tread + 1,
+            min=1,
+            max=int(self.cfg.terrain.num_steps),
+        )
+        step_width = max(float(self.cfg.terrain.step_width), 1.0e-3)
+        target_x = stair_start_x + (
+            next_tread.float() - 0.5
+        ) * step_width
+
+        expected_foot = torch.clamp(
+            1 - self.last_advanced_foot, min=0, max=1
+        )
+        expected_foot_x = torch.gather(
+            self.feet_pos[:, :, 0], 1, expected_foot.unsqueeze(1)
+        ).squeeze(1)
+        normalized_error = (expected_foot_x - target_x) / step_width
+        error_clip = float(self.cfg.env.next_tread_target_error_clip)
+        normalized_error = torch.clamp(
+            normalized_error, min=-error_clip, max=error_clip
+        )
+        sharpness = float(self.cfg.env.next_tread_target_sharpness)
+        score = torch.exp(-sharpness * torch.square(normalized_error))
+
+        expected_is_swing = torch.gather(
+            (~self.desired_contacts).long(),
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1).bool()
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = (
+            (self.last_advanced_tread >= 1)
+            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+            & expected_is_swing
+            & (self.episode_length_buf > grace_steps)
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return score, normalized_error, active
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
@@ -1757,6 +1813,16 @@ class N2StairsEnv(N2Env):
         return torch.square(normalized_error) * (
             active & moving & upright
         ).float()
+
+    def _reward_stairs_next_tread_target(self):
+        """Reward the opposite swing foot approaching the next tread center."""
+        score, _, active = self._next_tread_foot_target_state()
+        return score * active.float()
+
+    def _reward_stairs_next_tread_target_error(self):
+        """Penalize remaining fore-aft distance to the next tread center."""
+        _, normalized_error, active = self._next_tread_foot_target_state()
+        return torch.square(normalized_error) * active.float()
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""

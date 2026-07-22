@@ -479,6 +479,8 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_phase_contact_mismatch",
             "stairs_sagittal_foot_phase",
             "stairs_sagittal_foot_phase_error",
+            "stairs_next_tread_target",
+            "stairs_next_tread_target_error",
             "stairs_heading_alignment",
             "stairs_leg_alignment",
             "stairs_feet_yaw",
@@ -500,6 +502,8 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
         self.assertGreater(walk_scales["stairs_sagittal_foot_phase"], 0.0)
         self.assertLess(walk_scales["stairs_sagittal_foot_phase_error"], 0.0)
+        self.assertGreater(walk_scales["stairs_next_tread_target"], 0.0)
+        self.assertLess(walk_scales["stairs_next_tread_target_error"], 0.0)
 
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
@@ -530,6 +534,8 @@ class StairConfigurationTests(unittest.TestCase):
             "-amplitude * torch.cos(2.0 * torch.pi * phase)",
             stairs_source,
         )
+        self.assertIn("self.stair_start_x[levels, types]", stairs_source)
+        self.assertIn("self.last_advanced_tread + 1", stairs_source)
         self.assertIn(
             "self.tread_advance_count + self.same_tread_join_count",
             stairs_source,
