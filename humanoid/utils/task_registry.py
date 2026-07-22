@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Tuple
 from datetime import datetime
 
@@ -140,6 +141,27 @@ class TaskRegistry():
             # load previously trained model
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path, load_optimizer=load_optimizer)
+            checkpoint_name = os.path.basename(resume_path)
+            match = re.fullmatch(r"model_(\d+)\.pt", checkpoint_name)
+            if match is None:
+                raise RuntimeError(
+                    "Cannot verify checkpoint iteration from filename: "
+                    + checkpoint_name
+                )
+            filename_iteration = int(match.group(1))
+            loaded_iteration = int(runner.current_learning_iteration)
+            if loaded_iteration != filename_iteration:
+                raise RuntimeError(
+                    "Checkpoint iteration mismatch: filename says {}, "
+                    "metadata says {} ({})".format(
+                        filename_iteration, loaded_iteration, resume_path
+                    )
+                )
+            print(
+                "Verified checkpoint iteration: {}".format(
+                    loaded_iteration
+                )
+            )
         return runner, train_cfg
 
 # make global task registry

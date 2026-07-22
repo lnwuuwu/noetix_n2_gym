@@ -13,6 +13,16 @@ def train(args):
     参数:
         args: 命令行参数对象，包含训练所需的各种配置
     """
+    resume_only_options = (
+        args.load_run is not None
+        or args.checkpoint is not None
+        or args.reset_optimizer
+    )
+    if resume_only_options and not args.resume:
+        raise ValueError(
+            "--load_run, --checkpoint, and --reset_optimizer require --resume"
+        )
+
     # 根据任务名称和参数创建环境实例
     # env: 环境对象，用于模拟和交互
     # env_cfg: 环境配置对象，包含环境的具体配置参数
@@ -55,6 +65,11 @@ def train(args):
         args=args,
         load_optimizer=not args.reset_optimizer,
     )
+    if args.resume and ppo_runner.current_learning_iteration <= 0:
+        raise RuntimeError(
+            "Resume requested but checkpoint iteration is not positive; "
+            "refusing to silently train from zero."
+        )
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.

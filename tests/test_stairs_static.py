@@ -477,6 +477,12 @@ class StairConfigurationTests(unittest.TestCase):
         ).read_text()
         self.assertIn("--reset_optimizer", train_source)
         self.assertIn("load_optimizer=not args.reset_optimizer", train_source)
+        self.assertIn("refusing to silently train from zero", train_source)
+        registry_source = (
+            ROOT / "humanoid" / "utils" / "task_registry.py"
+        ).read_text()
+        self.assertIn("Checkpoint iteration mismatch", registry_source)
+        self.assertIn("Verified checkpoint iteration", registry_source)
 
     def test_tasks_are_registered(self):
         registration = (ROOT / "humanoid" / "envs" / "__init__.py").read_text()
