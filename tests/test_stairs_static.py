@@ -215,10 +215,18 @@ class StairGeometryTests(unittest.TestCase):
         )
         np.testing.assert_allclose(at_start, start)
         np.testing.assert_allclose(at_end, landing)
-        np.testing.assert_allclose(at_mid[:, :2], 0.5 * (start + landing)[:, :2])
+        # XY deliberately lags Z so N2's forward-extending toe clears the
+        # riser before the ankle travels into the next tread.
         np.testing.assert_allclose(
-            at_mid[:, 2], 0.5 * (start[:, 2] + landing[:, 2]) + arc
+            at_mid[:, :2],
+            start[:, :2]
+            + 0.337961498939682 * (landing - start)[:, :2],
         )
+        expected_apex = np.maximum(
+            0.5 * (start[:, 2] + landing[:, 2]) + arc,
+            np.maximum(start[:, 2], landing[:, 2]),
+        )
+        np.testing.assert_allclose(at_mid[:, 2], expected_apex)
         # Two 10 cm treads end at 0.20 m plus the ankle-to-sole offset.
         self.assertAlmostEqual(float(at_end[0, 2]), 0.20 + 0.065)
 
@@ -240,6 +248,118 @@ class StairGeometryTests(unittest.TestCase):
             (at_end - just_before_end) / epsilon,
             np.zeros_like(landing),
             atol=5.0e-3,
+        )
+
+    def test_delayed_horizontal_swing_clears_ten_centimeter_riser(self):
+        step_width = 0.30
+        step_height = 0.10
+        ankle_offset = 0.045
+        toe_extent = 0.113
+        progress = np.linspace(0.0, 1.0, 10001)
+        start = np.asarray([[0.0, 0.09, ankle_offset]])
+        landing = np.asarray(
+            [[step_width, 0.09, step_height + ankle_offset]]
+        )
+        trajectory = self.geometry.smooth_swing_trajectory(
+            start,
+            landing,
+            progress,
+            0.09,
+            forward_delay=0.15,
+            lift_end=0.35,
+            descent_start=0.72,
+        )
+        first_crossing = np.flatnonzero(
+            trajectory[:, 0] + toe_extent >= 0.5 * step_width
+        )[0]
+        pitch = 0.20
+        toe_local_z = (
+            -np.sin(pitch) * toe_extent
+            + np.cos(pitch) * -0.039522
+        )
+        toe_clearance = (
+            trajectory[first_crossing, 2]
+            + toe_local_z
+            - step_height
+        )
+        self.assertGreaterEqual(float(toe_clearance), 0.02)
+
+        descent_index = int(0.72 * (len(progress) - 1))
+        heel_x = trajectory[descent_index, 0] - 0.072176
+        self.assertGreaterEqual(float(heel_x - 0.5 * step_width), 0.01)
+
+    def test_three_stage_swing_holds_before_forward_motion(self):
+        progress = np.linspace(0.0, 1.0, 1001)
+        start = np.asarray([[0.0, 0.09, 0.045]])
+        landing = np.asarray([[0.30, 0.09, 0.145]])
+        trajectory = self.geometry.smooth_swing_trajectory(
+            start, landing, progress, 0.09
+        )
+        delay_index = int(0.15 * (len(progress) - 1))
+        np.testing.assert_allclose(
+            trajectory[: delay_index + 1, :2],
+            np.broadcast_to(start[:, :2], (delay_index + 1, 2)),
+            atol=1.0e-12,
+        )
+        self.assertTrue(np.all(np.diff(trajectory[:, 0]) >= -1.0e-12))
+        lift_end_index = int(0.35 * (len(progress) - 1))
+        descent_index = int(0.72 * (len(progress) - 1))
+        self.assertTrue(
+            np.all(
+                np.diff(trajectory[: lift_end_index + 1, 2]) >= -1.0e-12
+            )
+        )
+        np.testing.assert_allclose(
+            trajectory[lift_end_index:descent_index, 2],
+            trajectory[lift_end_index, 2],
+            atol=1.0e-12,
+        )
+        self.assertTrue(
+            np.all(np.diff(trajectory[descent_index:, 2]) <= 1.0e-12)
+        )
+
+    def test_swing_support_uses_stable_contact_hysteresis(self):
+        pending = np.asarray([[True, True], [True, True]])
+        new_swing = np.asarray([[True, False], [False, False]])
+        previous_valid = np.asarray([[False, True], [True, True]])
+        # A raw sensor dropout can still be stable after release hysteresis;
+        # only the genuinely lost right-side support invalidates its swing.
+        opposite_stable = np.asarray([[True, True], [True, False]])
+        np.testing.assert_array_equal(
+            self.geometry.retained_swing_support_mask(
+                pending,
+                new_swing,
+                previous_valid,
+                opposite_stable,
+                np.asarray([[False, False], [False, False]]),
+            ),
+            [[True, True], [True, False]],
+        )
+
+        # A true opposite-foot lift permanently invalidates that swing even
+        # while stable-contact release hysteresis is still retaining support.
+        np.testing.assert_array_equal(
+            self.geometry.retained_swing_support_mask(
+                np.asarray([[True, True]]),
+                np.asarray([[False, False]]),
+                np.asarray([[True, True]]),
+                np.asarray([[True, True]]),
+                np.asarray([[True, False]]),
+            ),
+            [[False, True]],
+        )
+
+    def test_true_airborne_rejects_dropout_and_horizontal_riser_force(self):
+        force = np.asarray([[0.0, 20.0, 0.0, 0.0]])
+        clearance = np.asarray([[0.0, 0.03, 0.03, 0.03]])
+        np.testing.assert_array_equal(
+            self.geometry.true_airborne_mask(
+                force,
+                clearance,
+                5.0,
+                0.015,
+            ),
+            [[False, False, True, True]],
         )
 
     def test_same_tread_support_excludes_approach_and_top(self):
@@ -803,8 +923,17 @@ class StairConfigurationTests(unittest.TestCase):
             "self.swing_opposite_support_valid[env_ids] = False",
             stairs_source,
         )
+        self.assertIn(
+            "self.swing_true_airborne_seen[env_ids] = False",
+            stairs_source,
+        )
         self.assertIn("self.swing_start_valid[env_ids] = False", stairs_source)
         self.assertIn("self.swing_elapsed_time[env_ids] = 0.0", stairs_source)
+        self.assertIn("self.swing_pending_time[env_ids] = 0.0", stairs_source)
+        self.assertIn("true_airborne_started", stairs_source)
+        self.assertIn(
+            "(self.swing_pending_time - allowed)", stairs_source
+        )
         for diagnostic in (
             "stairs_same_tread_support_fraction",
             "stairs_lower_leg_collision_fraction",
@@ -839,9 +968,12 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("--reset_optimizer", train_source)
         self.assertIn("--command_speed", train_source)
         self.assertIn("--learning_rate", train_source)
+        self.assertIn("--fixed_learning_rate", train_source)
         self.assertIn("--action_noise_std", train_source)
         self.assertIn("load_optimizer=not args.reset_optimizer", train_source)
         self.assertIn('param_group["lr"] = learning_rate', train_source)
+        self.assertIn('ppo_runner.alg.schedule = "fixed"', train_source)
+        self.assertIn('ppo_runner.alg_cfg["schedule"] = "fixed"', train_source)
         self.assertIn("policy.std.fill_(action_noise_std)", train_source)
         self.assertIn("refusing to silently train from zero", train_source)
         registry_source = (

@@ -26,18 +26,93 @@ def stable_landing_mask(stable_contacts, last_stable_contacts):
     )
 
 
-def smooth_swing_trajectory(start, landing, progress, arc_height):
-    """Interpolate a zero-end-slope XYZ swing with a bounded vertical arc."""
-    smooth_progress = progress * progress * (3.0 - 2.0 * progress)
-    target = start + smooth_progress[..., None] * (landing - start)
+def _smootherstep01(value):
+    """Return a C2 smootherstep after clipping an array/tensor to [0, 1]."""
+    value = value.clip(0.0, 1.0)
+    return value**3 * (10.0 - 15.0 * value + 6.0 * value**2)
+
+
+def smooth_swing_trajectory(
+    start,
+    landing,
+    progress,
+    arc_height,
+    forward_delay=0.15,
+    lift_end=0.35,
+    descent_start=0.72,
+):
+    """Interpolate a three-stage C2 toe- and heel-clearing swing.
+
+    The foot first rises with no forward motion, stays at its apex while the
+    full 18.5 cm sole crosses the riser, then descends to the next tread. All
+    transitions use fifth-order smootherstep, so position, velocity, and
+    acceleration remain continuous instead of exciting PD-control chatter.
+    """
+    if not 0.0 <= forward_delay < lift_end < descent_start < 1.0:
+        raise ValueError(
+            "Expected 0 <= forward_delay < lift_end < descent_start < 1"
+        )
+    xy_progress = _smootherstep01(
+        (progress - forward_delay) / (1.0 - forward_delay)
+    )
+    lift_progress = _smootherstep01(progress / lift_end)
+    descent_progress = _smootherstep01(
+        (progress - descent_start) / (1.0 - descent_start)
+    )
+    target = start + xy_progress[..., None] * (landing - start)
     target = target.copy() if isinstance(target, np.ndarray) else target.clone()
-    # The squared quartic bump has zero height *and* zero slope at lift-off
-    # and touchdown.  The former parabolic bump had non-zero endpoint slope,
-    # which asked the ankle to jump upward at lift-off and drive downward into
-    # the tread at touchdown even though the XYZ interpolation was smooth.
-    swing_bump = 16.0 * progress**2 * (1.0 - progress) ** 2
-    target[..., 2] += arc_height * swing_bump
+    candidate_apex = (
+        0.5 * (start[..., 2] + landing[..., 2]) + arc_height
+    )
+    endpoint_high = 0.5 * (
+        start[..., 2]
+        + landing[..., 2]
+        + abs(start[..., 2] - landing[..., 2])
+    )
+    apex = 0.5 * (
+        candidate_apex
+        + endpoint_high
+        + abs(candidate_apex - endpoint_high)
+    )
+    target[..., 2] = (
+        start[..., 2]
+        + lift_progress * (apex - start[..., 2])
+        + descent_progress * (landing[..., 2] - apex)
+    )
     return target
+
+
+def retained_swing_support_mask(
+    pending_swing,
+    new_swing,
+    previous_valid,
+    opposite_stable_support,
+    opposite_true_airborne,
+):
+    """Keep swing support valid across brief raw-contact sensor dropouts.
+
+    ``opposite_stable_support`` is expected to include the caller's contact
+    release hysteresis.  A real loss longer than that hysteresis still
+    invalidates the whole swing, while one noisy raw-contact frame no longer
+    erases an otherwise valid support-to-support transition.
+    """
+    opposite_support = opposite_stable_support & ~opposite_true_airborne
+    started_valid = (new_swing & opposite_support) | (
+        ~new_swing & previous_valid
+    )
+    return pending_swing & started_valid & opposite_support
+
+
+def true_airborne_mask(
+    force_norm,
+    ankle_clearance,
+    force_threshold,
+    clearance_threshold,
+):
+    """Reject contact dropouts and riser pushes as false lift-off events."""
+    return (force_norm < force_threshold) & (
+        ankle_clearance > clearance_threshold
+    )
 
 
 def same_tread_support_mask(stable_contacts, tread_indices, num_steps):

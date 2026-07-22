@@ -43,6 +43,11 @@ class N2StairsCfg(N2_18DofCfg):
         # is a jump rather than the continuous-support gait wanted here.
         flight_grace_s = 0.5
         max_double_flight_s = 0.08
+        # Shared lift-off measurement. Vertical force alone cannot distinguish
+        # true flight from a toe pushing horizontally into a stair riser.
+        true_airborne_force_threshold = 5.0
+        true_airborne_clearance = 0.015
+        true_airborne_clearance_ratio = 0.25
 
     class viewer(N2_18DofCfg.viewer):
         # A close side view of the launch platform and first stair flight.
@@ -340,7 +345,6 @@ class N2StairsWalkCfg(N2StairsCfg):
         stable_landing_height_tolerance = 0.04
         stable_landing_height_tolerance_ratio = 0.45
         stable_landing_tread_margin = 0.025
-
         # Strict natural-gait success must settle on the top while centered,
         # facing +X, and moving close to the command. Reaching height alone is
         # recorded separately as raw top reach and physical completion.
@@ -442,6 +446,11 @@ class N2StairsWalkCfg(N2StairsCfg):
         # curriculum height (9 cm of arc on the fixed 10 cm staircase).
         swing_trajectory_arc_base = 0.04
         swing_trajectory_arc_height_gain = 0.50
+        # Three-stage C2 swing: finish most of the lift before translating,
+        # keep the foot high until its heel clears the riser, then descend.
+        swing_trajectory_forward_delay = 0.15
+        swing_trajectory_lift_end = 0.35
+        swing_trajectory_descent_start = 0.72
         swing_trajectory_x_normalizer = 0.20
         swing_trajectory_y_normalizer = 0.12
         swing_trajectory_z_normalizer = 0.10

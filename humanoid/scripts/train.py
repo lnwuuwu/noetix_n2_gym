@@ -100,9 +100,14 @@ def train(args):
         if not math.isfinite(learning_rate) or learning_rate <= 0.0:
             raise ValueError("--learning_rate must be positive and finite")
         ppo_runner.alg.learning_rate = learning_rate
+        ppo_runner.alg_cfg["learning_rate"] = learning_rate
         for param_group in ppo_runner.alg.optimizer.param_groups:
             param_group["lr"] = learning_rate
         print("Learning-rate override: {:.3e}".format(learning_rate))
+    if args.fixed_learning_rate:
+        ppo_runner.alg.schedule = "fixed"
+        ppo_runner.alg_cfg["schedule"] = "fixed"
+        print("Learning-rate schedule: fixed")
     if args.action_noise_std is not None:
         action_noise_std = float(args.action_noise_std)
         if not math.isfinite(action_noise_std) or action_noise_std <= 0.0:
@@ -188,6 +193,15 @@ if __name__ == '__main__':
                 "type": float,
                 "default": None,
                 "help": "Override PPO learning rate after checkpoint load.",
+            },
+            {
+                "name": "--fixed_learning_rate",
+                "action": "store_true",
+                "default": False,
+                "help": (
+                    "Disable PPO's adaptive KL learning-rate changes for "
+                    "controlled fine-tuning."
+                ),
             },
             {
                 "name": "--action_noise_std",

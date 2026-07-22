@@ -466,6 +466,13 @@ class OnPolicyRunner:
         if load_optimizer and resumed_training:
             # -- 算法优化器
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            # Keep the scheduler's scalar in sync with Adam. Otherwise the
+            # first adaptive-KL update resumes from the config default instead
+            # of the checkpoint learning rate and can jump by orders of
+            # magnitude.
+            self.alg.learning_rate = float(
+                self.alg.optimizer.param_groups[0]["lr"]
+            )
         # -- 加载当前学习迭代次数
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
