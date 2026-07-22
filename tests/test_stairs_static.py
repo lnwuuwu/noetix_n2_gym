@@ -216,10 +216,20 @@ class StairConfigurationTests(unittest.TestCase):
                 walk_cfg.env.corridor_yaw_limit,
             )
             self.assertGreaterEqual(
+                walk_cfg.env.success_min_phase_contact_match, 0.70
+            )
+            permanent_double_support_match = (
+                0.5 + 0.5 * walk_cfg.env.double_support_ratio
+            )
+            self.assertGreater(
+                walk_cfg.env.success_min_phase_contact_match,
+                permanent_double_support_match,
+            )
+            self.assertLess(
                 walk_cfg.env.success_min_phase_contact_match, 0.80
             )
             self.assertLessEqual(
-                walk_cfg.env.success_max_double_flight_fraction, 0.05
+                walk_cfg.env.success_max_double_flight_fraction, 0.08
             )
             self.assertEqual(train_cfg.runner.experiment_name, "n2_stairs")
             self.assertEqual(

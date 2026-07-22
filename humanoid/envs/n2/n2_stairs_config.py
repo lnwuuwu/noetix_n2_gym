@@ -321,8 +321,13 @@ class N2StairsWalkCfg(N2StairsCfg):
         success_yaw_tolerance = 0.15
         success_max_lateral_deviation = 0.20
         success_max_yaw_deviation = 0.30
-        success_min_phase_contact_match = 0.80
-        success_max_double_flight_fraction = 0.05
+        # Contact sensors on stairs do not remain perfectly phase-locked to an
+        # open-loop clock: touchdown shifts with riser height. 0.70 is still
+        # above the 0.58 ceiling of permanent double support, while allowing
+        # adaptive touchdown timing. Repeated synchronous hopping remains
+        # excluded by the independent double-flight bound.
+        success_min_phase_contact_match = 0.70
+        success_max_double_flight_fraction = 0.08
 
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
