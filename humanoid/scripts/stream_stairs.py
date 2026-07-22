@@ -224,11 +224,21 @@ def stream(args):
     policy = runner.get_inference_policy(device=env.device)
     obs = env.get_observations()
 
+    # Camera-sensor poses are world-frame even though the sensor belongs to an
+    # environment. Higher curriculum rows are shifted by terrain_length in X,
+    # so use the same terrain-origin offset as play.py's viewer camera.
+    camera_offset = env.env_origins[0].detach().cpu().numpy().astype(np.float64)
+    camera_position = np.asarray(
+        env_cfg.viewer.pos, dtype=np.float64
+    ) + camera_offset
+    camera_target = np.asarray(
+        env_cfg.viewer.lookat, dtype=np.float64
+    ) + camera_offset
     env.gym.set_camera_location(
         env.camera_handle,
         env.envs[0],
-        gymapi.Vec3(*env_cfg.viewer.pos),
-        gymapi.Vec3(*env_cfg.viewer.lookat),
+        gymapi.Vec3(*camera_position),
+        gymapi.Vec3(*camera_target),
     )
 
     frame_store = _FrameStore()

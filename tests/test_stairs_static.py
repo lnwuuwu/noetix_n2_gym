@@ -463,6 +463,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("args.num_envs = 1", stream_source)
         self.assertIn("render_all_camera_sensors", stream_source)
         self.assertIn("get_camera_image", stream_source)
+        self.assertIn("camera_offset = env.env_origins[0]", stream_source)
         self.assertIn('ThreadingHTTPServer(("127.0.0.1", args.stream_port)', stream_source)
 
     def test_ppo_storage_and_checkpoint_iteration_fixes_are_present(self):
