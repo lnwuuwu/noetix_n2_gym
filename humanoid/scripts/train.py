@@ -49,7 +49,12 @@ def train(args):
     # 创建算法运行器实例
     # ppo_runner: PPO算法运行器对象，负责执行训练过程
     # train_cfg: 训练配置对象，包含训练算法的具体参数
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
+    ppo_runner, train_cfg = task_registry.make_alg_runner(
+        env=env,
+        name=args.task,
+        args=args,
+        load_optimizer=not args.reset_optimizer,
+    )
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.
@@ -98,7 +103,16 @@ if __name__ == '__main__':
                 "type": int,
                 "default": None,
                 "help": "Optional fixed n2_stairs row (0=2 cm, ..., 4=10 cm).",
-            }
+            },
+            {
+                "name": "--reset_optimizer",
+                "action": "store_true",
+                "default": False,
+                "help": (
+                    "Load policy/curriculum from a checkpoint but start with "
+                    "a fresh optimizer (useful after reward changes)."
+                ),
+            },
         ]
     )
     # 调用训练函数开始训练

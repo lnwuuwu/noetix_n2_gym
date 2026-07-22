@@ -9,6 +9,41 @@ from typing import Dict, Sequence, Tuple
 import numpy as np
 
 
+def classify_tread_transition(
+    valid_landing,
+    candidate_tread,
+    candidate_foot,
+    previous_tread,
+    previous_foot,
+):
+    """Classify one landing using NumPy- or Torch-compatible operators.
+
+    The advancing foot must move to exactly the next tread and differ from the
+    foot that last advanced. A landing by the other foot on the existing tread
+    is a step-to join, not stair-over-stair progress. Inputs may be scalars or
+    equally shaped NumPy/Torch arrays; the returned tuple preserves that type.
+    """
+    advanced = valid_landing & (candidate_tread > previous_tread)
+    sequential = candidate_tread == (previous_tread + 1)
+    changed_foot = (previous_foot < 0) | (candidate_foot != previous_foot)
+    alternating_advance = advanced & sequential & changed_foot
+    repeated_lead = advanced & ~changed_foot
+    skipped_tread = advanced & ~sequential
+    same_tread_join = (
+        valid_landing
+        & (previous_tread > 0)
+        & (candidate_tread == previous_tread)
+        & (candidate_foot != previous_foot)
+    )
+    return (
+        advanced,
+        alternating_advance,
+        repeated_lead,
+        same_tread_join,
+        skipped_tread,
+    )
+
+
 def validate_stair_parameters(
     terrain_length: float,
     terrain_width: float,

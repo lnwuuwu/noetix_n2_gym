@@ -127,6 +127,40 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "path_failure": float(
                             env.last_episode_path_failure[env_id].item()
                         ),
+                        "alternating_tread_count": float(
+                            env.last_episode_alternating_tread_count[
+                                env_id
+                            ].item()
+                        ),
+                        "alternating_tread_rate": float(
+                            env.last_episode_alternating_tread_rate[
+                                env_id
+                            ].item()
+                        ),
+                        "repeated_lead_rate": float(
+                            env.last_episode_repeated_lead_rate[env_id].item()
+                        ),
+                        "same_tread_join_rate": float(
+                            env.last_episode_same_tread_join_rate[
+                                env_id
+                            ].item()
+                        ),
+                        "skipped_tread_rate": float(
+                            env.last_episode_skipped_tread_rate[env_id].item()
+                        ),
+                        "max_sagittal_foot_separation_m": float(
+                            env.last_episode_max_sagittal_foot_separation[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_swing_knee_flexion_rad": float(
+                            env.last_episode_mean_swing_knee_flexion[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_arm_swing_match": float(
+                            env.last_episode_mean_arm_swing_match[env_id].item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -168,6 +202,18 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "mean_max_lateral_deviation_m": mean("max_lateral_deviation_m"),
         "mean_max_yaw_deviation_rad": mean("max_yaw_deviation_rad"),
         "path_failure_rate": mean("path_failure"),
+        "mean_alternating_tread_count": mean("alternating_tread_count"),
+        "mean_alternating_tread_rate": mean("alternating_tread_rate"),
+        "mean_repeated_lead_rate": mean("repeated_lead_rate"),
+        "mean_same_tread_join_rate": mean("same_tread_join_rate"),
+        "mean_skipped_tread_rate": mean("skipped_tread_rate"),
+        "mean_max_sagittal_foot_separation_m": mean(
+            "max_sagittal_foot_separation_m"
+        ),
+        "mean_swing_knee_flexion_rad": mean(
+            "mean_swing_knee_flexion_rad"
+        ),
+        "mean_arm_swing_match": mean("mean_arm_swing_match"),
     }
 
 
@@ -244,6 +290,11 @@ def evaluate(args):
             "speed={mean_forward_speed_m_s:.3f}m/s "
             "lateral={mean_max_lateral_deviation_m:.3f}m "
             "flight={mean_double_flight_fraction:.1%} "
+            "alternate={mean_alternating_tread_rate:.1%} "
+            "join={mean_same_tread_join_rate:.1%} "
+            "stride={mean_max_sagittal_foot_separation_m:.3f}m "
+            "knee={mean_swing_knee_flexion_rad:.2f}rad "
+            "arm={mean_arm_swing_match:.2f} "
             "fall={fall_rate:.1%}".format(
                 **result
             )

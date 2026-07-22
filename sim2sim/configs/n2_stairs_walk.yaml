@@ -43,8 +43,9 @@ include_base_lin_vel: true
 
 # Must match N2StairsWalkCfg.env and the phase observation in N2StairsEnv.
 gait_phase:
-  frequency: 1.25
-  frequency_gain: 0.75
+  # One half-cycle per 0.30 m tread, matched to commanded forward speed.
+  frequency: 0.20
+  frequency_gain: 1.6666667
   reference_speed: 0.12
   phase_offset: 0.0
 

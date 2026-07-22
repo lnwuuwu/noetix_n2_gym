@@ -285,7 +285,7 @@ class N2StairsRobustCfgPPO(N2StairsCfgPPO):
 
 
 class N2StairsWalkCfg(N2StairsCfg):
-    """Strict alternating-gait task that rejects hopping and diagonal success."""
+    """Human-like stair-over-stair gait with strict route and speed checks."""
 
     class env(N2StairsCfg.env):
         include_gait_phase = True
@@ -306,8 +306,12 @@ class N2StairsWalkCfg(N2StairsCfg):
         # Phase clock is deployable: it depends only on elapsed policy time and
         # the commanded forward velocity. A short double-support interval is
         # included around every left/right transition for stair stability.
-        gait_frequency = 1.25
-        gait_frequency_gain = 0.75
+        # One half-cycle should advance one 0.30 m tread. Therefore gait
+        # cycles/s = command_speed / (2 * tread_width): 0.20 Hz at 0.12 m/s
+        # and 0.75 Hz at 0.45 m/s. The former 1.25 Hz clock asked the legs to
+        # switch roughly four times too quickly at the 0.18 m/s test command.
+        gait_frequency = 0.20
+        gait_frequency_gain = 1.6666667
         gait_reference_speed = 0.12
         double_support_ratio = 0.16
         gait_reward_grace_s = 0.50
@@ -329,6 +333,32 @@ class N2StairsWalkCfg(N2StairsCfg):
         # excluded by the independent double-flight bound.
         success_min_phase_contact_match = 0.70
         success_max_double_flight_fraction = 0.08
+
+        # A phase match does not prove stair-over-stair gait: a policy can put
+        # both feet on every tread while keeping one nominal swing leg. Count
+        # actual tread indices and require alternating feet on successive
+        # risers, with one missed sensor event tolerated across six steps.
+        success_min_alternating_tread_count = 4
+        success_min_alternating_tread_rate = 0.75
+        success_max_same_tread_join_rate = 0.20
+        success_max_skipped_tread_rate = 0.20
+
+        # Prevent the visually unstable straight-leg reach seen in the first
+        # strict policy. Adjacent 0.30 m treads remain comfortably reachable.
+        max_sagittal_foot_offset = 0.34
+        max_sagittal_foot_separation = 0.40
+        overstride_soft_margin = 0.08
+        success_max_sagittal_foot_separation = 0.44
+
+        # The knee target rises mildly with riser height. N2 has no actuated
+        # waist, so a small phase-locked arm swing supplies the available
+        # upper-body reaction without inventing nonexistent torso joints.
+        swing_knee_base_target = 0.48
+        swing_knee_height_gain = 2.5
+        swing_knee_max_target = 0.75
+        swing_knee_tracking_sharpness = 10.0
+        arm_swing_amplitude = 0.22
+        arm_swing_tracking_sharpness = 12.0
 
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
@@ -366,8 +396,20 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10
-            stairs_foot_step_progress = 1.25
+            stairs_foot_step_progress = 1.00
+            stairs_alternating_tread = 1.50
+            stairs_repeated_lead = -2.00
+            stairs_same_tread_join = -1.00
+            stairs_skipped_tread = -1.50
             stairs_stable_contact = 0.50
+
+            # Natural joint coordination: bend the airborne knee, avoid a
+            # large sagittal split, and move the arms contralaterally.
+            stairs_overstride = -4.0
+            stairs_swing_knee_flexion = 1.0
+            stairs_arm_swing = 0.75
+            default_joint_pos = 0.10
+            default_up_joint_pos = 0.0
 
             # Straight stair approach and neutral leg/foot yaw.
             stairs_lateral_drift = -6.0

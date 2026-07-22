@@ -9,7 +9,10 @@ from isaacgym.torch_utils import (
 import torch
 
 from humanoid.envs.n2.n2_env import N2Env
-from humanoid.utils.stairs_terrain import select_height_indices
+from humanoid.utils.stairs_terrain import (
+    classify_tread_transition,
+    select_height_indices,
+)
 from humanoid.utils.terrain import N2StairsTerrain
 
 
@@ -42,6 +45,14 @@ class N2StairsEnv(N2Env):
         self.ankle_dof_idxs = [
             dof_index["L_leg_ankle_joint"],
             dof_index["R_leg_ankle_joint"],
+        ]
+        self.knee_dof_idxs = [
+            dof_index["L_leg_knee_joint"],
+            dof_index["R_leg_knee_joint"],
+        ]
+        self.shoulder_pitch_dof_idxs = [
+            dof_index["L_arm_shoulder_pitch_joint"],
+            dof_index["R_arm_shoulder_pitch_joint"],
         ]
         self.up_joint_idxs = [
             dof_index[name] for name in actual_order if "_arm_" in name
@@ -160,6 +171,42 @@ class N2StairsEnv(N2Env):
         self.max_foot_contact_height = torch.zeros_like(
             self.foot_contact_height_delta
         )
+        # Strict walking tracks which foot most recently advanced to a new
+        # tread. A phase clock alone cannot distinguish stair-over-stair gait
+        # from a step-to pattern in which the same lead foot always advances.
+        self.last_advanced_tread = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.last_advanced_foot = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self.alternating_tread_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.repeated_lead_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.same_tread_join_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.skipped_tread_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.tread_advance_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.alternating_tread_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.repeated_lead_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.same_tread_join_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.skipped_tread_count = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.gait_phase_offset = torch.zeros_like(self.best_forward_progress)
         self.desired_contacts = torch.ones(
             self.num_envs,
@@ -182,6 +229,18 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.max_yaw_deviation = torch.zeros_like(self.best_forward_progress)
+        self.max_sagittal_foot_separation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.swing_knee_flexion_sum = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.swing_knee_sample_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.arm_swing_match_sum = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -239,6 +298,30 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_path_failure = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_alternating_tread_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_alternating_tread_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_repeated_lead_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_same_tread_join_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_skipped_tread_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_max_sagittal_foot_separation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_swing_knee_flexion = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_arm_swing_match = torch.zeros_like(
             self.best_forward_progress
         )
 
@@ -519,7 +602,7 @@ class N2StairsEnv(N2Env):
         return self.height_samples[px, py] * self.terrain.cfg.vertical_scale
 
     def _update_foot_step_progress(self):
-        """Track stable, alternating foot placements on newly higher treads."""
+        """Track stable landings and strict stair-over-stair alternation."""
         foot_surface_height = self._sample_terrain_height_xy(
             self.feet_pos[:, :, :2]
         ) - self.env_origins[:, 2].unsqueeze(1)
@@ -561,13 +644,112 @@ class N2StairsEnv(N2Env):
             & one_new_contact.unsqueeze(1)
             & stable_support
         )
-        self.foot_contact_height_delta[:] = (
-            raw_delta * alternating_landing.float()
-        )
+        self.alternating_tread_event[:] = 0.0
+        self.repeated_lead_event[:] = 0.0
+        self.same_tread_join_event[:] = 0.0
+        self.skipped_tread_event[:] = 0.0
+
+        if self.enforce_walk_gait:
+            # Quantize the supporting surface into the configured stair row.
+            # A true stair-over-stair sequence advances one tread at a time
+            # and changes the advancing foot on every new tread. Merely
+            # joining the lead foot on its tread is explicitly classified as
+            # step-to gait, even if the open-loop contact phase looks valid.
+            _, _, step_height = self._current_stair_targets()
+            tread_index = torch.round(
+                foot_surface_height
+                / torch.clamp(step_height.unsqueeze(1), min=0.02)
+            ).long()
+            tread_index = torch.clamp(
+                tread_index, min=0, max=int(self.cfg.terrain.num_steps)
+            )
+            has_valid_landing = torch.any(alternating_landing, dim=1)
+            candidate_foot = torch.argmax(
+                alternating_landing.long(), dim=1
+            )
+            candidate_tread = torch.gather(
+                tread_index, 1, candidate_foot.unsqueeze(1)
+            ).squeeze(1)
+
+            previous_tread = self.last_advanced_tread.clone()
+            previous_foot = self.last_advanced_foot.clone()
+            (
+                advanced,
+                alternating_advance,
+                repeated_lead,
+                same_tread_join,
+                skipped_tread,
+            ) = classify_tread_transition(
+                has_valid_landing,
+                candidate_tread,
+                candidate_foot,
+                previous_tread,
+                previous_foot,
+            )
+
+            self.alternating_tread_event[:] = alternating_advance.float()
+            self.repeated_lead_event[:] = repeated_lead.float()
+            self.same_tread_join_event[:] = same_tread_join.float()
+            self.skipped_tread_event[:] = skipped_tread.float()
+            self.tread_advance_count += advanced.float()
+            self.alternating_tread_count += alternating_advance.float()
+            self.repeated_lead_count += repeated_lead.float()
+            self.same_tread_join_count += same_tread_join.float()
+            self.skipped_tread_count += skipped_tread.float()
+
+            event_one_hot = torch.nn.functional.one_hot(
+                candidate_foot, num_classes=len(self.feet_indices)
+            ).float()
+            self.foot_contact_height_delta[:] = (
+                event_one_hot
+                * alternating_advance.unsqueeze(1).float()
+                * step_height.unsqueeze(1)
+            )
+
+            # Consume every advance, including a repeated lead or skipped
+            # tread, so the invalid event cannot later be relabeled as valid.
+            self.last_advanced_tread[advanced] = candidate_tread[advanced]
+            self.last_advanced_foot[advanced] = candidate_foot[advanced]
+        else:
+            # Preserve the original n2_stairs event definition and checkpoint
+            # behavior. The stricter tread sequence belongs only to the
+            # dedicated n2_stairs_walk task.
+            self.foot_contact_height_delta[:] = (
+                raw_delta * alternating_landing.float()
+            )
         # Even an invalid simultaneous landing consumes that height event, so
         # hopping cannot land once and collect it later by lifting one foot.
         self.max_foot_contact_height[:] = torch.maximum(
             self.max_foot_contact_height, attained_height
+        )
+
+    def _swing_knee_state(self):
+        """Return scheduled swing mask and left/right knee flexion."""
+        knees = self.dof_pos[:, self.knee_dof_idxs]
+        if self.include_gait_phase:
+            swing = ~self.desired_contacts & ~self.contacts
+        else:
+            swing = ~self.contacts
+        return swing, knees
+
+    def _arm_swing_tracking_score(self):
+        """Score small contralateral arm motion synchronized to leg phase."""
+        if not self.include_gait_phase:
+            return torch.ones_like(self.best_forward_progress)
+        phase_sine = torch.sin(2.0 * torch.pi * self._get_gait_phase())
+        amplitude = float(self.cfg.env.arm_swing_amplitude)
+        # URDF kinematics show negative shoulder pitch moves either hand in
+        # world +X. During left stance/right swing, the left arm therefore
+        # moves forward while the right arm moves backward.
+        target = torch.stack(
+            (-amplitude * phase_sine, amplitude * phase_sine), dim=1
+        )
+        shoulder_pitch = self.dof_pos[:, self.shoulder_pitch_dof_idxs]
+        sharpness = float(self.cfg.env.arm_swing_tracking_sharpness)
+        return torch.exp(
+            -sharpness * torch.mean(
+                torch.square(shoulder_pitch - target), dim=1
+            )
         )
 
     def _post_physics_step_callback(self):
@@ -611,6 +793,19 @@ class N2StairsEnv(N2Env):
         self.max_yaw_deviation[:] = torch.maximum(
             self.max_yaw_deviation, torch.abs(yaw_error)
         )
+        sagittal_foot_separation = torch.abs(
+            self.feet_pos[:, 0, 0] - self.feet_pos[:, 1, 0]
+        )
+        self.max_sagittal_foot_separation[:] = torch.maximum(
+            self.max_sagittal_foot_separation,
+            sagittal_foot_separation,
+        )
+        swing, knees = self._swing_knee_state()
+        self.swing_knee_flexion_sum += torch.sum(
+            knees * swing.float(), dim=1
+        )
+        self.swing_knee_sample_count += torch.sum(swing.float(), dim=1)
+        self.arm_swing_match_sum += self._arm_swing_tracking_score()
 
         if self.enforce_walk_gait:
             corridor_grace_steps = int(
@@ -675,6 +870,36 @@ class N2StairsEnv(N2Env):
                 self.double_flight_step_count / elapsed_steps
                 <= float(self.cfg.env.success_max_double_flight_fraction)
             )
+            tread_advance_denominator = torch.clamp(
+                self.tread_advance_count, min=1.0
+            )
+            alternating_tread_rate = (
+                self.alternating_tread_count / tread_advance_denominator
+            )
+            same_tread_join_rate = (
+                self.same_tread_join_count / tread_advance_denominator
+            )
+            skipped_tread_rate = (
+                self.skipped_tread_count / tread_advance_denominator
+            )
+            natural_step_sequence = (
+                self.alternating_tread_count
+                >= float(self.cfg.env.success_min_alternating_tread_count)
+            ) & (
+                alternating_tread_rate
+                >= float(self.cfg.env.success_min_alternating_tread_rate)
+            ) & (
+                same_tread_join_rate
+                <= float(self.cfg.env.success_max_same_tread_join_rate)
+            ) & (
+                skipped_tread_rate
+                <= float(self.cfg.env.success_max_skipped_tread_rate)
+            ) & (
+                self.max_sagittal_foot_separation
+                <= float(
+                    self.cfg.env.success_max_sagittal_foot_separation
+                )
+            )
             stable_top &= (
                 centered
                 & facing_forward
@@ -682,6 +907,7 @@ class N2StairsEnv(N2Env):
                 & command_consistent
                 & path_consistent
                 & gait_consistent
+                & natural_step_sequence
             )
             self.top_stable_time += self.dt
             self.top_stable_time *= stable_top.float()
@@ -818,6 +1044,40 @@ class N2StairsEnv(N2Env):
         path_failure = (
             self.path_failure_buf[env_ids] & valid
         ).float()
+        tread_advance_denominator = torch.clamp(
+            self.tread_advance_count[env_ids], min=1.0
+        )
+        alternating_tread_count = (
+            self.alternating_tread_count[env_ids] * valid.float()
+        )
+        alternating_tread_rate = (
+            self.alternating_tread_count[env_ids]
+            / tread_advance_denominator
+        ) * valid.float()
+        repeated_lead_rate = (
+            self.repeated_lead_count[env_ids]
+            / tread_advance_denominator
+        ) * valid.float()
+        same_tread_join_rate = (
+            self.same_tread_join_count[env_ids]
+            / tread_advance_denominator
+        ) * valid.float()
+        skipped_tread_rate = (
+            self.skipped_tread_count[env_ids]
+            / tread_advance_denominator
+        ) * valid.float()
+        max_sagittal_foot_separation = (
+            self.max_sagittal_foot_separation[env_ids] * valid.float()
+        )
+        mean_swing_knee_flexion = (
+            self.swing_knee_flexion_sum[env_ids]
+            / torch.clamp(
+                self.swing_knee_sample_count[env_ids], min=1.0
+            )
+        ) * valid.float()
+        mean_arm_swing_match = (
+            self.arm_swing_match_sum[env_ids] / episode_steps
+        ) * valid.float()
 
         self.last_episode_success[env_ids] = success
         self.last_episode_top_reached[env_ids] = top_reached
@@ -841,6 +1101,26 @@ class N2StairsEnv(N2Env):
         )
         self.last_episode_max_yaw_deviation[env_ids] = max_yaw_deviation
         self.last_episode_path_failure[env_ids] = path_failure
+        self.last_episode_alternating_tread_count[env_ids] = (
+            alternating_tread_count
+        )
+        self.last_episode_alternating_tread_rate[env_ids] = (
+            alternating_tread_rate
+        )
+        self.last_episode_repeated_lead_rate[env_ids] = repeated_lead_rate
+        self.last_episode_same_tread_join_rate[env_ids] = (
+            same_tread_join_rate
+        )
+        self.last_episode_skipped_tread_rate[env_ids] = skipped_tread_rate
+        self.last_episode_max_sagittal_foot_separation[env_ids] = (
+            max_sagittal_foot_separation
+        )
+        self.last_episode_mean_swing_knee_flexion[env_ids] = (
+            mean_swing_knee_flexion
+        )
+        self.last_episode_mean_arm_swing_match[env_ids] = (
+            mean_arm_swing_match
+        )
 
         super().reset_idx(env_ids)
 
@@ -891,6 +1171,30 @@ class N2StairsEnv(N2Env):
                 ),
                 "stairs_max_yaw_deviation": masked_mean(max_yaw_deviation),
                 "stairs_path_failure_rate": masked_mean(path_failure),
+                "stairs_alternating_tread_count": masked_mean(
+                    alternating_tread_count
+                ),
+                "stairs_alternating_tread_rate": masked_mean(
+                    alternating_tread_rate
+                ),
+                "stairs_repeated_lead_rate": masked_mean(
+                    repeated_lead_rate
+                ),
+                "stairs_same_tread_join_rate": masked_mean(
+                    same_tread_join_rate
+                ),
+                "stairs_skipped_tread_rate": masked_mean(
+                    skipped_tread_rate
+                ),
+                "stairs_max_sagittal_foot_separation": masked_mean(
+                    max_sagittal_foot_separation
+                ),
+                "stairs_mean_swing_knee_flexion": masked_mean(
+                    mean_swing_knee_flexion
+                ),
+                "stairs_mean_arm_swing_match": masked_mean(
+                    mean_arm_swing_match
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -910,6 +1214,17 @@ class N2StairsEnv(N2Env):
         self.double_flight_time[env_ids] = 0.0
         self.foot_contact_height_delta[env_ids] = 0.0
         self.max_foot_contact_height[env_ids] = 0.0
+        self.last_advanced_tread[env_ids] = 0
+        self.last_advanced_foot[env_ids] = -1
+        self.alternating_tread_event[env_ids] = 0.0
+        self.repeated_lead_event[env_ids] = 0.0
+        self.same_tread_join_event[env_ids] = 0.0
+        self.skipped_tread_event[env_ids] = 0.0
+        self.tread_advance_count[env_ids] = 0.0
+        self.alternating_tread_count[env_ids] = 0.0
+        self.repeated_lead_count[env_ids] = 0.0
+        self.same_tread_join_count[env_ids] = 0.0
+        self.skipped_tread_count[env_ids] = 0.0
         self.top_stable_time[env_ids] = 0.0
         self.path_failure_buf[env_ids] = False
         self.forward_speed_sum[env_ids] = 0.0
@@ -918,6 +1233,10 @@ class N2StairsEnv(N2Env):
         self.double_flight_step_count[env_ids] = 0.0
         self.max_lateral_deviation[env_ids] = 0.0
         self.max_yaw_deviation[env_ids] = 0.0
+        self.max_sagittal_foot_separation[env_ids] = 0.0
+        self.swing_knee_flexion_sum[env_ids] = 0.0
+        self.swing_knee_sample_count[env_ids] = 0.0
+        self.arm_swing_match_sum[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.stall_buf[env_ids] = False
@@ -1069,6 +1388,80 @@ class N2StairsEnv(N2Env):
         upright = (-self.projected_gravity[:, 2] > 0.80).float()
         # This is a discrete landing event, so cancel reward preparation's dt.
         return torch.sum(normalized_rise, dim=1) * upright / self.dt
+
+    def _reward_stairs_alternating_tread(self):
+        """Reward the opposite foot advancing exactly one new tread."""
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return self.alternating_tread_event * upright.float() / self.dt
+
+    def _reward_stairs_repeated_lead(self):
+        """Penalize one foot repeatedly leading onto successive treads."""
+        return self.repeated_lead_event / self.dt
+
+    def _reward_stairs_same_tread_join(self):
+        """Penalize the trailing foot joining the lead foot step-to style."""
+        return self.same_tread_join_event / self.dt
+
+    def _reward_stairs_skipped_tread(self):
+        """Penalize reaching over a tread instead of climbing sequentially."""
+        return self.skipped_tread_event / self.dt
+
+    def _reward_stairs_overstride(self):
+        """Penalize excessive fore-aft leg splits and full-leg reaching."""
+        base_x = self.root_states[:, 0].unsqueeze(1)
+        foot_offset = torch.abs(self.feet_pos[:, :, 0] - base_x)
+        foot_separation = torch.abs(
+            self.feet_pos[:, 0, 0] - self.feet_pos[:, 1, 0]
+        )
+        offset_excess = torch.clamp(
+            foot_offset - float(self.cfg.env.max_sagittal_foot_offset),
+            min=0.0,
+        )
+        separation_excess = torch.clamp(
+            foot_separation
+            - float(self.cfg.env.max_sagittal_foot_separation),
+            min=0.0,
+        )
+        normalizer = max(float(self.cfg.env.overstride_soft_margin), 1.0e-3)
+        return torch.mean(
+            torch.square(offset_excess / normalizer), dim=1
+        ) + torch.square(separation_excess / normalizer)
+
+    def _reward_stairs_swing_knee_flexion(self):
+        """Guide the airborne leg to bend rather than reach out straight."""
+        swing, knees = self._swing_knee_state()
+        _, _, step_height = self._current_stair_targets()
+        target = torch.clamp(
+            float(self.cfg.env.swing_knee_base_target)
+            + float(self.cfg.env.swing_knee_height_gain) * step_height,
+            max=float(self.cfg.env.swing_knee_max_target),
+        ).unsqueeze(1)
+        sharpness = float(self.cfg.env.swing_knee_tracking_sharpness)
+        score = torch.exp(-sharpness * torch.square(knees - target))
+        swing_count = torch.sum(swing.float(), dim=1)
+        score = torch.sum(score * swing.float(), dim=1) / torch.clamp(
+            swing_count, min=1.0
+        )
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return (
+            score
+            * (swing_count > 0).float()
+            * moving.float()
+            * upright.float()
+        )
+
+    def _reward_stairs_arm_swing(self):
+        """Encourage modest contralateral arms instead of a frozen torso."""
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = self.episode_length_buf > grace_steps
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return self._arm_swing_tracking_score() * (
+            active & moving & upright
+        ).float()
 
     def _reward_stairs_success(self):
         # One-shot terminal event; see the dt note above.

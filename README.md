@@ -6,14 +6,14 @@ The repository includes isolated `n2_stairs`, `n2_stairs_robust`, and
 `n2_stairs_walk` tasks while retaining `n2`, `n2_10dof`, and `n2_mimic`.
 `n2_stairs_walk` is the recommended task when a geometric stair-completion
 policy learns to bunny-hop or drift diagonally: it adds a deployable gait
-clock, velocity/centerline/heading observations, alternating contact rewards,
-and strict path/success checks.
+clock, velocity/centerline/heading observations, successive-tread foot
+alternation, swing-knee/arm coordination, and strict path/success checks.
 
 ```bash
 # From-scratch upstairs curriculum
 python humanoid/scripts/train.py --task=n2_stairs --headless
 
-# Strict alternating gait curriculum (train from zero; different Actor input)
+# Human-like stair-over-stair curriculum (strict checkpoints can resume)
 python humanoid/scripts/train.py --task=n2_stairs_walk --headless
 
 # Visualize a checkpoint at 6 cm and 0.25 m/s

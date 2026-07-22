@@ -109,6 +109,45 @@ class StairGeometryTests(unittest.TestCase):
         )
         np.testing.assert_allclose(heights, [0.0, 0.06, 0.06, 0.12, 0.36, 0.36])
 
+    def test_tread_classifier_rejects_step_to_and_repeated_lead_gaits(self):
+        def run_sequence(landings):
+            previous_tread = 0
+            previous_foot = -1
+            counts = np.zeros(5, dtype=np.int64)
+            for tread, foot in landings:
+                result = self.geometry.classify_tread_transition(
+                    np.asarray([True]),
+                    np.asarray([tread]),
+                    np.asarray([foot]),
+                    np.asarray([previous_tread]),
+                    np.asarray([previous_foot]),
+                )
+                flags = np.asarray([bool(value[0]) for value in result])
+                counts += flags.astype(np.int64)
+                if flags[0]:
+                    previous_tread = tread
+                    previous_foot = foot
+            return counts
+
+        # advanced, alternating, repeated-lead, same-tread-join, skipped
+        natural = run_sequence([(1, 0), (2, 1), (3, 0), (4, 1), (5, 0), (6, 1)])
+        np.testing.assert_array_equal(natural, [6, 6, 0, 0, 0])
+
+        step_to = run_sequence(
+            [
+                (1, 0), (1, 1),
+                (2, 0), (2, 1),
+                (3, 0), (3, 1),
+                (4, 0), (4, 1),
+                (5, 0), (5, 1),
+                (6, 0), (6, 1),
+            ]
+        )
+        np.testing.assert_array_equal(step_to, [6, 1, 5, 6, 0])
+
+        skipped = run_sequence([(1, 0), (3, 1)])
+        np.testing.assert_array_equal(skipped, [2, 1, 0, 0, 1])
+
 
 class StairConfigurationTests(unittest.TestCase):
     @classmethod
@@ -235,6 +274,30 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertLessEqual(
                 walk_cfg.env.success_max_mean_command_error, 0.06
             )
+            self.assertGreaterEqual(
+                walk_cfg.env.success_min_alternating_tread_count, 4
+            )
+            self.assertGreaterEqual(
+                walk_cfg.env.success_min_alternating_tread_rate, 0.75
+            )
+            self.assertLessEqual(
+                walk_cfg.env.success_max_same_tread_join_rate, 0.20
+            )
+            self.assertLessEqual(
+                walk_cfg.env.success_max_skipped_tread_rate, 0.20
+            )
+            self.assertLess(
+                walk_cfg.env.max_sagittal_foot_separation,
+                walk_cfg.env.success_max_sagittal_foot_separation,
+            )
+            self.assertLessEqual(
+                walk_cfg.env.success_max_sagittal_foot_separation, 0.44
+            )
+            self.assertGreater(
+                walk_cfg.env.swing_knee_max_target,
+                walk_cfg.env.swing_knee_base_target,
+            )
+            self.assertGreater(walk_cfg.env.arm_swing_amplitude, 0.0)
             self.assertEqual(train_cfg.runner.experiment_name, "n2_stairs")
             self.assertEqual(
                 walk_train_cfg.runner.experiment_name, "n2_stairs_walk"
@@ -378,6 +441,13 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_heading_alignment",
             "stairs_leg_alignment",
             "stairs_feet_yaw",
+            "stairs_alternating_tread",
+            "stairs_repeated_lead",
+            "stairs_same_tread_join",
+            "stairs_skipped_tread",
+            "stairs_overstride",
+            "stairs_swing_knee_flexion",
+            "stairs_arm_swing",
         ):
             self.assertIn(required_reward, walk_scales)
 
@@ -399,6 +469,14 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("one_new_contact", stairs_source)
         self.assertIn("self.double_flight_time", stairs_source)
         self.assertIn("stairs_first_step_rate", stairs_source)
+        self.assertIn("classify_tread_transition", stairs_source)
+        self.assertIn("self.last_advanced_foot", stairs_source)
+        self.assertIn("natural_step_sequence", stairs_source)
+        train_source = (
+            ROOT / "humanoid" / "scripts" / "train.py"
+        ).read_text()
+        self.assertIn("--reset_optimizer", train_source)
+        self.assertIn("load_optimizer=not args.reset_optimizer", train_source)
 
     def test_tasks_are_registered(self):
         registration = (ROOT / "humanoid" / "envs" / "__init__.py").read_text()
@@ -427,6 +505,14 @@ class StairConfigurationTests(unittest.TestCase):
             "mean_max_lateral_deviation_m",
             "mean_max_yaw_deviation_rad",
             "path_failure_rate",
+            "mean_alternating_tread_count",
+            "mean_alternating_tread_rate",
+            "mean_repeated_lead_rate",
+            "mean_same_tread_join_rate",
+            "mean_skipped_tread_rate",
+            "mean_max_sagittal_foot_separation_m",
+            "mean_swing_knee_flexion_rad",
+            "mean_arm_swing_match",
         ):
             self.assertIn(metric, eval_source)
 
@@ -460,8 +546,10 @@ class Sim2SimConsistencyTests(unittest.TestCase):
         self.assertEqual(config["num_obs"], 82 * config["frame_stack"])
         self.assertIn("logs/n2_stairs_walk/", config["policy_path"])
         self.assertTrue(config["include_base_lin_vel"])
-        self.assertEqual(config["gait_phase"]["frequency"], 1.25)
-        self.assertEqual(config["gait_phase"]["frequency_gain"], 0.75)
+        self.assertEqual(config["gait_phase"]["frequency"], 0.20)
+        self.assertAlmostEqual(
+            config["gait_phase"]["frequency_gain"], 1.6666667
+        )
         self.assertEqual(config["navigation_state"]["lateral_scale"], 2.0)
         self.assertEqual(config["navigation_state"]["yaw_scale"], 1.0)
         self.assertEqual(
