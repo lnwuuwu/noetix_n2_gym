@@ -9,6 +9,71 @@ from typing import Dict, Sequence, Tuple
 import numpy as np
 
 
+def stable_landing_mask(stable_contacts, last_stable_contacts):
+    """Return one-foot landings that acquire stable opposite-foot support.
+
+    The helper deliberately operates on either NumPy arrays or Torch tensors,
+    which keeps the touchdown state machine CPU-testable without importing
+    Isaac Gym.  Exactly one foot may become stable on a valid landing.
+    """
+    new_stable_contact = stable_contacts & ~last_stable_contacts
+    one_new_stable_contact = new_stable_contact.sum(-1) == 1
+    opposite_was_stable = last_stable_contacts[:, [1, 0]]
+    return (
+        new_stable_contact
+        & opposite_was_stable
+        & one_new_stable_contact[..., None]
+    )
+
+
+def smooth_swing_trajectory(start, landing, progress, arc_height):
+    """Interpolate a zero-end-slope XYZ swing with a bounded vertical arc."""
+    smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+    target = start + smooth_progress[..., None] * (landing - start)
+    target = target.copy() if isinstance(target, np.ndarray) else target.clone()
+    # The squared quartic bump has zero height *and* zero slope at lift-off
+    # and touchdown.  The former parabolic bump had non-zero endpoint slope,
+    # which asked the ankle to jump upward at lift-off and drive downward into
+    # the tread at touchdown even though the XYZ interpolation was smooth.
+    swing_bump = 16.0 * progress**2 * (1.0 - progress) ** 2
+    target[..., 2] += arc_height * swing_bump
+    return target
+
+
+def same_tread_support_mask(stable_contacts, tread_indices, num_steps):
+    """Identify step-to double support only on intermediate stair treads."""
+    both_stable = stable_contacts.all(-1)
+    same_tread = tread_indices[:, 0] == tread_indices[:, 1]
+    intermediate = (tread_indices[:, 0] > 0) & (
+        tread_indices[:, 0] < num_steps
+    )
+    return both_stable & same_tread & intermediate
+
+
+def stable_tread_advance_mask(
+    stable_measurement,
+    geometry_valid,
+    landing_pending,
+    tread_indices,
+    accepted_tread_indices,
+):
+    """Return stable higher-tread candidates produced by real swings.
+
+    This event is deliberately keyed to the per-foot accepted tread rather
+    than to a single contact edge. A sole that first touches a riser boundary
+    may become geometrically valid a few frames later and must still advance
+    the physical target exactly once. The caller handles simultaneous events
+    separately so a two-foot hop can synchronize physical state without being
+    rewarded as natural gait.
+    """
+    return (
+        stable_measurement
+        & geometry_valid
+        & landing_pending
+        & (tread_indices > accepted_tread_indices)
+    )
+
+
 def classify_tread_transition(
     valid_landing,
     candidate_tread,

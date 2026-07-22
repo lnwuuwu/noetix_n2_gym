@@ -177,6 +177,45 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "gait_frequency_hz": float(
                             env.last_episode_gait_frequency[env_id].item()
                         ),
+                        "same_tread_support_fraction": float(
+                            env.last_episode_same_tread_support_fraction[
+                                env_id
+                            ].item()
+                        ),
+                        "lower_leg_collision_fraction": float(
+                            env.last_episode_lower_leg_collision_fraction[
+                                env_id
+                            ].item()
+                        ),
+                        "foot_riser_collision_fraction": float(
+                            env.last_episode_foot_riser_collision_fraction[
+                                env_id
+                            ].item()
+                        ),
+                        "swing_timeout_fraction": float(
+                            env.last_episode_swing_timeout_fraction[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_base_behind_support": float(
+                            env.last_episode_mean_base_behind_support[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_foot_pitch_error": float(
+                            env.last_episode_mean_foot_pitch_error[
+                                env_id
+                            ].item()
+                        ),
+                        "max_swing_duration": float(
+                            env.last_episode_max_swing_duration[env_id].item()
+                        ),
+                        "left_tread_advances": float(
+                            env.last_episode_left_tread_advances[env_id].item()
+                        ),
+                        "right_tread_advances": float(
+                            env.last_episode_right_tread_advances[env_id].item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -236,6 +275,21 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         ),
         "mean_arm_swing_match": mean("mean_arm_swing_match"),
         "mean_gait_frequency_hz": mean("gait_frequency_hz"),
+        "mean_same_tread_support_fraction": mean(
+            "same_tread_support_fraction"
+        ),
+        "mean_lower_leg_collision_fraction": mean(
+            "lower_leg_collision_fraction"
+        ),
+        "mean_foot_riser_collision_fraction": mean(
+            "foot_riser_collision_fraction"
+        ),
+        "mean_swing_timeout_fraction": mean("swing_timeout_fraction"),
+        "mean_base_behind_support": mean("mean_base_behind_support"),
+        "mean_foot_pitch_error": mean("mean_foot_pitch_error"),
+        "mean_max_swing_duration": mean("max_swing_duration"),
+        "mean_left_tread_advances": mean("left_tread_advances"),
+        "mean_right_tread_advances": mean("right_tread_advances"),
     }
 
 
@@ -316,9 +370,17 @@ def evaluate(args):
             "flight={mean_double_flight_fraction:.1%} "
             "alternate={mean_alternating_tread_rate:.1%} "
             "join={mean_same_tread_join_rate:.1%} "
+            "step-to={mean_same_tread_support_fraction:.1%} "
+            "shin={mean_lower_leg_collision_fraction:.1%} "
+            "riser={mean_foot_riser_collision_fraction:.1%} "
+            "swing_timeout={mean_swing_timeout_fraction:.1%} "
             "footphase={mean_sagittal_foot_phase_match:.1%} "
             "stride={mean_max_sagittal_foot_separation_m:.3f}m "
             "knee={mean_swing_knee_flexion_rad:.2f}rad "
+            "baseback={mean_base_behind_support:.3f} "
+            "footpitch={mean_foot_pitch_error:.3f}rad "
+            "swingmax={mean_max_swing_duration:.2f}s "
+            "adv=L{mean_left_tread_advances:.2f}/R{mean_right_tread_advances:.2f} "
             "arm={mean_arm_swing_match:.2f} "
             "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(

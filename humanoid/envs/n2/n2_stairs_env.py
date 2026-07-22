@@ -11,7 +11,10 @@ import torch
 from humanoid.envs.n2.n2_env import N2Env
 from humanoid.utils.stairs_terrain import (
     classify_tread_transition,
+    same_tread_support_mask,
     select_height_indices,
+    smooth_swing_trajectory,
+    stable_tread_advance_mask,
 )
 from humanoid.utils.terrain import N2StairsTerrain
 
@@ -128,10 +131,71 @@ class N2StairsEnv(N2Env):
                     foot_body_names
                 )
             )
+        lower_leg_names = ["L_leg_knee_link", "R_leg_knee_link"]
+        missing_lower_legs = [
+            name for name in lower_leg_names if name not in self.body_names
+        ]
+        if missing_lower_legs:
+            raise RuntimeError(
+                "n2_stairs cannot resolve lower-leg bodies: {}".format(
+                    missing_lower_legs
+                )
+            )
+        self.lower_leg_indices = torch.tensor(
+            [self.body_names.index(name) for name in lower_leg_names],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.contacts = torch.zeros(
             self.num_envs,
             len(self.feet_indices),
             dtype=torch.bool,
+            device=self.device,
+        )
+        self.stable_contacts = torch.zeros_like(self.contacts)
+        self.last_stable_contacts = torch.zeros_like(self.contacts)
+        self.stable_contact_candidate_time = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.stable_contact_loss_time = torch.zeros_like(
+            self.stable_contact_candidate_time
+        )
+        self.current_foot_tread = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.accepted_foot_tread = torch.zeros_like(self.current_foot_tread)
+        self.same_tread_support = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.swing_active = torch.zeros_like(self.contacts)
+        self.swing_opposite_support_valid = torch.zeros_like(self.contacts)
+        self.swing_start_valid = torch.zeros_like(self.contacts)
+        self.swing_start_pos = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            3,
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.swing_elapsed_time = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.max_swing_duration = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.foot_surface_offset = torch.full(
+            (self.num_envs, len(self.feet_indices)),
+            float(getattr(self.cfg.env, "nominal_foot_surface_offset", 0.045)),
+            dtype=torch.float,
             device=self.device,
         )
 
@@ -271,6 +335,33 @@ class N2StairsEnv(N2Env):
         self.arm_swing_match_sum = torch.zeros_like(
             self.best_forward_progress
         )
+        self.same_tread_support_step_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.lower_leg_collision_step_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.foot_riser_collision_step_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.swing_timeout_step_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.base_behind_support_sum = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.foot_pitch_error_sum = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.foot_pitch_sample_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.left_tread_advance_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.right_tread_advance_count = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -371,6 +462,33 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_gait_frequency = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_same_tread_support_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_lower_leg_collision_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_foot_riser_collision_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_swing_timeout_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_base_behind_support = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_foot_pitch_error = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_max_swing_duration = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_left_tread_advances = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_right_tread_advances = torch.zeros_like(
             self.best_forward_progress
         )
 
@@ -693,9 +811,13 @@ class N2StairsEnv(N2Env):
 
     def _update_foot_step_progress(self):
         """Track stable landings and strict stair-over-stair alternation."""
-        foot_surface_height = self._sample_terrain_height_xy(
+        foot_surface_height_world = self._sample_terrain_height_xy(
             self.feet_pos[:, :, :2]
-        ) - self.env_origins[:, 2].unsqueeze(1)
+        )
+        foot_surface_height = (
+            foot_surface_height_world
+            - self.env_origins[:, 2].unsqueeze(1)
+        )
         foot_surface_height = torch.clamp(foot_surface_height, min=0.0)
         horizontal_speed = torch.norm(self.feet_vel[:, :, :2], dim=2)
 
@@ -704,17 +826,56 @@ class N2StairsEnv(N2Env):
                 self.foot_force_sensor_forces[:, :, :2], dim=2
             )
             vertical_force = torch.abs(self.foot_force_sensor_forces[:, :, 2])
-            vertical_support = vertical_force > horizontal_force
+            vertical_support = vertical_force >= (
+                float(
+                    getattr(
+                        self.cfg.env,
+                        "stable_contact_min_vertical_ratio",
+                        1.0,
+                    )
+                )
+                * horizontal_force
+            )
         else:
             vertical_support = torch.ones_like(self.contacts)
 
-        stable_support = (
+        raw_stable_candidate = (
             self.contacts
             & vertical_support
-            & (horizontal_speed < 0.20)
+            & (
+                horizontal_speed
+                < float(
+                    getattr(
+                        self.cfg.env,
+                        "stable_contact_max_horizontal_speed",
+                        0.20,
+                    )
+                )
+            )
         )
+        self.stable_contact_candidate_time[:] = torch.where(
+            raw_stable_candidate,
+            self.stable_contact_candidate_time + self.dt,
+            torch.zeros_like(self.stable_contact_candidate_time),
+        )
+        self.stable_contact_loss_time[:] = torch.where(
+            raw_stable_candidate,
+            torch.zeros_like(self.stable_contact_loss_time),
+            self.stable_contact_loss_time + self.dt,
+        )
+        previous_stable_support = self.last_stable_contacts.clone()
+        confirmed_support = self.stable_contact_candidate_time >= float(
+            getattr(self.cfg.env, "stable_contact_confirmation_s", self.dt)
+        )
+        retained_support = self.stable_contacts & (
+            self.stable_contact_loss_time
+            < float(getattr(self.cfg.env, "stable_contact_release_s", self.dt))
+        )
+        stable_support = confirmed_support | retained_support
+        self.stable_contacts[:] = stable_support
+        stable_measurement = stable_support & raw_stable_candidate
         attained_height = torch.where(
-            stable_support,
+            stable_measurement,
             foot_surface_height,
             self.max_foot_contact_height,
         )
@@ -722,22 +883,22 @@ class N2StairsEnv(N2Env):
             attained_height - self.max_foot_contact_height, min=0.0
         )
 
-        # A valid step landing has exactly one newly contacting foot and the
-        # opposite foot supported on the preceding frame. Synchronous hopping
-        # and impacts into a vertical riser therefore receive no event reward.
+        # Preserve the original raw-contact event for the legacy stair tasks.
         new_contact = self.contacts & ~self.last_contacts
         one_new_contact = torch.sum(new_contact.int(), dim=1) == 1
         opposite_was_supported = torch.flip(self.last_contacts, dims=[1])
-        alternating_landing = (
+        raw_alternating_landing = (
             new_contact
             & opposite_was_supported
             & one_new_contact.unsqueeze(1)
             & stable_support
         )
+
         self.alternating_tread_event[:] = 0.0
         self.repeated_lead_event[:] = 0.0
         self.same_tread_join_event[:] = 0.0
         self.skipped_tread_event[:] = 0.0
+        confirmed_landing = torch.zeros_like(self.contacts)
 
         if self.enforce_walk_gait:
             # Quantize the supporting surface into the configured stair row.
@@ -753,9 +914,142 @@ class N2StairsEnv(N2Env):
             tread_index = torch.clamp(
                 tread_index, min=0, max=int(self.cfg.terrain.num_steps)
             )
-            has_valid_landing = torch.any(alternating_landing, dim=1)
+
+            # Reject ankle samples on a vertical boundary or far from the
+            # inferred sole height.  This prevents a shin/riser contact from
+            # advancing the physical stair target before the sole is actually
+            # resting inside the tread.
+            stair_start_x = self.stair_start_x[
+                self.terrain_levels, self.terrain_types
+            ].unsqueeze(1)
+            step_width = float(self.cfg.terrain.step_width)
+            tread_margin = float(self.cfg.env.stable_landing_tread_margin)
+            tread_start_x = stair_start_x + torch.clamp(
+                tread_index.float() - 1.0, min=0.0
+            ) * step_width
+            tread_end_x = stair_start_x + tread_index.float() * step_width
+            approach_or_top = (
+                (tread_index == 0)
+                | (tread_index == int(self.cfg.terrain.num_steps))
+            )
+            inside_tread = approach_or_top | (
+                (self.feet_pos[:, :, 0] >= tread_start_x + tread_margin)
+                & (self.feet_pos[:, :, 0] <= tread_end_x - tread_margin)
+            )
+            nominal_ankle_height = (
+                foot_surface_height_world + self.foot_surface_offset
+            )
+            height_tolerance = torch.minimum(
+                torch.full_like(
+                    step_height,
+                    float(self.cfg.env.stable_landing_height_tolerance),
+                ),
+                float(self.cfg.env.stable_landing_height_tolerance_ratio)
+                * step_height,
+            ).unsqueeze(1)
+            height_consistent = torch.abs(
+                self.feet_pos[:, :, 2] - nominal_ankle_height
+            ) <= height_tolerance
+            landing_geometry_valid = inside_tread & height_consistent
+            valid_stable_tread = confirmed_support & landing_geometry_valid
+            confirmed_landing = self.swing_active & valid_stable_tread
+
+            # Only a foot with a latched physical lift-off can produce a tread
+            # transition. This blocks the old shortcut in which a planted foot
+            # slid over a height-field boundary and collected an alternating
+            # landing without ever swinging.
+            tread_advance_candidates = stable_tread_advance_mask(
+                confirmed_support,
+                landing_geometry_valid,
+                self.swing_active,
+                tread_index,
+                self.accepted_foot_tread,
+            )
+            candidate_count = torch.sum(
+                tread_advance_candidates.int(), dim=1
+            )
+            one_candidate = candidate_count == 1
+            simultaneous_candidates = candidate_count > 1
+            physical_landing = (
+                tread_advance_candidates & one_candidate.unsqueeze(1)
+            )
+
+            # Natural gait additionally requires the opposite foot to have
+            # remained in real contact for the whole swing. A brief double
+            # flight can still synchronize physical target state, but cannot
+            # collect the alternating-tread reward.
+            opposite_contact_now = torch.flip(self.contacts, dims=[1])
+            stable_alternating_landing = (
+                physical_landing
+                & self.swing_opposite_support_valid
+                & opposite_contact_now
+            )
+
+            # Actual stance tread may decrease after a slip or recovery step;
+            # the separate accepted high-watermark prevents replaying an old
+            # ascent event when that foot climbs back onto the same tread.
+            self.current_foot_tread[:] = torch.where(
+                valid_stable_tread,
+                tread_index,
+                self.current_foot_tread,
+            )
+            accepted_tread = torch.maximum(
+                self.accepted_foot_tread, tread_index
+            )
+            self.accepted_foot_tread[:] = torch.where(
+                tread_advance_candidates,
+                accepted_tread,
+                self.accepted_foot_tread,
+            )
+            self.same_tread_support[:] = same_tread_support_mask(
+                stable_support & self.contacts,
+                self.current_foot_tread,
+                int(self.cfg.terrain.num_steps),
+            )
+
+            # Learn the ankle-link-to-sole height from stable stance samples.
+            # This makes the touchdown endpoint land on the tread instead of
+            # repeatedly adding the whole riser height to the airborne foot.
+            observed_offset = torch.clamp(
+                self.feet_pos[:, :, 2] - foot_surface_height_world,
+                min=0.02,
+                max=0.14,
+            )
+            offset_rate = float(self.cfg.env.foot_surface_offset_update_rate)
+            filtered_offset = (
+                (1.0 - offset_rate) * self.foot_surface_offset
+                + offset_rate * observed_offset
+            )
+            # Bootstrap the ankle-to-sole offset on the flat approach without
+            # first requiring the offset-dependent height gate to pass. Once
+            # climbing starts, retain the full geometry check so a riser edge
+            # cannot corrupt the calibration.
+            offset_calibration_valid = (
+                confirmed_support
+                & inside_tread
+                & ((tread_index == 0) | height_consistent)
+            )
+            self.foot_surface_offset[:] = torch.where(
+                offset_calibration_valid,
+                filtered_offset,
+                self.foot_surface_offset,
+            )
+
+            # Reject boundary-sampled heights from first-step/max-height
+            # diagnostics. Only a confirmed sole placement inside a tread may
+            # raise the per-foot attained height.
+            attained_height = torch.where(
+                valid_stable_tread,
+                foot_surface_height,
+                self.max_foot_contact_height,
+            )
+
+            has_physical_landing = torch.any(physical_landing, dim=1)
+            has_natural_landing = torch.any(
+                stable_alternating_landing, dim=1
+            )
             candidate_foot = torch.argmax(
-                alternating_landing.long(), dim=1
+                physical_landing.long(), dim=1
             )
             candidate_tread = torch.gather(
                 tread_index, 1, candidate_foot.unsqueeze(1)
@@ -770,13 +1064,17 @@ class N2StairsEnv(N2Env):
                 same_tread_join,
                 skipped_tread,
             ) = classify_tread_transition(
-                has_valid_landing,
+                has_physical_landing,
                 candidate_tread,
                 candidate_foot,
                 previous_tread,
                 previous_foot,
                 self.last_joined_tread,
             )
+            # Physical state must progress after a valid one-foot touchdown
+            # even if a brief double-flight means it was not a rewarded
+            # support-to-support transition.
+            alternating_advance &= has_natural_landing
 
             self.alternating_tread_event[:] = alternating_advance.float()
             self.repeated_lead_event[:] = repeated_lead.float()
@@ -787,6 +1085,12 @@ class N2StairsEnv(N2Env):
             self.repeated_lead_count += repeated_lead.float()
             self.same_tread_join_count += same_tread_join.float()
             self.skipped_tread_count += skipped_tread.float()
+            self.left_tread_advance_count += (
+                advanced & (candidate_foot == 0)
+            ).float()
+            self.right_tread_advance_count += (
+                advanced & (candidate_foot == 1)
+            ).float()
             self.last_joined_tread[same_tread_join] = candidate_tread[
                 same_tread_join
             ]
@@ -804,13 +1108,100 @@ class N2StairsEnv(N2Env):
             # tread, so the invalid event cannot later be relabeled as valid.
             self.last_advanced_tread[advanced] = candidate_tread[advanced]
             self.last_advanced_foot[advanced] = candidate_foot[advanced]
+
+            # A simultaneous two-foot ascent is never a natural step, but it
+            # must still synchronize the global physical target. Otherwise the
+            # per-foot high-watermarks consume the landing while
+            # ``last_advanced_tread + 1`` remains permanently one riser behind.
+            simultaneous_tread = torch.max(
+                torch.where(
+                    tread_advance_candidates,
+                    tread_index,
+                    torch.zeros_like(tread_index),
+                ),
+                dim=1,
+            ).values
+            synchronize_hop = simultaneous_candidates & (
+                simultaneous_tread > self.last_advanced_tread
+            )
+            self.last_advanced_tread[synchronize_hop] = simultaneous_tread[
+                synchronize_hop
+            ]
+            self.last_advanced_foot[synchronize_hop] = -1
+            self.last_joined_tread[synchronize_hop] = -1
         else:
             # Preserve the original n2_stairs event definition and checkpoint
             # behavior. The stricter tread sequence belongs only to the
             # dedicated n2_stairs_walk task.
             self.foot_contact_height_delta[:] = (
-                raw_delta * alternating_landing.float()
+                raw_delta * raw_alternating_landing.float()
             )
+            confirmed_landing = self.swing_active & confirmed_support
+
+        # Latch lift-off on the first truly airborne frame, independently of
+        # stable-contact release hysteresis. Keep that pending swing alive
+        # through impact until a geometrically valid, confirmed touchdown.
+        raw_airborne = ~self.contacts
+        foot_was_supported = previous_stable_support & self.last_contacts
+        opposite_was_supported = torch.flip(
+            previous_stable_support & self.last_contacts, dims=[1]
+        )
+        opposite_contact_now = torch.flip(self.contacts, dims=[1])
+        new_swing = (
+            raw_airborne
+            & ~self.swing_active
+            & foot_was_supported
+        )
+        pending_before_touchdown = self.swing_active | new_swing
+        support_valid = torch.where(
+            new_swing,
+            opposite_was_supported & opposite_contact_now,
+            self.swing_opposite_support_valid,
+        )
+        support_valid = torch.where(
+            pending_before_touchdown,
+            support_valid & opposite_contact_now,
+            torch.zeros_like(support_valid),
+        )
+        self.swing_start_pos[:] = torch.where(
+            new_swing.unsqueeze(2),
+            self.feet_pos,
+            self.swing_start_pos,
+        )
+        self.swing_start_valid[new_swing] = True
+        self.swing_start_valid[confirmed_landing] = False
+        continued_swing_time = self.swing_elapsed_time + self.dt
+        pending_duration = torch.where(
+            new_swing,
+            torch.zeros_like(continued_swing_time),
+            continued_swing_time,
+        )
+        self.max_swing_duration[:] = torch.maximum(
+            self.max_swing_duration,
+            torch.max(
+                torch.where(
+                    pending_before_touchdown,
+                    pending_duration,
+                    torch.zeros_like(pending_duration),
+                ),
+                dim=1,
+            ).values,
+        )
+        pending_after_touchdown = (
+            pending_before_touchdown & ~confirmed_landing
+        )
+        self.swing_elapsed_time[:] = torch.where(
+            pending_after_touchdown,
+            pending_duration,
+            torch.zeros_like(self.swing_elapsed_time),
+        )
+        self.swing_active[:] = pending_after_touchdown
+        self.swing_opposite_support_valid[:] = torch.where(
+            pending_after_touchdown,
+            support_valid,
+            torch.zeros_like(support_valid),
+        )
+        self.last_stable_contacts[:] = stable_support
         # Even an invalid simultaneous landing consumes that height event, so
         # hopping cannot land once and collect it later by lifting one foot.
         self.max_foot_contact_height[:] = torch.maximum(
@@ -820,7 +1211,9 @@ class N2StairsEnv(N2Env):
     def _swing_knee_state(self):
         """Return scheduled swing mask and left/right knee flexion."""
         knees = self.dof_pos[:, self.knee_dof_idxs]
-        if self.include_gait_phase:
+        if self.enforce_walk_gait:
+            swing = self.swing_active
+        elif self.include_gait_phase:
             swing = ~self.desired_contacts & ~self.contacts
         else:
             swing = ~self.contacts
@@ -878,40 +1271,289 @@ class N2StairsEnv(N2Env):
 
     def _next_tread_swing_state(self):
         """Return the next foot and a cheat-resistant single-support mask."""
-        expected_foot = torch.clamp(
-            1 - self.last_advanced_foot, min=0, max=1
+        scheduled_swing_mask = ~self.desired_contacts
+        scheduled_foot = torch.argmax(
+            scheduled_swing_mask.long(), dim=1
+        )
+        physical_foot = torch.argmax(self.swing_active.long(), dim=1)
+        has_physical_swing = torch.any(self.swing_active, dim=1)
+        initial_expected_foot = torch.where(
+            has_physical_swing, physical_foot, scheduled_foot
+        )
+        expected_foot = torch.where(
+            self.last_advanced_foot < 0,
+            initial_expected_foot,
+            torch.clamp(1 - self.last_advanced_foot, min=0, max=1),
         )
         scheduled_swing = torch.gather(
-            (~self.desired_contacts).long(),
+            scheduled_swing_mask.long(),
             1,
             expected_foot.unsqueeze(1),
         ).squeeze(1).bool()
-        contact_filt = torch.logical_or(self.contacts, self.last_contacts)
+        expected_in_flight = torch.gather(
+            self.swing_active.long(),
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1).bool()
         actually_airborne = torch.gather(
-            (~contact_filt).long(),
+            self.swing_active.long(),
             1,
             expected_foot.unsqueeze(1),
         ).squeeze(1).bool()
-        opposite_foot = 1 - expected_foot
         opposite_supported = torch.gather(
-            contact_filt.long(),
+            self.swing_opposite_support_valid.long(),
             1,
-            opposite_foot.unsqueeze(1),
+            expected_foot.unsqueeze(1),
         ).squeeze(1).bool()
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
         grace_steps = int(
             getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
         )
         active = (
-            (self.last_advanced_tread >= 1)
-            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
-            & scheduled_swing
+            (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+            & (scheduled_swing | expected_in_flight)
             & actually_airborne
             & opposite_supported
+            & near_stairs
             & (self.episode_length_buf > grace_steps)
             & (self.root_states[:, 7] > 0.03)
             & (-self.projected_gravity[:, 2] > 0.80)
         )
         return expected_foot, active
+
+    def _nominal_swing_duration(self):
+        """Return physical airborne time implied by the deployed gait clock."""
+        frequency = torch.where(
+            self.episode_gait_frequency > 0.0,
+            self.episode_gait_frequency,
+            self._scheduled_gait_frequency(),
+        )
+        single_support_fraction = 1.0 - float(
+            self.cfg.env.double_support_ratio
+        )
+        return single_support_fraction / torch.clamp(
+            2.0 * frequency, min=0.10
+        )
+
+    def _swing_progress_state(self):
+        """Return per-foot progress measured from the real lift-off event."""
+        nominal = self._nominal_swing_duration().unsqueeze(1)
+        return torch.clamp(
+            self.swing_elapsed_time / torch.clamp(nominal, min=self.dt),
+            min=0.0,
+            max=1.0,
+        )
+
+    def _swing_trajectory_state(self):
+        """Track a smooth lift-off-to-next-tread 3-D swing trajectory."""
+        expected_foot, active = self._next_tread_swing_state()
+        gather_xyz = expected_foot.view(-1, 1, 1).expand(-1, 1, 3)
+        gather_scalar = expected_foot.unsqueeze(1)
+        start = torch.gather(
+            self.swing_start_pos, 1, gather_xyz
+        ).squeeze(1)
+        start_valid = torch.gather(
+            self.swing_start_valid.long(), 1, gather_scalar
+        ).squeeze(1).bool()
+        progress = torch.gather(
+            self._swing_progress_state(), 1, gather_scalar
+        ).squeeze(1)
+
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        _, _, step_height = self._current_stair_targets()
+        next_tread = torch.clamp(
+            self.last_advanced_tread + 1,
+            min=1,
+            max=int(self.cfg.terrain.num_steps),
+        )
+        step_width = float(self.cfg.terrain.step_width)
+        landing_x = stair_start_x + (
+            next_tread.float() - 0.5
+        ) * step_width
+        lateral_offset = float(self.cfg.env.foothold_lateral_offset)
+        landing_y = self.env_origins[:, 1] + torch.where(
+            expected_foot == 0,
+            torch.full_like(landing_x, lateral_offset),
+            torch.full_like(landing_x, -lateral_offset),
+        )
+        ankle_offset = torch.gather(
+            self.foot_surface_offset, 1, gather_scalar
+        ).squeeze(1)
+        landing_z = (
+            self.env_origins[:, 2]
+            + next_tread.float() * step_height
+            + ankle_offset
+        )
+        landing = torch.stack((landing_x, landing_y, landing_z), dim=1)
+
+        target = smooth_swing_trajectory(
+            start,
+            landing,
+            progress,
+            float(self.cfg.env.swing_trajectory_arc_base)
+            + float(self.cfg.env.swing_trajectory_arc_height_gain)
+            * step_height,
+        )
+        actual = torch.gather(
+            self.feet_pos, 1, gather_xyz
+        ).squeeze(1)
+        normalizers = torch.tensor(
+            [
+                float(self.cfg.env.swing_trajectory_x_normalizer),
+                float(self.cfg.env.swing_trajectory_y_normalizer),
+                float(self.cfg.env.swing_trajectory_z_normalizer),
+            ],
+            dtype=torch.float,
+            device=self.device,
+        )
+        error_clip = float(self.cfg.env.swing_trajectory_error_clip)
+        normalized_error = torch.clamp(
+            (actual - target) / normalizers,
+            min=-error_clip,
+            max=error_clip,
+        )
+        squared_error = torch.mean(torch.square(normalized_error), dim=1)
+        score = torch.exp(
+            -float(self.cfg.env.swing_trajectory_sharpness)
+            * squared_error
+        )
+        target_active = active & start_valid
+
+        # Do not pay positive tracking reward while the leg or foot is pushing
+        # into a riser.  The bounded error and explicit collision terms remain.
+        lower_leg_collision = torch.gather(
+            self._lower_leg_collision_per_foot(), 1, gather_scalar
+        ).squeeze(1)
+        foot_riser_collision = torch.gather(
+            self._foot_riser_collision_per_foot(), 1, gather_scalar
+        ).squeeze(1)
+        collision_free = (
+            (lower_leg_collision <= 0.0)
+            & (foot_riser_collision <= 0.0)
+        )
+        score *= collision_free.float()
+        return score, squared_error, target_active.float()
+
+    def _swing_timeout_state(self):
+        """Return bounded severity for a physical swing lasting too long."""
+        allowed = (
+            self._nominal_swing_duration().unsqueeze(1)
+            * float(self.cfg.env.swing_timeout_ratio)
+            + float(self.cfg.env.swing_timeout_margin_s)
+        )
+        severity = torch.clamp(
+            (self.swing_elapsed_time - allowed)
+            / torch.clamp(allowed, min=self.dt),
+            min=0.0,
+            max=1.0,
+        )
+        severity *= self.swing_active.float()
+        return torch.max(severity, dim=1).values
+
+    def _lower_leg_collision_per_foot(self):
+        """Return clipped left/right shin-contact severity."""
+        force = torch.norm(
+            self.contact_forces[:, self.lower_leg_indices, :], dim=2
+        )
+        return torch.clamp(
+            (
+                force - float(self.cfg.env.lower_leg_contact_threshold)
+            )
+            / max(float(self.cfg.env.lower_leg_contact_scale), 1.0e-3),
+            min=0.0,
+            max=1.0,
+        )
+
+    def _foot_riser_collision_per_foot(self):
+        """Separate horizontal riser impacts from normal floor support."""
+        if self.foot_force_sensor_forces is not None:
+            foot_force = self.foot_force_sensor_forces
+        else:
+            foot_force = self.contact_forces[:, self.feet_indices, :]
+        horizontal = torch.norm(foot_force[:, :, :2], dim=2)
+        vertical = torch.abs(foot_force[:, :, 2])
+        required_horizontal = torch.maximum(
+            torch.full_like(
+                horizontal,
+                float(self.cfg.env.foot_riser_horizontal_threshold),
+            ),
+            float(self.cfg.env.foot_riser_force_ratio) * vertical,
+        )
+        severity = torch.clamp(
+            (horizontal - required_horizontal)
+            / max(float(self.cfg.env.foot_riser_contact_scale), 1.0e-3),
+            min=0.0,
+            max=1.0,
+        )
+        return severity * (~self.stable_contacts).float()
+
+    def _base_behind_support_state(self):
+        """Measure how far the pelvis trails the stable support polygon."""
+        support_weight = self.stable_contacts.float()
+        support_count = torch.sum(support_weight, dim=1)
+        support_x = torch.sum(
+            self.feet_pos[:, :, 0] * support_weight, dim=1
+        ) / torch.clamp(support_count, min=1.0)
+        excess = torch.clamp(
+            support_x
+            - self.root_states[:, 0]
+            - float(self.cfg.env.base_support_backward_allowance),
+            min=0.0,
+        )
+        stair_start_x = self.stair_start_x[
+            self.terrain_levels, self.terrain_types
+        ]
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
+        active = (
+            (support_count > 0)
+            & near_stairs
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        raw_excess = excess * active.float()
+        normalized = torch.clamp(
+            raw_excess
+            / max(float(self.cfg.env.base_support_backward_scale), 1.0e-3),
+            max=float(self.cfg.env.base_support_backward_error_clip),
+        )
+        return raw_excess, torch.square(normalized)
+
+    def _foot_pitch_state(self):
+        """Keep stance and late-swing soles approximately level."""
+        feet_quat = self.feet_quat.reshape(-1, 4)
+        _, foot_pitch, _ = get_euler_xyz(feet_quat)
+        foot_pitch = torch.atan2(
+            torch.sin(foot_pitch), torch.cos(foot_pitch)
+        ).reshape(self.num_envs, len(self.feet_indices))
+        progress = self._swing_progress_state()
+        mask = self.stable_contacts | (
+            self.swing_active
+            & (progress >= float(self.cfg.env.late_swing_progress))
+        )
+        normalized = torch.clamp(
+            torch.abs(foot_pitch)
+            / max(float(self.cfg.env.foot_pitch_normalizer), 1.0e-3),
+            max=float(self.cfg.env.foot_pitch_error_clip),
+        )
+        sample_count = torch.sum(mask.float(), dim=1)
+        mean_abs = torch.sum(
+            torch.abs(foot_pitch) * mask.float(), dim=1
+        ) / torch.clamp(sample_count, min=1.0)
+        penalty = torch.sum(
+            torch.square(normalized) * mask.float(), dim=1
+        ) / torch.clamp(sample_count, min=1.0)
+        return penalty, mean_abs, sample_count
 
     def _next_tread_foot_target_state(self):
         """Target the center of the next riser with the opposite swing foot.
@@ -1052,6 +1694,35 @@ class N2StairsEnv(N2Env):
         )
         self.swing_knee_sample_count += torch.sum(swing.float(), dim=1)
         self.arm_swing_match_sum += self._arm_swing_tracking_score()
+        if self.enforce_walk_gait:
+            lower_leg_collision = torch.max(
+                self._lower_leg_collision_per_foot(), dim=1
+            ).values
+            foot_riser_collision = torch.max(
+                self._foot_riser_collision_per_foot(), dim=1
+            ).values
+            swing_timeout = self._swing_timeout_state()
+            base_behind_support, _ = self._base_behind_support_state()
+            _, mean_foot_pitch_error, foot_pitch_samples = (
+                self._foot_pitch_state()
+            )
+            self.same_tread_support_step_count += (
+                self.same_tread_support.float()
+            )
+            self.lower_leg_collision_step_count += (
+                lower_leg_collision > 0.0
+            ).float()
+            self.foot_riser_collision_step_count += (
+                foot_riser_collision > 0.0
+            ).float()
+            self.swing_timeout_step_count += (
+                swing_timeout > 0.0
+            ).float()
+            self.base_behind_support_sum += base_behind_support
+            self.foot_pitch_error_sum += (
+                mean_foot_pitch_error * foot_pitch_samples
+            )
+            self.foot_pitch_sample_count += foot_pitch_samples
 
         if self.enforce_walk_gait:
             corridor_grace_steps = int(
@@ -1421,6 +2092,36 @@ class N2StairsEnv(N2Env):
         mean_arm_swing_match = (
             self.arm_swing_match_sum[env_ids] / episode_steps
         ) * valid.float()
+        same_tread_support_fraction = (
+            self.same_tread_support_step_count[env_ids] / episode_steps
+        ) * valid.float()
+        lower_leg_collision_fraction = (
+            self.lower_leg_collision_step_count[env_ids] / episode_steps
+        ) * valid.float()
+        foot_riser_collision_fraction = (
+            self.foot_riser_collision_step_count[env_ids] / episode_steps
+        ) * valid.float()
+        swing_timeout_fraction = (
+            self.swing_timeout_step_count[env_ids] / episode_steps
+        ) * valid.float()
+        mean_base_behind_support = (
+            self.base_behind_support_sum[env_ids] / episode_steps
+        ) * valid.float()
+        mean_foot_pitch_error = (
+            self.foot_pitch_error_sum[env_ids]
+            / torch.clamp(
+                self.foot_pitch_sample_count[env_ids], min=1.0
+            )
+        ) * valid.float()
+        max_swing_duration = (
+            self.max_swing_duration[env_ids] * valid.float()
+        )
+        left_tread_advances = (
+            self.left_tread_advance_count[env_ids] * valid.float()
+        )
+        right_tread_advances = (
+            self.right_tread_advance_count[env_ids] * valid.float()
+        )
 
         self.last_episode_success[env_ids] = success
         self.last_episode_completion[env_ids] = completion
@@ -1470,6 +2171,27 @@ class N2StairsEnv(N2Env):
             mean_arm_swing_match
         )
         self.last_episode_gait_frequency[env_ids] = episode_gait_frequency
+        self.last_episode_same_tread_support_fraction[env_ids] = (
+            same_tread_support_fraction
+        )
+        self.last_episode_lower_leg_collision_fraction[env_ids] = (
+            lower_leg_collision_fraction
+        )
+        self.last_episode_foot_riser_collision_fraction[env_ids] = (
+            foot_riser_collision_fraction
+        )
+        self.last_episode_swing_timeout_fraction[env_ids] = (
+            swing_timeout_fraction
+        )
+        self.last_episode_mean_base_behind_support[env_ids] = (
+            mean_base_behind_support
+        )
+        self.last_episode_mean_foot_pitch_error[env_ids] = (
+            mean_foot_pitch_error
+        )
+        self.last_episode_max_swing_duration[env_ids] = max_swing_duration
+        self.last_episode_left_tread_advances[env_ids] = left_tread_advances
+        self.last_episode_right_tread_advances[env_ids] = right_tread_advances
 
         super().reset_idx(env_ids)
 
@@ -1560,6 +2282,33 @@ class N2StairsEnv(N2Env):
                 "stairs_gait_frequency_transition": (
                     self._gait_frequency_transition_fraction()
                 ),
+                "stairs_same_tread_support_fraction": masked_mean(
+                    same_tread_support_fraction
+                ),
+                "stairs_lower_leg_collision_fraction": masked_mean(
+                    lower_leg_collision_fraction
+                ),
+                "stairs_foot_riser_collision_fraction": masked_mean(
+                    foot_riser_collision_fraction
+                ),
+                "stairs_swing_timeout_fraction": masked_mean(
+                    swing_timeout_fraction
+                ),
+                "stairs_mean_base_behind_support": masked_mean(
+                    mean_base_behind_support
+                ),
+                "stairs_mean_foot_pitch_error": masked_mean(
+                    mean_foot_pitch_error
+                ),
+                "stairs_max_swing_duration": masked_mean(
+                    max_swing_duration
+                ),
+                "stairs_left_tread_advances": masked_mean(
+                    left_tread_advances
+                ),
+                "stairs_right_tread_advances": masked_mean(
+                    right_tread_advances
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -1609,6 +2358,15 @@ class N2StairsEnv(N2Env):
         self.swing_knee_flexion_sum[env_ids] = 0.0
         self.swing_knee_sample_count[env_ids] = 0.0
         self.arm_swing_match_sum[env_ids] = 0.0
+        self.same_tread_support_step_count[env_ids] = 0.0
+        self.lower_leg_collision_step_count[env_ids] = 0.0
+        self.foot_riser_collision_step_count[env_ids] = 0.0
+        self.swing_timeout_step_count[env_ids] = 0.0
+        self.base_behind_support_sum[env_ids] = 0.0
+        self.foot_pitch_error_sum[env_ids] = 0.0
+        self.foot_pitch_sample_count[env_ids] = 0.0
+        self.left_tread_advance_count[env_ids] = 0.0
+        self.right_tread_advance_count[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.completion_buf[env_ids] = False
@@ -1617,6 +2375,22 @@ class N2StairsEnv(N2Env):
         self.fall_event_buf[env_ids] = False
         self.contacts[env_ids] = False
         self.last_contacts[env_ids] = False
+        self.stable_contacts[env_ids] = False
+        self.last_stable_contacts[env_ids] = False
+        self.stable_contact_candidate_time[env_ids] = 0.0
+        self.stable_contact_loss_time[env_ids] = 0.0
+        self.current_foot_tread[env_ids] = 0
+        self.accepted_foot_tread[env_ids] = 0
+        self.same_tread_support[env_ids] = False
+        self.swing_active[env_ids] = False
+        self.swing_opposite_support_valid[env_ids] = False
+        self.swing_start_valid[env_ids] = False
+        self.swing_start_pos[env_ids] = 0.0
+        self.swing_elapsed_time[env_ids] = 0.0
+        self.max_swing_duration[env_ids] = 0.0
+        self.foot_surface_offset[env_ids] = float(
+            getattr(self.cfg.env, "nominal_foot_surface_offset", 0.045)
+        )
         for history_frame in self.obs_history:
             history_frame[env_ids] = 0.0
         self.episode_started[env_ids] = True
@@ -1839,13 +2613,22 @@ class N2StairsEnv(N2Env):
         ) + torch.square(separation_excess / normalizer)
 
     def _swing_knee_target(self):
-        """Return the per-environment knee target for the current riser."""
+        """Flex near mid-swing and extend again before touchdown."""
         _, _, step_height = self._current_stair_targets()
-        return torch.clamp(
-            float(self.cfg.env.swing_knee_base_target)
-            + float(self.cfg.env.swing_knee_height_gain) * step_height,
+        landing_target = (
+            float(self.cfg.env.swing_knee_landing_target)
+            + float(self.cfg.env.swing_knee_landing_height_gain) * step_height
+        )
+        peak_target = torch.clamp(
+            float(self.cfg.env.swing_knee_peak_target)
+            + float(self.cfg.env.swing_knee_peak_height_gain) * step_height,
             max=float(self.cfg.env.swing_knee_max_target),
-        ).unsqueeze(1)
+        )
+        swing_progress = self._swing_progress_state()
+        flexion_arc = 4.0 * swing_progress * (1.0 - swing_progress)
+        return landing_target.unsqueeze(1) + (
+            peak_target - landing_target
+        ).unsqueeze(1) * flexion_arc
 
     def _active_swing_knee_average(self, values, swing):
         """Average a per-knee quantity only over scheduled airborne legs."""
@@ -1888,6 +2671,75 @@ class N2StairsEnv(N2Env):
         return self._arm_swing_tracking_score() * (
             active & moving & upright
         ).float()
+
+    def _reward_stairs_swing_trajectory(self):
+        """Reward the expected foot following its continuous 3-D reference."""
+        score, _, active = self._swing_trajectory_state()
+        return score * active
+
+    def _reward_stairs_swing_trajectory_error(self):
+        """Provide a bounded gradient when the swing foot misses its arc."""
+        _, squared_error, active = self._swing_trajectory_state()
+        return squared_error * active
+
+    def _reward_stairs_swing_timeout(self):
+        """Penalize leaving either leg suspended beyond its nominal swing."""
+        return self._swing_timeout_state()
+
+    def _reward_stairs_same_tread_support(self):
+        """Continuously penalize step-to stance on an intermediate tread."""
+        return self.same_tread_support.float()
+
+    def _reward_stairs_lower_leg_collision(self):
+        """Penalize bounded shin contact with a stair riser."""
+        return torch.max(
+            self._lower_leg_collision_per_foot(), dim=1
+        ).values
+
+    def _reward_stairs_foot_riser_collision(self):
+        """Penalize a swing foot pushing horizontally into a riser."""
+        return torch.max(
+            self._foot_riser_collision_per_foot(), dim=1
+        ).values
+
+    def _reward_stairs_forward_pitch(self):
+        """Keep the body slightly forward over the stance leg while climbing."""
+        _, _, step_height = self._current_stair_targets()
+        target_pitch = (
+            float(self.cfg.env.forward_pitch_base_target)
+            + float(self.cfg.env.forward_pitch_height_gain) * step_height
+        )
+        pitch = self.base_euler_xyz[:, 1]
+        score = torch.exp(
+            -float(self.cfg.env.forward_pitch_sharpness)
+            * torch.square(pitch - target_pitch)
+        )
+        stair_start_x = self.stair_start_x[
+            self.terrain_levels, self.terrain_types
+        ]
+        active = (
+            (
+                self.root_states[:, 0]
+                >= stair_start_x
+                - float(
+                    self.cfg.env.first_tread_target_activation_distance
+                )
+            )
+            & torch.any(self.stable_contacts, dim=1)
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return score * active.float()
+
+    def _reward_stairs_base_behind_support(self):
+        """Penalize a pelvis that lags behind its stance foot."""
+        _, normalized_penalty = self._base_behind_support_state()
+        return normalized_penalty
+
+    def _reward_stairs_foot_pitch(self):
+        """Penalize toe-up stance and late-swing landing posture."""
+        penalty, _, _ = self._foot_pitch_state()
+        return penalty
 
     def _reward_stairs_success(self):
         # One-shot terminal event; see the dt note above.

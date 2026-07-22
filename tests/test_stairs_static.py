@@ -163,6 +163,119 @@ class StairGeometryTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(top_platform_walk, [6, 6, 0, 1, 0])
 
+    def test_stable_contact_rising_edge_drives_one_landing(self):
+        previous = np.asarray([[True, False]])
+
+        # A high-speed raw impact is not stable and therefore is not a landing.
+        impact = np.asarray([[True, False]])
+        np.testing.assert_array_equal(
+            self.geometry.stable_landing_mask(impact, previous),
+            [[False, False]],
+        )
+
+        # The same raw contact becomes one landing when the right foot first
+        # stabilizes while the left foot was already supporting the robot.
+        settled = np.asarray([[True, True]])
+        np.testing.assert_array_equal(
+            self.geometry.stable_landing_mask(settled, previous),
+            [[False, True]],
+        )
+        np.testing.assert_array_equal(
+            self.geometry.stable_landing_mask(settled, settled),
+            [[False, False]],
+        )
+
+        # Simultaneous stabilization and a landing without prior opposite
+        # support are both rejected as hopping/unsupported impacts.
+        unsupported = np.asarray([[False, False]])
+        np.testing.assert_array_equal(
+            self.geometry.stable_landing_mask(settled, unsupported),
+            [[False, False]],
+        )
+        np.testing.assert_array_equal(
+            self.geometry.stable_landing_mask(
+                np.asarray([[False, True]]), unsupported
+            ),
+            [[False, False]],
+        )
+
+    def test_continuous_swing_trajectory_has_exact_endpoints(self):
+        start = np.asarray([[0.0, 0.09, 0.065]])
+        landing = np.asarray([[0.45, 0.09, 0.265]])
+        arc = 0.05
+
+        at_start = self.geometry.smooth_swing_trajectory(
+            start, landing, np.asarray([0.0]), arc
+        )
+        at_mid = self.geometry.smooth_swing_trajectory(
+            start, landing, np.asarray([0.5]), arc
+        )
+        at_end = self.geometry.smooth_swing_trajectory(
+            start, landing, np.asarray([1.0]), arc
+        )
+        np.testing.assert_allclose(at_start, start)
+        np.testing.assert_allclose(at_end, landing)
+        np.testing.assert_allclose(at_mid[:, :2], 0.5 * (start + landing)[:, :2])
+        np.testing.assert_allclose(
+            at_mid[:, 2], 0.5 * (start[:, 2] + landing[:, 2]) + arc
+        )
+        # Two 10 cm treads end at 0.20 m plus the ankle-to-sole offset.
+        self.assertAlmostEqual(float(at_end[0, 2]), 0.20 + 0.065)
+
+        # Both the endpoint interpolation and clearance bump approach zero
+        # vertical velocity at lift-off/touchdown instead of kicking the foot.
+        epsilon = 1.0e-4
+        just_after_start = self.geometry.smooth_swing_trajectory(
+            start, landing, np.asarray([epsilon]), arc
+        )
+        just_before_end = self.geometry.smooth_swing_trajectory(
+            start, landing, np.asarray([1.0 - epsilon]), arc
+        )
+        np.testing.assert_allclose(
+            (just_after_start - at_start) / epsilon,
+            np.zeros_like(start),
+            atol=5.0e-3,
+        )
+        np.testing.assert_allclose(
+            (at_end - just_before_end) / epsilon,
+            np.zeros_like(landing),
+            atol=5.0e-3,
+        )
+
+    def test_same_tread_support_excludes_approach_and_top(self):
+        stable = np.asarray(
+            [[True, True], [True, True], [True, True], [True, False]]
+        )
+        treads = np.asarray([[0, 0], [3, 3], [6, 6], [3, 3]])
+        np.testing.assert_array_equal(
+            self.geometry.same_tread_support_mask(stable, treads, 6),
+            [False, True, False, False],
+        )
+
+    def test_stable_tread_advance_requires_latched_real_swing(self):
+        stable = np.asarray(
+            [[True, True], [True, True], [True, True], [True, True]]
+        )
+        geometry = np.asarray(
+            [[True, False], [True, True], [True, True], [True, True]]
+        )
+        pending = np.asarray(
+            [[True, False], [True, True], [False, False], [True, True]]
+        )
+        treads = np.asarray([[1, 1], [1, 2], [2, 2], [0, 1]])
+        accepted = np.asarray([[0, 1], [0, 0], [1, 1], [1, 1]])
+        np.testing.assert_array_equal(
+            self.geometry.stable_tread_advance_mask(
+                stable, geometry, pending, treads, accepted
+            ),
+            [
+                [True, False],
+                [True, True],
+                [False, False],
+                [False, False],
+            ],
+        )
+
 
 class StairConfigurationTests(unittest.TestCase):
     @classmethod
@@ -342,10 +455,80 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertLessEqual(
                 walk_cfg.env.success_max_sagittal_foot_separation, 0.44
             )
-            self.assertGreater(
-                walk_cfg.env.swing_knee_max_target,
-                walk_cfg.env.swing_knee_base_target,
+            landing_knee = (
+                walk_cfg.env.swing_knee_landing_target
+                + 0.10 * walk_cfg.env.swing_knee_landing_height_gain
             )
+            peak_knee = (
+                walk_cfg.env.swing_knee_peak_target
+                + 0.10 * walk_cfg.env.swing_knee_peak_height_gain
+            )
+            self.assertLess(landing_knee, peak_knee)
+            self.assertLessEqual(
+                peak_knee, walk_cfg.env.swing_knee_max_target
+            )
+            self.assertGreaterEqual(walk_cfg.env.double_support_ratio, 0.25)
+            self.assertLessEqual(walk_cfg.env.double_support_ratio, 0.40)
+            self.assertGreater(
+                walk_cfg.env.stable_contact_max_horizontal_speed, 0.0
+            )
+            self.assertLessEqual(
+                walk_cfg.env.stable_contact_max_horizontal_speed, 0.20
+            )
+            self.assertGreater(
+                walk_cfg.env.stable_contact_min_vertical_ratio, 0.0
+            )
+            self.assertLessEqual(
+                walk_cfg.env.stable_contact_min_vertical_ratio, 1.0
+            )
+            self.assertGreater(
+                walk_cfg.env.stable_contact_confirmation_s, 0.0
+            )
+            self.assertGreaterEqual(
+                walk_cfg.env.stable_contact_release_s,
+                walk_cfg.env.stable_contact_confirmation_s,
+            )
+            self.assertGreater(
+                walk_cfg.env.stable_landing_height_tolerance, 0.0
+            )
+            self.assertGreater(
+                walk_cfg.env.stable_landing_height_tolerance_ratio, 0.0
+            )
+            self.assertLess(
+                walk_cfg.env.stable_landing_height_tolerance_ratio, 0.5
+            )
+            self.assertGreaterEqual(
+                walk_cfg.env.nominal_foot_surface_offset, 0.035
+            )
+            self.assertLessEqual(
+                walk_cfg.env.nominal_foot_surface_offset, 0.055
+            )
+            self.assertGreater(
+                walk_cfg.env.stable_landing_tread_margin, 0.0
+            )
+            self.assertLess(
+                2.0 * walk_cfg.env.stable_landing_tread_margin,
+                walk_cfg.terrain.step_width,
+            )
+            self.assertGreater(
+                walk_cfg.env.swing_trajectory_arc_base, 0.0
+            )
+            self.assertGreater(
+                walk_cfg.env.swing_trajectory_arc_height_gain, 0.0
+            )
+            for normalizer in (
+                walk_cfg.env.swing_trajectory_x_normalizer,
+                walk_cfg.env.swing_trajectory_y_normalizer,
+                walk_cfg.env.swing_trajectory_z_normalizer,
+            ):
+                self.assertGreater(normalizer, 0.0)
+            self.assertGreater(walk_cfg.env.swing_timeout_ratio, 1.0)
+            self.assertGreaterEqual(walk_cfg.env.swing_timeout_margin_s, 0.0)
+            self.assertGreaterEqual(walk_cfg.env.late_swing_progress, 0.5)
+            self.assertLess(walk_cfg.env.late_swing_progress, 1.0)
+            self.assertNotIn("knee", walk_cfg.asset.penalize_contacts_on)
+            for contact_name in ("hip", "shoulder", "elbow", "hand"):
+                self.assertIn(contact_name, walk_cfg.asset.penalize_contacts_on)
             self.assertGreater(walk_cfg.env.arm_swing_amplitude, 0.0)
             self.assertAlmostEqual(
                 walk_cfg.env.sagittal_foot_phase_amplitude, 0.26
@@ -512,24 +695,43 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_swing_knee_flexion",
             "stairs_swing_knee_deficit",
             "stairs_arm_swing",
+            "stairs_swing_trajectory",
+            "stairs_swing_trajectory_error",
+            "stairs_swing_timeout",
+            "stairs_same_tread_support",
+            "stairs_lower_leg_collision",
+            "stairs_foot_riser_collision",
+            "stairs_forward_pitch",
+            "stairs_base_behind_support",
+            "stairs_foot_pitch",
         ):
             self.assertIn(required_reward, walk_scales)
 
-        self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 7.0)
-        self.assertLessEqual(walk_scales["stairs_repeated_lead"], -7.0)
-        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -7.0)
+        self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 10.0)
+        self.assertLessEqual(walk_scales["stairs_repeated_lead"], -8.0)
+        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -10.0)
+        self.assertLessEqual(walk_scales["stairs_skipped_tread"], -5.0)
         self.assertLessEqual(walk_scales["stairs_overstride"], -8.0)
         self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
         self.assertGreater(walk_scales["stairs_sagittal_foot_phase"], 0.0)
         self.assertLess(walk_scales["stairs_sagittal_foot_phase_error"], 0.0)
-        self.assertGreaterEqual(walk_scales["stairs_next_tread_target"], 3.5)
-        self.assertLessEqual(
-            walk_scales["stairs_next_tread_target_error"], -2.5
-        )
-        self.assertGreater(walk_scales["stairs_foothold_lateral"], 0.0)
-        self.assertLess(
-            walk_scales["stairs_foothold_lateral_error"], 0.0
-        )
+        self.assertEqual(walk_scales["stairs_next_tread_target"], 0.0)
+        self.assertEqual(walk_scales["stairs_next_tread_target_error"], 0.0)
+        self.assertEqual(walk_scales["stairs_foothold_lateral"], 0.0)
+        self.assertEqual(walk_scales["stairs_foothold_lateral_error"], 0.0)
+        self.assertEqual(walk_scales["stairs_swing_clearance"], 0.0)
+        self.assertGreater(walk_scales["stairs_swing_trajectory"], 0.0)
+        self.assertLess(walk_scales["stairs_swing_trajectory_error"], 0.0)
+        for penalty in (
+            "stairs_swing_timeout",
+            "stairs_same_tread_support",
+            "stairs_lower_leg_collision",
+            "stairs_foot_riser_collision",
+            "stairs_base_behind_support",
+            "stairs_foot_pitch",
+        ):
+            self.assertLess(walk_scales[penalty], 0.0)
+        self.assertGreater(walk_scales["stairs_forward_pitch"], 0.0)
         self.assertGreater(walk_scales["stairs_completion"], 0.0)
         self.assertGreater(
             walk_scales["stairs_curriculum_completion"],
@@ -558,8 +760,8 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(stairs_source.count("/ self.dt"), 5)
         self.assertIn("self.progress_checkpoint", stairs_source)
         self.assertIn("self.foot_force_sensor_forces", stairs_source)
-        self.assertIn("opposite_was_supported", stairs_source)
-        self.assertIn("one_new_contact", stairs_source)
+        self.assertIn("stable_tread_advance_mask", stairs_source)
+        self.assertIn("self.last_stable_contacts", stairs_source)
         self.assertIn("self.double_flight_time", stairs_source)
         self.assertIn("stairs_first_step_rate", stairs_source)
         self.assertIn("classify_tread_transition", stairs_source)
@@ -575,11 +777,46 @@ class StairConfigurationTests(unittest.TestCase):
         )
         self.assertIn("self.stair_start_x[levels, types]", stairs_source)
         self.assertIn("self.last_advanced_tread + 1", stairs_source)
-        self.assertIn("landing_weight = torch.square", stairs_source)
+        self.assertIn("smooth_swing_trajectory", stairs_source)
+        self.assertIn("self.swing_start_pos", stairs_source)
+        self.assertIn("self.swing_elapsed_time", stairs_source)
         self.assertIn("def _next_tread_swing_state", stairs_source)
         self.assertIn("actually_airborne", stairs_source)
         self.assertIn("opposite_supported", stairs_source)
-        self.assertIn("def _next_tread_lateral_target_state", stairs_source)
+        self.assertIn("def _swing_trajectory_state", stairs_source)
+        self.assertIn("def _lower_leg_collision_per_foot", stairs_source)
+        self.assertIn("def _foot_riser_collision_per_foot", stairs_source)
+        self.assertIn("self.lower_leg_indices", stairs_source)
+        self.assertIn('"L_leg_knee_link"', stairs_source)
+        self.assertIn('"R_leg_knee_link"', stairs_source)
+        self.assertIn("self.stable_contacts[env_ids] = False", stairs_source)
+        self.assertIn(
+            "self.stable_contact_candidate_time[env_ids] = 0.0",
+            stairs_source,
+        )
+        self.assertIn(
+            "self.stable_contact_loss_time[env_ids] = 0.0",
+            stairs_source,
+        )
+        self.assertIn("self.accepted_foot_tread[env_ids] = 0", stairs_source)
+        self.assertIn(
+            "self.swing_opposite_support_valid[env_ids] = False",
+            stairs_source,
+        )
+        self.assertIn("self.swing_start_valid[env_ids] = False", stairs_source)
+        self.assertIn("self.swing_elapsed_time[env_ids] = 0.0", stairs_source)
+        for diagnostic in (
+            "stairs_same_tread_support_fraction",
+            "stairs_lower_leg_collision_fraction",
+            "stairs_foot_riser_collision_fraction",
+            "stairs_swing_timeout_fraction",
+            "stairs_mean_base_behind_support",
+            "stairs_mean_foot_pitch_error",
+            "stairs_max_swing_duration",
+            "stairs_left_tread_advances",
+            "stairs_right_tread_advances",
+        ):
+            self.assertIn(diagnostic, stairs_source)
         self.assertIn("self.completion_buf.float() / self.dt", stairs_source)
         self.assertIn(
             "self.curriculum_completion_buf.float() / self.dt",
@@ -652,6 +889,15 @@ class StairConfigurationTests(unittest.TestCase):
             "mean_swing_knee_flexion_rad",
             "mean_arm_swing_match",
             "mean_gait_frequency_hz",
+            "mean_same_tread_support_fraction",
+            "mean_lower_leg_collision_fraction",
+            "mean_foot_riser_collision_fraction",
+            "mean_swing_timeout_fraction",
+            "mean_base_behind_support",
+            "mean_foot_pitch_error",
+            "mean_max_swing_duration",
+            "mean_left_tread_advances",
+            "mean_right_tread_advances",
         ):
             self.assertIn(metric, eval_source)
 

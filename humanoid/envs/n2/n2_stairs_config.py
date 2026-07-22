@@ -323,9 +323,23 @@ class N2StairsWalkCfg(N2StairsCfg):
         gait_frequency_start_gain = 0.75
         gait_frequency_start_reference_speed = 0.12
         gait_frequency_transition_steps = 19200
-        double_support_ratio = 0.16
+        # A longer adjacent-tread double-support window gives the pelvis time
+        # to move over the new stance foot.  At 0.18 m/s this leaves about
+        # 1.2 s for each swing instead of holding one leg forward for ~1.4 s.
+        double_support_ratio = 0.28
         gait_reward_grace_s = 0.50
         randomize_gait_phase = True
+
+        # Landings are classified when contact becomes stable, not on the
+        # first high-speed impact sample.  This prevents a missed touchdown
+        # from leaving the opposite-foot/next-tread target one step behind.
+        stable_contact_max_horizontal_speed = 0.18
+        stable_contact_min_vertical_ratio = 1.00
+        stable_contact_confirmation_s = 0.04
+        stable_contact_release_s = 0.06
+        stable_landing_height_tolerance = 0.04
+        stable_landing_height_tolerance_ratio = 0.45
+        stable_landing_tread_margin = 0.025
 
         # Strict natural-gait success must settle on the top while centered,
         # facing +X, and moving close to the command. Reaching height alone is
@@ -365,26 +379,31 @@ class N2StairsWalkCfg(N2StairsCfg):
         # every environment on the 2 cm row even after it could safely reach
         # the top. These thresholds retain a recognisable alternating gait
         # while allowing harder risers to become training data.
-        curriculum_min_alternating_tread_count = 3
-        curriculum_min_alternating_tread_rate = 0.35
-        curriculum_max_same_tread_join_rate = 0.50
-        curriculum_max_skipped_tread_rate = 0.25
+        curriculum_min_alternating_tread_count = 4
+        curriculum_min_alternating_tread_rate = 0.55
+        curriculum_max_same_tread_join_rate = 0.30
+        curriculum_max_skipped_tread_rate = 0.20
         curriculum_min_phase_contact_match = 0.55
         curriculum_max_double_flight_fraction = 0.12
 
         # Prevent the visually unstable straight-leg reach seen in the first
         # strict policy. Adjacent 0.30 m treads remain comfortably reachable.
-        max_sagittal_foot_offset = 0.34
-        max_sagittal_foot_separation = 0.40
+        max_sagittal_foot_offset = 0.28
+        max_sagittal_foot_separation = 0.36
         overstride_soft_margin = 0.08
-        success_max_sagittal_foot_separation = 0.44
+        success_max_sagittal_foot_separation = 0.40
 
         # The knee target rises mildly with riser height. N2 has no actuated
         # waist, so a small phase-locked arm swing supplies the available
         # upper-body reaction without inventing nonexistent torso joints.
-        swing_knee_base_target = 0.48
-        swing_knee_height_gain = 2.5
-        swing_knee_max_target = 0.75
+        # Flex at mid-swing, then extend before touchdown.  The previous
+        # constant 0.73 rad target at 10 cm kept the leg curled and forced the
+        # hip to hold the whole leg far in front of the body.
+        swing_knee_landing_target = 0.40
+        swing_knee_landing_height_gain = 0.80
+        swing_knee_peak_target = 0.58
+        swing_knee_peak_height_gain = 1.70
+        swing_knee_max_target = 0.80
         swing_knee_tracking_sharpness = 10.0
         arm_swing_amplitude = 0.22
         arm_swing_tracking_sharpness = 12.0
@@ -409,6 +428,45 @@ class N2StairsWalkCfg(N2StairsCfg):
         next_tread_target_start_phase = 0.50
         next_tread_target_full_phase = 0.85
 
+        # Continuous stair-over-stair swing reference.  XY follows a
+        # smoothstep from lift-off to the next tread center; Z follows the
+        # same endpoint interpolation plus a bounded mid-swing arc.  The
+        # ankle-link height offset is learned online from stable stance feet.
+        first_tread_target_activation_distance = 0.30
+        # The ankle collision mesh extends about 4 cm below its link origin.
+        # Start near that physical value, then calibrate on the flat approach.
+        nominal_foot_surface_offset = 0.045
+        foot_surface_offset_update_rate = 0.10
+        # The arc grows with riser height.  At the mid-swing riser crossing,
+        # ``0.04 + 0.5 * h`` leaves about 4 cm of sole clearance for every
+        # curriculum height (9 cm of arc on the fixed 10 cm staircase).
+        swing_trajectory_arc_base = 0.04
+        swing_trajectory_arc_height_gain = 0.50
+        swing_trajectory_x_normalizer = 0.20
+        swing_trajectory_y_normalizer = 0.12
+        swing_trajectory_z_normalizer = 0.10
+        swing_trajectory_sharpness = 2.5
+        swing_trajectory_error_clip = 2.0
+        swing_timeout_ratio = 1.25
+        swing_timeout_margin_s = 0.08
+
+        # Contact and posture shaping used only by n2_stairs_walk.  All force
+        # penalties are clipped in the environment to tolerate PhysX spikes.
+        lower_leg_contact_threshold = 12.0
+        lower_leg_contact_scale = 35.0
+        foot_riser_horizontal_threshold = 10.0
+        foot_riser_force_ratio = 1.50
+        foot_riser_contact_scale = 40.0
+        forward_pitch_base_target = 0.04
+        forward_pitch_height_gain = 0.35
+        forward_pitch_sharpness = 35.0
+        base_support_backward_allowance = 0.08
+        base_support_backward_scale = 0.10
+        base_support_backward_error_clip = 2.0
+        late_swing_progress = 0.70
+        foot_pitch_normalizer = 0.25
+        foot_pitch_error_clip = 2.0
+
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
         corridor_half_width = 0.30
@@ -430,6 +488,11 @@ class N2StairsWalkCfg(N2StairsCfg):
         randomize_friction = True
         friction_range = [0.75, 1.00]
         randomize_restitution = False
+
+    class asset(N2StairsCfg.asset):
+        # Lower-leg contact has its own bounded reward and diagnostics below;
+        # remove "knee" here to avoid charging the same collision twice.
+        penalize_contacts_on = ["hip", "shoulder", "elbow", "hand"]
 
     class rewards(N2StairsCfg.rewards):
         class scales(N2StairsCfg.rewards.scales):
@@ -456,23 +519,30 @@ class N2StairsWalkCfg(N2StairsCfg):
             # Explicit alternating support/swing schedule.
             stairs_phase_contact = 2.00
             stairs_phase_contact_mismatch = -3.0
-            stairs_sagittal_foot_phase = 2.00
-            stairs_sagittal_foot_phase_error = -0.75
+            stairs_sagittal_foot_phase = 0.50
+            stairs_sagittal_foot_phase_error = -0.25
             # Once stable top-reaching is established, make the late-swing
             # landing target strong enough to beat the residual step-to gait.
             # The phase ramp above still protects the natural early swing.
-            stairs_next_tread_target = 3.50
-            stairs_next_tread_target_error = -2.50
-            stairs_foothold_lateral = 1.50
-            stairs_foothold_lateral_error = -1.50
+            stairs_next_tread_target = 0.0
+            stairs_next_tread_target_error = 0.0
+            stairs_foothold_lateral = 0.0
+            stairs_foothold_lateral_error = 0.0
+            stairs_swing_trajectory = 5.0
+            stairs_swing_trajectory_error = -6.0
+            stairs_swing_timeout = -3.0
+            stairs_same_tread_support = -6.0
+            stairs_lower_leg_collision = -5.0
+            stairs_foot_riser_collision = -4.0
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10
+            stairs_swing_clearance = 0.0
             stairs_foot_step_progress = 2.00
-            stairs_alternating_tread = 7.00
-            stairs_repeated_lead = -7.00
-            stairs_same_tread_join = -7.00
-            stairs_skipped_tread = -4.00
+            stairs_alternating_tread = 10.00
+            stairs_repeated_lead = -8.00
+            stairs_same_tread_join = -10.00
+            stairs_skipped_tread = -5.00
             stairs_stable_contact = 0.50
 
             # Natural joint coordination: bend the airborne knee, avoid a
@@ -484,6 +554,9 @@ class N2StairsWalkCfg(N2StairsCfg):
             # asymmetric deficit term supplies a usable recovery gradient.
             stairs_swing_knee_deficit = -6.0
             stairs_arm_swing = 0.50
+            stairs_forward_pitch = 1.25
+            stairs_base_behind_support = -4.0
+            stairs_foot_pitch = -2.0
             default_joint_pos = 0.10
             default_up_joint_pos = 0.0
 
@@ -493,6 +566,11 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_leg_alignment = -2.5
             stairs_feet_yaw = -2.5
             lin_vel_z = -3.0
+            ang_vel_xy = -0.25
+            orientation = 0.40
+            action_rate = -0.10
+            action_smoothness = -0.05
+            dof_acc = -2.5e-7
 
     class noise(N2StairsCfg.noise):
         noise_level = 0.4
