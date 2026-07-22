@@ -35,7 +35,8 @@ def play(args):
         args.num_envs = 1
     _disable_randomization(env_cfg)
 
-    if args.task in ("n2_stairs", "n2_stairs_robust"):
+    stair_tasks = ("n2_stairs", "n2_stairs_robust", "n2_stairs_walk")
+    if args.task in stair_tasks:
         if not 0 <= args.terrain_level < env_cfg.terrain.num_rows:
             raise ValueError(
                 "--terrain_level must be in [0, {}]".format(
@@ -50,7 +51,7 @@ def play(args):
     if command_speed is None:
         command_speed = 0.5 * (command_min + command_max)
     allowed_max = command_max
-    if args.task in ("n2_stairs", "n2_stairs_robust"):
+    if args.task in stair_tasks:
         allowed_max = min(
             env_cfg.commands.max_curriculum,
             env_cfg.commands.initial_max_speed
@@ -96,7 +97,7 @@ def play(args):
         print("Exported JIT and ONNX policies to: {}".format(export_path))
 
     camera_offset = np.zeros(3, dtype=np.float64)
-    if args.task in ("n2_stairs", "n2_stairs_robust"):
+    if args.task in stair_tasks:
         camera_offset = env.env_origins[0].detach().cpu().numpy().astype(np.float64)
     camera_position = (
         np.array(env_cfg.viewer.pos, dtype=np.float64) + camera_offset

@@ -161,6 +161,20 @@ def stair_height_observations(base_position, quat_xyzw, height_cfg, stair_cfg):
     ) * float(height_cfg["scale"])
     return np.asarray(heights, dtype=np.float32)
 
+
+def gait_phase_observations(elapsed_time, command_x, phase_cfg):
+    """Reproduce the deployable gait clock used by ``n2_stairs_walk``."""
+    base_frequency = float(phase_cfg.get("frequency", 1.25))
+    frequency_gain = float(phase_cfg.get("frequency_gain", 0.0))
+    reference_speed = float(phase_cfg.get("reference_speed", 0.0))
+    phase_offset = float(phase_cfg.get("phase_offset", 0.0))
+    frequency = base_frequency + frequency_gain * max(
+        float(command_x) - reference_speed, 0.0
+    )
+    phase = (phase_offset + float(elapsed_time) * frequency) % 1.0
+    angle = 2.0 * math.pi * phase
+    return np.asarray([math.sin(angle), math.cos(angle)], dtype=np.float32)
+
 class cmd:
     def __init__(self):
         self.cmd = np.array([0., 0., 0.],dtype=np.float32)
@@ -242,6 +256,9 @@ def run_mujoco(cfg):
         )
         stair_cfg = config.get("stairs")
         height_cfg = config.get("height_measurements")
+        gait_phase_cfg = config.get("gait_phase")
+        navigation_cfg = config.get("navigation_state")
+        include_base_lin_vel = bool(config.get("include_base_lin_vel", False))
     
     model = load_mujoco_model(xml_path, stair_cfg)
     model.opt.timestep = simulation_dt
@@ -287,14 +304,51 @@ def run_mujoco(cfg):
         if count_lowlevel % control_decimation == 0:
             obs = np.zeros([1, num_single_obs], dtype=np.float32)
 
-            obs[0, :3] = command.cmd * cmd_scale
-            obs[0, 3:6] = omega * ang_vel_scale
-            obs[0, 6:9] = gvec[:3]
-            obs[0, 9:9 + num_actions] = (q - defaut_dof_pos) * dof_pos_scale
-            obs[0, 9 + num_actions:9 + num_actions * 2] = dq * dof_vel_scale
-            obs[0, 9 + num_actions * 2:9 + num_actions * 3] = action
+            cursor = 0
+            obs[0, cursor:cursor + 3] = command.cmd * cmd_scale
+            cursor += 3
+            if gait_phase_cfg is not None:
+                elapsed_time = count_lowlevel * simulation_dt
+                obs[0, cursor:cursor + 2] = gait_phase_observations(
+                    elapsed_time, command.cmd[0], gait_phase_cfg
+                )
+                cursor += 2
+            if include_base_lin_vel:
+                obs[0, cursor:cursor + 3] = v * float(
+                    config.get("lin_vel_scale", 1.0)
+                )
+                cursor += 3
+            if navigation_cfg is not None:
+                x, y, z, w = quat
+                yaw = math.atan2(
+                    2.0 * (w * z + x * y),
+                    1.0 - 2.0 * (y * y + z * z),
+                )
+                yaw_error = math.atan2(
+                    math.sin(yaw - float(navigation_cfg.get("target_yaw", 0.0))),
+                    math.cos(yaw - float(navigation_cfg.get("target_yaw", 0.0))),
+                )
+                obs[0, cursor] = (
+                    data.qpos[1] - float(navigation_cfg.get("center_y", 0.0))
+                ) * float(navigation_cfg.get("lateral_scale", 2.0))
+                obs[0, cursor + 1] = yaw_error * float(
+                    navigation_cfg.get("yaw_scale", 1.0)
+                )
+                cursor += 2
+            obs[0, cursor:cursor + 3] = omega * ang_vel_scale
+            cursor += 3
+            obs[0, cursor:cursor + 3] = gvec[:3]
+            cursor += 3
+            obs[0, cursor:cursor + num_actions] = (
+                q - defaut_dof_pos
+            ) * dof_pos_scale
+            cursor += num_actions
+            obs[0, cursor:cursor + num_actions] = dq * dof_vel_scale
+            cursor += num_actions
+            obs[0, cursor:cursor + num_actions] = action
+            cursor += num_actions
 
-            proprio_size = 9 + num_actions * 3
+            proprio_size = cursor
             if height_cfg is not None:
                 height_obs = stair_height_observations(
                     data.qpos[:3], quat, height_cfg, stair_cfg

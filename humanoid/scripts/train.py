@@ -18,7 +18,11 @@ def train(args):
     # env_cfg: 环境配置对象，包含环境的具体配置参数
     env_cfg = None
     if args.fixed_terrain_level is not None:
-        if args.task not in ("n2_stairs", "n2_stairs_robust"):
+        if args.task not in (
+            "n2_stairs",
+            "n2_stairs_robust",
+            "n2_stairs_walk",
+        ):
             raise ValueError("--fixed_terrain_level is only valid for n2_stairs tasks")
         env_cfg, _ = task_registry.get_cfgs(name=args.task)
         if not 0 <= args.fixed_terrain_level < env_cfg.terrain.num_rows:

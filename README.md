@@ -2,12 +2,19 @@
 
 ## Dedicated upstairs PPO task
 
-The repository includes an isolated `n2_stairs` task (plus optional
-`n2_stairs_robust`) while retaining `n2`, `n2_10dof`, and `n2_mimic`.
+The repository includes isolated `n2_stairs`, `n2_stairs_robust`, and
+`n2_stairs_walk` tasks while retaining `n2`, `n2_10dof`, and `n2_mimic`.
+`n2_stairs_walk` is the recommended task when a geometric stair-completion
+policy learns to bunny-hop or drift diagonally: it adds a deployable gait
+clock, velocity/centerline/heading observations, alternating contact rewards,
+and strict path/success checks.
 
 ```bash
 # From-scratch upstairs curriculum
 python humanoid/scripts/train.py --task=n2_stairs --headless
+
+# Strict alternating gait curriculum (train from zero; different Actor input)
+python humanoid/scripts/train.py --task=n2_stairs_walk --headless
 
 # Visualize a checkpoint at 6 cm and 0.25 m/s
 python humanoid/scripts/play.py --task=n2_stairs --resume \
@@ -18,6 +25,8 @@ python humanoid/scripts/play.py --task=n2_stairs --resume \
 python humanoid/scripts/eval_stairs.py --task=n2_stairs --resume \
   --load_run=<run_name_or_absolute_path> --checkpoint=-1 \
   --num_envs=128 --headless
+
+# Use --task=n2_stairs_walk and logs/n2_stairs_walk for strict-gait models.
 
 # Real-time browser view (works when the Vulkan viewer is black over VNC)
 python humanoid/scripts/stream_stairs.py --task=n2_stairs --resume \

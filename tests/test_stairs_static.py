@@ -190,13 +190,65 @@ class StairConfigurationTests(unittest.TestCase):
             n2_module = sys.modules["humanoid.envs.n2.n2_config"]
             cfg = stairs_module.N2StairsCfg()
             robust_cfg = stairs_module.N2StairsRobustCfg()
+            walk_cfg = stairs_module.N2StairsWalkCfg()
             train_cfg = stairs_module.N2StairsCfgPPO()
+            walk_train_cfg = stairs_module.N2StairsWalkCfgPPO()
             self.assertEqual(cfg.env.num_observations, 375)
             self.assertEqual(cfg.env.num_privileged_obs, 146)
             self.assertTrue(cfg.asset.use_foot_force_sensors)
             self.assertFalse(n2_module.N2_18DofCfg().asset.use_foot_force_sensors)
             self.assertEqual(robust_cfg.terrain.max_init_terrain_level, 4)
+            self.assertEqual(walk_cfg.env.num_single_obs, 82)
+            self.assertEqual(walk_cfg.env.num_observations, 410)
+            self.assertEqual(walk_cfg.env.num_privileged_obs, 153)
+            self.assertTrue(walk_cfg.env.include_gait_phase)
+            self.assertTrue(walk_cfg.env.include_base_lin_vel)
+            self.assertTrue(walk_cfg.env.include_navigation_state)
+            self.assertTrue(walk_cfg.env.enforce_walk_gait)
+            self.assertLessEqual(walk_cfg.env.corridor_half_width, 0.30)
+            self.assertLessEqual(walk_cfg.env.corridor_yaw_limit, 0.40)
+            self.assertLess(
+                walk_cfg.env.success_max_lateral_deviation,
+                walk_cfg.env.corridor_half_width,
+            )
+            self.assertLess(
+                walk_cfg.env.success_max_yaw_deviation,
+                walk_cfg.env.corridor_yaw_limit,
+            )
+            self.assertGreaterEqual(
+                walk_cfg.env.success_min_phase_contact_match, 0.80
+            )
+            self.assertLessEqual(
+                walk_cfg.env.success_max_double_flight_fraction, 0.05
+            )
             self.assertEqual(train_cfg.runner.experiment_name, "n2_stairs")
+            self.assertEqual(
+                walk_train_cfg.runner.experiment_name, "n2_stairs_walk"
+            )
+            with (
+                ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
+            ).open() as stream:
+                walk_yaml = yaml.safe_load(stream)
+            self.assertEqual(
+                walk_yaml["gait_phase"]["frequency"],
+                walk_cfg.env.gait_frequency,
+            )
+            self.assertEqual(
+                walk_yaml["gait_phase"]["frequency_gain"],
+                walk_cfg.env.gait_frequency_gain,
+            )
+            self.assertEqual(
+                walk_yaml["gait_phase"]["reference_speed"],
+                walk_cfg.env.gait_reference_speed,
+            )
+            self.assertEqual(
+                walk_yaml["navigation_state"]["lateral_scale"],
+                walk_cfg.env.lateral_position_obs_scale,
+            )
+            self.assertEqual(
+                walk_yaml["navigation_state"]["yaw_scale"],
+                walk_cfg.env.yaw_error_obs_scale,
+            )
             self.assertFalse(train_cfg.runner.init_at_random_ep_len)
 
             def to_plain_dict(obj):
@@ -291,6 +343,29 @@ class StairConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(missing, [])
 
+        walk_scales = literal_assignments(
+            nested_class(
+                self.config_tree,
+                "N2StairsWalkCfg",
+                "rewards",
+                "scales",
+            )
+        )
+        walk_missing = sorted(
+            name for name, value in walk_scales.items()
+            if value != 0 and name not in implemented
+        )
+        self.assertEqual(walk_missing, [])
+        for required_reward in (
+            "stairs_overspeed",
+            "stairs_phase_contact",
+            "stairs_phase_contact_mismatch",
+            "stairs_heading_alignment",
+            "stairs_leg_alignment",
+            "stairs_feet_yaw",
+        ):
+            self.assertIn(required_reward, walk_scales)
+
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
         self.assertEqual(scales["stairs_vertical_progress"], 1.0)
@@ -316,6 +391,7 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertIn(original_task, registration)
         self.assertIn('"n2_stairs"', registration)
         self.assertIn('"n2_stairs_robust"', registration)
+        self.assertIn('"n2_stairs_walk"', registration)
         self.assertIn("N2StairsEnv", registration)
 
     def test_play_has_no_one_meter_per_second_override(self):
@@ -327,6 +403,17 @@ class StairConfigurationTests(unittest.TestCase):
             ROOT / "humanoid" / "scripts" / "eval_stairs.py"
         ).read_text()
         self.assertIn("env_cfg.env.test = False", eval_source)
+        self.assertIn('"n2_stairs_walk"', eval_source)
+        for metric in (
+            "mean_forward_speed_m_s",
+            "mean_command_error_m_s",
+            "mean_phase_contact_match",
+            "mean_double_flight_fraction",
+            "mean_max_lateral_deviation_m",
+            "mean_max_yaw_deviation_rad",
+            "path_failure_rate",
+        ):
+            self.assertIn(metric, eval_source)
 
 
 class Sim2SimConsistencyTests(unittest.TestCase):
@@ -348,9 +435,41 @@ class Sim2SimConsistencyTests(unittest.TestCase):
             config["simulation_dt"] * config["control_decimation"], 0.02
         )
 
+    def test_phase_walk_yaml_matches_strict_actor_layout(self):
+        path = ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
+        with path.open() as stream:
+            config = yaml.safe_load(stream)
+        self.assertEqual(config["num_actions"], 18)
+        self.assertEqual(config["num_single_obs"], 82)
+        self.assertEqual(config["num_obs"], 410)
+        self.assertEqual(config["num_obs"], 82 * config["frame_stack"])
+        self.assertIn("logs/n2_stairs_walk/", config["policy_path"])
+        self.assertTrue(config["include_base_lin_vel"])
+        self.assertEqual(config["gait_phase"]["frequency"], 1.25)
+        self.assertEqual(config["gait_phase"]["frequency_gain"], 0.75)
+        self.assertEqual(config["navigation_state"]["lateral_scale"], 2.0)
+        self.assertEqual(config["navigation_state"]["yaw_scale"], 1.0)
+        self.assertEqual(
+            len(config["height_measurements"]["points_x"])
+            * len(config["height_measurements"]["points_y"]),
+            12,
+        )
+
     def test_mujoco_mapping_covers_isaac_policy_joint_order(self):
         with (ROOT / "sim2sim" / "configs" / "n2_stairs.yaml").open() as stream:
             config = yaml.safe_load(stream)
+        with (
+            ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
+        ).open() as stream:
+            walk_config = yaml.safe_load(stream)
+        for key in (
+            "joint_order",
+            "torque_limits",
+            "kps",
+            "kds",
+            "default_angles",
+        ):
+            self.assertEqual(walk_config[key], config[key])
         urdf_root = ET.parse(
             ROOT / "resources" / "robots" / "N2" / "urdf" / "N2.urdf"
         ).getroot()
@@ -494,6 +613,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("enable_forward_dynamics_forces = False", base_source)
         sim2sim_source = (ROOT / "sim2sim" / "sim2sim.py").read_text()
         self.assertIn("seen_ground_plane", sim2sim_source)
+        self.assertIn("def gait_phase_observations", sim2sim_source)
+        self.assertIn('config.get("navigation_state")', sim2sim_source)
+        self.assertIn('config.get("include_base_lin_vel", False)', sim2sim_source)
 
     def test_randomized_surface_properties_stay_two_dimensional(self):
         base_source = (

@@ -1,7 +1,8 @@
 # Noetix N2 上楼梯训练与 AutoDL 部署
 
-本文档对应独立任务 `n2_stairs`。原始 `n2`、`n2_10dof`、`n2_mimic`
-仍然保留。当前开发机没有 Isaac Gym/GPU，因此本文所说的“已验证”仅指静态检查；
+本文档对应独立任务 `n2_stairs`、`n2_stairs_robust` 和严格步态任务
+`n2_stairs_walk`。原始 `n2`、`n2_10dof`、`n2_mimic` 仍然保留。
+当前开发机没有 Isaac Gym/GPU，因此本文所说的“已验证”仅指静态检查；
 真实 PhysX 仿真、PPO 收敛和 4090 显存占用必须在 AutoDL 执行本文的冒烟测试确认。
 
 ## 1. 审查结论
@@ -44,6 +45,26 @@
   expected/actual 并停止，不会静默错位训练。
 
 ## 2. 专用任务设计
+
+### 严格交替步态任务
+
+`n2_stairs` 保留为 375 维 Actor 的几何爬楼 baseline，以兼容已有 checkpoint。
+仅凭到顶率不能证明策略在走路：策略可能无视 0.18 m/s 命令高速双脚蹦跳，或斜向
+到顶后仍被统计为成功。遇到这种情况应从零训练 `n2_stairs_walk`，不要把旧 checkpoint
+恢复到新任务（网络输入分别为 375 和 410，框架也会因维度不同拒绝加载）。
+
+严格任务在原有地形前视基础上增加：
+
+- 可部署的左右步态相位 `sin/cos`，以及按相位定义的单支撑/摆动接触目标；
+- 机身坐标系线速度、相对楼梯中心线横向误差和相对 `+X` 航向误差；
+- 超速、双脚腾空、相位接触不匹配、髋 yaw/roll 偏离和足部外八惩罚；
+- 横偏超过 0.30 m 或偏航超过 0.40 rad（1 s 宽限后）直接作为路径失败；
+- 到顶后需连续 0.30 s 满足支撑、直立、速度、横偏 0.12 m 和偏航 0.15 rad
+  条件，且整段最大横偏不超过 0.20 m、最大偏航不超过 0.30 rad、相位接触匹配率
+  至少 80%、双脚腾空占比不超过 5%，才记为成功。
+
+评估额外输出平均实际速度、命令误差、相位接触匹配率、双脚腾空占比、整回合最大
+横偏/偏航和路径失败率。因此，新的验收不能只看 `success_rate`。
 
 ### 地形与课程
 
@@ -93,6 +114,11 @@ level 0–4 的上限依次为 0.25、0.30、0.35、0.40、0.45 m/s；一次评�
 - 12 个新增量是 4 个前向距离 × 3 个横向位置的地形高度；
 - Critic：63 维 proprio、62 维速度/域参数/接触特权量、21 个完整高度点，共 146 维；
 - 动作：18 维。
+
+`n2_stairs_walk` 每帧为 `82 = 63 + 相位2 + 机身线速度3 + 路径状态2 + 地形12`
+维，堆叠 5 帧后 Actor 输入 410 维；Critic 为 153 维。路径状态在 Isaac Gym 中以
+环境中心线和世界 `+X` 为参考；MuJoCo 配置提供完全一致的输入。真实机器人部署时，
+除地形高度外还需要状态估计器提供机身速度、相对楼梯中心线位置及航向。
 
 这会提升仿真楼梯学习能力，但也意味着真实机器人部署必须提供与训练定义一致的前向
 地形高度（深度相机、激光或可靠局部高程图）。`sim2sim/configs/n2_stairs.yaml`
@@ -194,7 +220,7 @@ python - <<'PY'
 import isaacgym
 import humanoid.envs  # noqa: F401 - register every task
 from humanoid.utils import task_registry
-required = {"n2", "n2_10dof", "n2_mimic", "n2_stairs", "n2_stairs_robust"}
+required = {"n2", "n2_10dof", "n2_mimic", "n2_stairs", "n2_stairs_robust", "n2_stairs_walk"}
 print("registered tasks:", sorted(task_registry.task_classes))
 assert required.issubset(task_registry.task_classes)
 PY
@@ -421,24 +447,23 @@ checkpoint 绝对路径。“到顶”只要求
 位置和真实地形高度达标；“成功”还要求直立、足部支撑且没有物理失败。也可用
 `--step_heights=0.02,0.06,0.10` 选择高度。
 
-如果旧 checkpoint 已经形成双脚同步蹦跳，不建议把它当作正式训练起点。当前
-`baseline_gait_v2` 奖励只认可“另一只脚在上一帧提供支撑、单只摆动脚稳定落到更高
-踏面”的事件，同时对持续双脚腾空施加强惩罚。旧模型仍可加载做对照，但正式训练应
-从零使用新的 `--run_name=stairs_gait_v2`，以免被旧策略局部最优拖住。
+如果旧 checkpoint 已经形成双脚同步蹦跳或斜向漂移，只把它当作几何到顶对照。
+单次落脚事件和双脚腾空惩罚仍不足以保证自然交替步态；正式训练应改用独立的
+`n2_stairs_walk` 从零开始，使相位、速度和路径状态都进入 Actor 观测与成功判定。
 
 导出 JIT/ONNX 并进行 MuJoCo 楼梯检查：
 
 ```bash
 python humanoid/scripts/play.py \
-  --task=n2_stairs \
+  --task=n2_stairs_walk \
   --resume \
-  --load_run=/root/autodl-tmp/noetix_n2_gym/logs/n2_stairs/<run目录> \
+  --load_run=/root/autodl-tmp/noetix_n2_gym/logs/n2_stairs_walk/<run目录> \
   --checkpoint=-1 \
   --terrain_level=2 \
   --command_speed=0.25 \
   --export_policy
 
-python sim2sim/sim2sim.py --config_file=n2_stairs.yaml
+python sim2sim/sim2sim.py --config_file=n2_stairs_walk.yaml
 ```
 
 ## 8. 低台阶预训练、迁移和 robust 微调
@@ -484,6 +509,8 @@ python humanoid/scripts/train.py \
 ## 9. 结果不理想时的排查顺序
 
 1. 先看 `stairs_success_rate`、`terrain_level` 和不同高度的独立评估，不要只看总奖励。
+   严格步态还必须同时检查实际速度/命令误差、相位接触匹配、双脚腾空占比、最大横偏、
+   最大偏航和路径失败率；成功率高但这些指标差，仍属于策略取巧。
 2. 再看 `stairs_forward_distance`、`stairs_climb_height`、fall/stall：
    - 距离低且 stall 高：检查是否走到第一立面、命令跟踪和前视高度输入；
    - 距离高但爬升低：可能绕行/侧滑，优先看 lateral drift、stumble 和碰撞；

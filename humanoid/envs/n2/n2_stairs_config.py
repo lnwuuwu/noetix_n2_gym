@@ -282,3 +282,104 @@ class N2StairsRobustCfgPPO(N2StairsCfgPPO):
     class runner(N2StairsCfgPPO.runner):
         experiment_name = "n2_stairs_robust"
         run_name = "robust"
+
+
+class N2StairsWalkCfg(N2StairsCfg):
+    """Strict alternating-gait task that rejects hopping and diagonal success."""
+
+    class env(N2StairsCfg.env):
+        include_gait_phase = True
+        include_base_lin_vel = True
+        include_navigation_state = True
+        enforce_walk_gait = True
+
+        # commands(3) + phase sin/cos(2) + body velocity(3) + route state(2)
+        # + legacy proprioception excluding commands(60) + terrain heights(12).
+        # Explicit speed/lateral/yaw feedback lets the policy correct drift
+        # instead of receiving a penalty for state it cannot observe.
+        num_single_obs = 82
+        num_observations = 5 * num_single_obs
+        num_privileged_obs = 153
+        lateral_position_obs_scale = 2.0
+        yaw_error_obs_scale = 1.0
+
+        # Phase clock is deployable: it depends only on elapsed policy time and
+        # the commanded forward velocity. A short double-support interval is
+        # included around every left/right transition for stair stability.
+        gait_frequency = 1.25
+        gait_frequency_gain = 0.75
+        gait_reference_speed = 0.12
+        double_support_ratio = 0.16
+        gait_reward_grace_s = 0.50
+        randomize_gait_phase = True
+
+        # A completion must settle on the top while centered, facing +X, and
+        # moving close to the command. Reaching the height alone is not enough.
+        top_dwell_s = 0.30
+        top_speed_tolerance = 0.15
+        success_lateral_tolerance = 0.12
+        success_yaw_tolerance = 0.15
+        success_max_lateral_deviation = 0.20
+        success_max_yaw_deviation = 0.30
+        success_min_phase_contact_match = 0.80
+        success_max_double_flight_fraction = 0.05
+
+        # Leaving this center corridor is a task failure. The yaw limit is
+        # deliberately looser than the success tolerance to allow recovery.
+        corridor_half_width = 0.30
+        corridor_yaw_limit = 0.40
+        corridor_grace_s = 1.0
+
+    class domain_rand(N2StairsCfg.domain_rand):
+        # Discover the strict gait before adding actuator uncertainty. Surface
+        # variation remains, while the robust task can re-enable the rest.
+        action_delay = False
+        randomize_gains = False
+        randomize_motor_strength = False
+        randomize_friction = True
+        friction_range = [0.75, 1.00]
+        randomize_restitution = False
+
+    class rewards(N2StairsCfg.rewards):
+        class scales(N2StairsCfg.rewards.scales):
+            # Command following must dominate the former race-to-the-top
+            # shortcut. Progress saturates at the commanded walking speed.
+            tracking_lin_vel = 4.0
+            tracking_ang_vel = 0.5
+            stairs_forward_progress = 0.75
+            stairs_overspeed = -8.0
+
+            # Completion remains useful but no longer dominates several
+            # seconds of gait, speed, and alignment penalties.
+            stairs_success = 8.0
+
+            # Explicit alternating support/swing schedule.
+            stairs_phase_contact = 1.50
+            stairs_phase_contact_mismatch = -2.0
+            stairs_double_flight = -8.0
+            stairs_single_support = 0.40
+            feet_air_time = 0.10
+            stairs_foot_step_progress = 1.25
+            stairs_stable_contact = 0.50
+
+            # Straight stair approach and neutral leg/foot yaw.
+            stairs_lateral_drift = -6.0
+            stairs_heading_alignment = 1.5
+            stairs_leg_alignment = -2.0
+            stairs_feet_yaw = -2.0
+            lin_vel_z = -3.0
+
+    class noise(N2StairsCfg.noise):
+        noise_level = 0.4
+
+
+class N2StairsWalkCfgPPO(N2StairsCfgPPO):
+    class policy(N2StairsCfgPPO.policy):
+        init_noise_std = 0.60
+
+    class algorithm(N2StairsCfgPPO.algorithm):
+        entropy_coef = 0.005
+
+    class runner(N2StairsCfgPPO.runner):
+        experiment_name = "n2_stairs_walk"
+        run_name = "phase_walk_v1"

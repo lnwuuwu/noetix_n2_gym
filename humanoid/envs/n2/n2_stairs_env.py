@@ -1,7 +1,11 @@
 """N2 environment specialized for stable, directional upstairs locomotion."""
 
 from isaacgym import gymtorch
-from isaacgym.torch_utils import torch_rand_float
+from isaacgym.torch_utils import (
+    get_euler_xyz,
+    quat_rotate_inverse,
+    torch_rand_float,
+)
 import torch
 
 from humanoid.envs.n2.n2_env import N2Env
@@ -12,7 +16,7 @@ from humanoid.utils.terrain import N2StairsTerrain
 class N2StairsEnv(N2Env):
     """N2 task with verified stair geometry, climb curriculum, and metrics."""
 
-    _PROPRIO_OBS = 63
+    _BASE_PROPRIO_OBS = 63
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
@@ -34,6 +38,7 @@ class N2StairsEnv(N2Env):
             dof_index["R_leg_hip_yaw_joint"],
             dof_index["R_leg_hip_roll_joint"],
         ]
+        self.leg_alignment_idxs = self.left_yaw_roll + self.right_yaw_roll
         self.ankle_dof_idxs = [
             dof_index["L_leg_ankle_joint"],
             dof_index["R_leg_ankle_joint"],
@@ -78,6 +83,22 @@ class N2StairsEnv(N2Env):
 
     def _init_buffers(self):
         super()._init_buffers()
+        self.include_gait_phase = bool(
+            getattr(self.cfg.env, "include_gait_phase", False)
+        )
+        self.enforce_walk_gait = bool(
+            getattr(self.cfg.env, "enforce_walk_gait", False)
+        )
+        self.include_base_lin_vel = bool(
+            getattr(self.cfg.env, "include_base_lin_vel", False)
+        )
+        self.include_navigation_state = bool(
+            getattr(self.cfg.env, "include_navigation_state", False)
+        )
+        self.proprio_obs_size = self._BASE_PROPRIO_OBS
+        self.proprio_obs_size += 2 if self.include_gait_phase else 0
+        self.proprio_obs_size += 3 if self.include_base_lin_vel else 0
+        self.proprio_obs_size += 2 if self.include_navigation_state else 0
         if len(self.feet_indices) != 2:
             raise RuntimeError(
                 "n2_stairs expects exactly two ankle/foot bodies, found {}".format(
@@ -100,7 +121,9 @@ class N2StairsEnv(N2Env):
         self.actor_height_indices = torch.tensor(
             actor_indices, dtype=torch.long, device=self.device
         )
-        expected_actor_heights = self.cfg.env.num_single_obs - self._PROPRIO_OBS
+        expected_actor_heights = (
+            self.cfg.env.num_single_obs - self.proprio_obs_size
+        )
         if len(actor_indices) != expected_actor_heights:
             raise ValueError(
                 "n2_stairs Actor height count {} does not match observation config {}".format(
@@ -137,6 +160,28 @@ class N2StairsEnv(N2Env):
         self.max_foot_contact_height = torch.zeros_like(
             self.foot_contact_height_delta
         )
+        self.gait_phase_offset = torch.zeros_like(self.best_forward_progress)
+        self.desired_contacts = torch.ones(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self.phase_contact_match = torch.ones_like(self.best_forward_progress)
+        self.top_stable_time = torch.zeros_like(self.best_forward_progress)
+        self.path_failure_buf = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.forward_speed_sum = torch.zeros_like(self.best_forward_progress)
+        self.command_error_sum = torch.zeros_like(self.best_forward_progress)
+        self.phase_match_sum = torch.zeros_like(self.best_forward_progress)
+        self.double_flight_step_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.max_lateral_deviation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.max_yaw_deviation = torch.zeros_like(self.best_forward_progress)
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -175,23 +220,115 @@ class N2StairsEnv(N2Env):
         self.last_episode_max_foot_height = torch.zeros_like(
             self.best_forward_progress
         )
+        self.last_episode_mean_forward_speed = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_command_error = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_phase_contact_match = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_double_flight_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_max_lateral_deviation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_max_yaw_deviation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_path_failure = torch.zeros_like(
+            self.best_forward_progress
+        )
 
     def _get_noise_scale_vec(self, cfg):
-        """Noise layout for 63 proprioceptive + compact terrain observations."""
+        """Noise layout for commands, optional phase, proprioception, and terrain."""
         noise_vec = torch.zeros(cfg.env.num_single_obs, device=self.device)
         self.add_noise = cfg.noise.add_noise
         scales = cfg.noise.noise_scales
 
-        noise_vec[0:3] = 0.0
-        noise_vec[3:6] = scales.ang_vel * self.obs_scales.ang_vel
-        noise_vec[6:9] = scales.gravity
-        noise_vec[9:27] = scales.dof_pos * self.obs_scales.dof_pos
-        noise_vec[27:45] = scales.dof_vel * self.obs_scales.dof_vel
-        noise_vec[45:63] = 0.0
-        noise_vec[63:] = (
+        cursor = 0
+        noise_vec[cursor:cursor + 3] = 0.0
+        cursor += 3
+        if bool(getattr(cfg.env, "include_gait_phase", False)):
+            noise_vec[cursor:cursor + 2] = 0.0
+            cursor += 2
+        if bool(getattr(cfg.env, "include_base_lin_vel", False)):
+            noise_vec[cursor:cursor + 3] = (
+                scales.lin_vel * self.obs_scales.lin_vel
+            )
+            cursor += 3
+        if bool(getattr(cfg.env, "include_navigation_state", False)):
+            noise_vec[cursor:cursor + 2] = 0.0
+            cursor += 2
+        noise_vec[cursor:cursor + 3] = scales.ang_vel * self.obs_scales.ang_vel
+        cursor += 3
+        noise_vec[cursor:cursor + 3] = scales.gravity
+        cursor += 3
+        noise_vec[cursor:cursor + self.num_actions] = (
+            scales.dof_pos * self.obs_scales.dof_pos
+        )
+        cursor += self.num_actions
+        noise_vec[cursor:cursor + self.num_actions] = (
+            scales.dof_vel * self.obs_scales.dof_vel
+        )
+        cursor += self.num_actions
+        noise_vec[cursor:cursor + self.num_actions] = 0.0
+        cursor += self.num_actions
+        noise_vec[cursor:] = (
             scales.height_measurements * self.obs_scales.height_measurements
         )
         return noise_vec
+
+    def _get_gait_phase(self):
+        """Return a per-environment deployable left/right gait clock in [0, 1)."""
+        base_frequency = float(getattr(self.cfg.env, "gait_frequency", 1.25))
+        frequency_gain = float(
+            getattr(self.cfg.env, "gait_frequency_gain", 0.0)
+        )
+        reference_speed = float(
+            getattr(self.cfg.env, "gait_reference_speed", 0.0)
+        )
+        frequency = base_frequency + frequency_gain * torch.clamp(
+            self.commands[:, 0] - reference_speed, min=0.0
+        )
+        elapsed = self.episode_length_buf.float() * self.dt
+        return torch.remainder(
+            self.gait_phase_offset + elapsed * frequency, 1.0
+        )
+
+    def _update_desired_contacts(self):
+        """Update the phase-scheduled left/right stance mask."""
+        if not self.include_gait_phase:
+            self.desired_contacts[:] = torch.logical_or(
+                self.contacts, self.last_contacts
+            )
+            self.phase_contact_match[:] = 1.0
+            return
+
+        phase = self._get_gait_phase()
+        phase_sine = torch.sin(2.0 * torch.pi * phase)
+        ratio = float(self.cfg.env.double_support_ratio)
+        transition_threshold = torch.sin(
+            torch.tensor(
+                0.5 * torch.pi * ratio,
+                dtype=torch.float,
+                device=self.device,
+            )
+        )
+        double_support = torch.abs(phase_sine) < transition_threshold
+        left_stance = phase_sine >= 0.0
+        self.desired_contacts[:, 0] = left_stance | double_support
+        self.desired_contacts[:, 1] = ~left_stance | double_support
+
+        contact_filt = torch.logical_or(self.contacts, self.last_contacts)
+        self.phase_contact_match[:] = 1.0 - torch.mean(
+            torch.abs(
+                contact_filt.float() - self.desired_contacts.float()
+            ),
+            dim=1,
+        )
 
     def _reshape_critic_feature(self, name, value, expected_width):
         """Return one privileged-observation component as an ``(N, F)`` matrix."""
@@ -212,17 +349,41 @@ class N2StairsEnv(N2Env):
         return value
 
     def compute_observations(self):
-        proprio = torch.cat(
+        proprio_parts = [self.commands[:, :3] * self.commands_scale]
+        if self.include_gait_phase:
+            phase = self._get_gait_phase().unsqueeze(1)
+            proprio_parts.extend(
+                (
+                    torch.sin(2.0 * torch.pi * phase),
+                    torch.cos(2.0 * torch.pi * phase),
+                )
+            )
+        if self.include_base_lin_vel:
+            proprio_parts.append(self.base_lin_vel * self.obs_scales.lin_vel)
+        if self.include_navigation_state:
+            lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+            yaw = self.base_euler_xyz[:, 2]
+            yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+            proprio_parts.append(
+                torch.stack(
+                    (
+                        lateral_position
+                        * float(self.cfg.env.lateral_position_obs_scale),
+                        yaw_error * float(self.cfg.env.yaw_error_obs_scale),
+                    ),
+                    dim=1,
+                )
+            )
+        proprio_parts.extend(
             (
-                self.commands[:, :3] * self.commands_scale,
                 self.base_ang_vel * self.obs_scales.ang_vel,
                 self.projected_gravity,
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
                 self.dof_vel * self.obs_scales.dof_vel,
                 self.actions,
-            ),
-            dim=-1,
+            )
         )
+        proprio = torch.cat(tuple(proprio_parts), dim=-1)
         all_heights = torch.clip(
             self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
             -1.0,
@@ -238,7 +399,7 @@ class N2StairsEnv(N2Env):
         obs_now = torch.cat((proprio, actor_heights), dim=-1)
 
         critic_features = (
-            ("proprio", proprio, self._PROPRIO_OBS),
+            ("proprio", proprio, self.proprio_obs_size),
             ("base_lin_vel", self.base_lin_vel * self.obs_scales.lin_vel, 3),
             ("payload", self.payload * 0.5, 1),
             ("friction", self.friction_coeffs, 1),
@@ -411,6 +572,7 @@ class N2StairsEnv(N2Env):
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
+        self._update_desired_contacts()
 
         forward_progress = self.root_states[:, 0] - self.env_origins[:, 0]
         new_best_progress = torch.maximum(
@@ -433,6 +595,40 @@ class N2StairsEnv(N2Env):
         )
         self._update_foot_step_progress()
 
+        lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+        yaw = self.base_euler_xyz[:, 2]
+        yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+        forward_speed = self.root_states[:, 7]
+        self.forward_speed_sum += forward_speed
+        self.command_error_sum += torch.abs(
+            forward_speed - self.commands[:, 0]
+        )
+        self.phase_match_sum += self.phase_contact_match
+        self.double_flight_step_count += (~torch.any(self.contacts, dim=1)).float()
+        self.max_lateral_deviation[:] = torch.maximum(
+            self.max_lateral_deviation, torch.abs(lateral_position)
+        )
+        self.max_yaw_deviation[:] = torch.maximum(
+            self.max_yaw_deviation, torch.abs(yaw_error)
+        )
+
+        if self.enforce_walk_gait:
+            corridor_grace_steps = int(
+                self.cfg.env.corridor_grace_s / self.dt
+            )
+            outside_corridor = torch.abs(lateral_position) > float(
+                self.cfg.env.corridor_half_width
+            )
+            excessive_yaw = torch.abs(yaw_error) > float(
+                self.cfg.env.corridor_yaw_limit
+            )
+            self.path_failure_buf[:] = (
+                (outside_corridor | excessive_yaw)
+                & (self.episode_length_buf > corridor_grace_steps)
+            )
+        else:
+            self.path_failure_buf[:] = False
+
         top_x, top_height, _ = self._current_stair_targets()
         reached_position_and_height = torch.logical_and(
             self.root_states[:, 0] >= top_x,
@@ -447,9 +643,49 @@ class N2StairsEnv(N2Env):
             dim=1,
         )
         self.top_position_reached_buf[:] = reached_position_and_height
-        self.top_reached_buf[:] = (
-            self.top_position_reached_buf & upright & stable_support
-        )
+        stable_top = self.top_position_reached_buf & upright & stable_support
+        if self.enforce_walk_gait:
+            centered = torch.abs(lateral_position) <= float(
+                self.cfg.env.success_lateral_tolerance
+            )
+            facing_forward = torch.abs(yaw_error) <= float(
+                self.cfg.env.success_yaw_tolerance
+            )
+            command_matched = torch.abs(
+                forward_speed - self.commands[:, 0]
+            ) <= float(self.cfg.env.top_speed_tolerance)
+            path_consistent = (
+                self.max_lateral_deviation
+                <= float(self.cfg.env.success_max_lateral_deviation)
+            ) & (
+                self.max_yaw_deviation
+                <= float(self.cfg.env.success_max_yaw_deviation)
+            )
+            elapsed_steps = torch.clamp(
+                self.episode_length_buf.float(), min=1.0
+            )
+            gait_consistent = (
+                self.phase_match_sum / elapsed_steps
+                >= float(self.cfg.env.success_min_phase_contact_match)
+            ) & (
+                self.double_flight_step_count / elapsed_steps
+                <= float(self.cfg.env.success_max_double_flight_fraction)
+            )
+            stable_top &= (
+                centered
+                & facing_forward
+                & command_matched
+                & path_consistent
+                & gait_consistent
+            )
+            self.top_stable_time += self.dt
+            self.top_stable_time *= stable_top.float()
+            self.top_reached_buf[:] = stable_top & (
+                self.top_stable_time >= float(self.cfg.env.top_dwell_s)
+            )
+        else:
+            self.top_stable_time[:] = 0.0
+            self.top_reached_buf[:] = stable_top
 
         grace_steps = int(self.cfg.env.progress_grace_s / self.dt)
         stall_steps = int(self.cfg.env.stall_timeout_s / self.dt)
@@ -476,12 +712,14 @@ class N2StairsEnv(N2Env):
         # and falling there should count as top_reached but not as success.
         self.top_reached_buf &= ~physical_failure
         self.stall_buf &= ~physical_failure
+        self.path_failure_buf &= ~physical_failure
         # Reaching the top is a true terminal state and must not receive
         # timeout bootstrapping in PPO. A physical failure on the final time
         # step is likewise a failure, not a benign timeout.
         self.time_out_buf &= ~self.top_reached_buf
         self.time_out_buf &= ~physical_failure
         self.reset_buf |= self.stall_buf
+        self.reset_buf |= self.path_failure_buf
         self.reset_buf |= self.top_reached_buf
 
     def _update_terrain_curriculum(self, env_ids):
@@ -491,6 +729,7 @@ class N2StairsEnv(N2Env):
         failure = (
             self.fall_event_buf[env_ids]
             | self.stall_buf[env_ids]
+            | self.path_failure_buf[env_ids]
             | (self.time_out_buf[env_ids] & ~success)
         ) & valid
 
@@ -552,6 +791,28 @@ class N2StairsEnv(N2Env):
             max_foot_height
             >= episode_step_height - self.cfg.terrain.success_height_tolerance
         ).float() * valid.float()
+        episode_steps = torch.clamp(
+            self.episode_length_buf[env_ids].float(), min=1.0
+        )
+        mean_forward_speed = (
+            self.forward_speed_sum[env_ids] / episode_steps
+        ) * valid.float()
+        mean_command_error = (
+            self.command_error_sum[env_ids] / episode_steps
+        ) * valid.float()
+        phase_contact_match = (
+            self.phase_match_sum[env_ids] / episode_steps
+        ) * valid.float()
+        double_flight_fraction = (
+            self.double_flight_step_count[env_ids] / episode_steps
+        ) * valid.float()
+        max_lateral_deviation = (
+            self.max_lateral_deviation[env_ids] * valid.float()
+        )
+        max_yaw_deviation = self.max_yaw_deviation[env_ids] * valid.float()
+        path_failure = (
+            self.path_failure_buf[env_ids] & valid
+        ).float()
 
         self.last_episode_success[env_ids] = success
         self.last_episode_top_reached[env_ids] = top_reached
@@ -564,8 +825,38 @@ class N2StairsEnv(N2Env):
         self.last_episode_max_foot_height[env_ids] = (
             max_foot_height * valid.float()
         )
+        self.last_episode_mean_forward_speed[env_ids] = mean_forward_speed
+        self.last_episode_mean_command_error[env_ids] = mean_command_error
+        self.last_episode_phase_contact_match[env_ids] = phase_contact_match
+        self.last_episode_double_flight_fraction[env_ids] = (
+            double_flight_fraction
+        )
+        self.last_episode_max_lateral_deviation[env_ids] = (
+            max_lateral_deviation
+        )
+        self.last_episode_max_yaw_deviation[env_ids] = max_yaw_deviation
+        self.last_episode_path_failure[env_ids] = path_failure
 
         super().reset_idx(env_ids)
+
+        # Base reset updates root state and orientation, but the base velocity
+        # buffers otherwise still describe the just-finished episode. The
+        # strict Actor observes velocity, so refresh it before the first frame.
+        self.base_lin_vel[env_ids] = quat_rotate_inverse(
+            self.base_quat[env_ids], self.root_states[env_ids, 7:10]
+        )
+        self.base_ang_vel[env_ids] = quat_rotate_inverse(
+            self.base_quat[env_ids], self.root_states[env_ids, 10:13]
+        )
+
+        if self.include_gait_phase and bool(
+            getattr(self.cfg.env, "randomize_gait_phase", False)
+        ):
+            self.gait_phase_offset[env_ids] = torch.rand(
+                len(env_ids), device=self.device
+            )
+        else:
+            self.gait_phase_offset[env_ids] = 0.0
 
         metric_mask = valid
         metric_weight = metric_mask.float()
@@ -584,6 +875,17 @@ class N2StairsEnv(N2Env):
                 "stairs_forward_distance": masked_mean(forward),
                 "stairs_climb_height": masked_mean(climb),
                 "stairs_max_foot_height": masked_mean(max_foot_height),
+                "stairs_mean_forward_speed": masked_mean(mean_forward_speed),
+                "stairs_mean_command_error": masked_mean(mean_command_error),
+                "stairs_phase_contact_match": masked_mean(phase_contact_match),
+                "stairs_double_flight_fraction": masked_mean(
+                    double_flight_fraction
+                ),
+                "stairs_max_lateral_deviation": masked_mean(
+                    max_lateral_deviation
+                ),
+                "stairs_max_yaw_deviation": masked_mean(max_yaw_deviation),
+                "stairs_path_failure_rate": masked_mean(path_failure),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -603,6 +905,14 @@ class N2StairsEnv(N2Env):
         self.double_flight_time[env_ids] = 0.0
         self.foot_contact_height_delta[env_ids] = 0.0
         self.max_foot_contact_height[env_ids] = 0.0
+        self.top_stable_time[env_ids] = 0.0
+        self.path_failure_buf[env_ids] = False
+        self.forward_speed_sum[env_ids] = 0.0
+        self.command_error_sum[env_ids] = 0.0
+        self.phase_match_sum[env_ids] = 0.0
+        self.double_flight_step_count[env_ids] = 0.0
+        self.max_lateral_deviation[env_ids] = 0.0
+        self.max_yaw_deviation[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.stall_buf[env_ids] = False
@@ -668,9 +978,31 @@ class N2StairsEnv(N2Env):
     def _reward_stairs_forward_progress(self):
         upright = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
         supported = torch.any(self.contacts, dim=1).float()
-        world_forward_velocity = torch.clamp(self.root_states[:, 7], 0.0, 0.8)
+        world_forward_velocity = torch.clamp(self.root_states[:, 7], min=0.0)
+        if self.enforce_walk_gait:
+            rewarded_speed = torch.clamp(
+                1.25 * self.commands[:, 0], min=0.10
+            )
+            world_forward_velocity = torch.minimum(
+                world_forward_velocity, rewarded_speed
+            )
+        else:
+            world_forward_velocity = torch.clamp(
+                world_forward_velocity, max=0.8
+            )
         lateral_gate = torch.exp(-4.0 * torch.abs(self.root_states[:, 8]))
-        return world_forward_velocity * upright * supported * lateral_gate
+        heading_gate = torch.ones_like(world_forward_velocity)
+        if self.enforce_walk_gait:
+            yaw = self.base_euler_xyz[:, 2]
+            yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+            heading_gate = torch.exp(-6.0 * torch.square(yaw_error))
+        return (
+            world_forward_velocity
+            * upright
+            * supported
+            * lateral_gate
+            * heading_gate
+        )
 
     def _reward_tracking_lin_vel(self):
         """Track +X without rewarding a stationary robot at the stair foot."""
@@ -685,7 +1017,20 @@ class N2StairsEnv(N2Env):
         )
         upright = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
         supported = torch.any(self.contacts, dim=1).float()
-        return score * progress_gate * upright * supported
+        heading_gate = torch.ones_like(score)
+        if self.enforce_walk_gait:
+            yaw = self.base_euler_xyz[:, 2]
+            yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+            heading_gate = torch.exp(-6.0 * torch.square(yaw_error))
+        return score * progress_gate * upright * supported * heading_gate
+
+    def _reward_stairs_overspeed(self):
+        allowed_speed = 1.35 * self.commands[:, 0] + 0.05
+        excess_forward = torch.clamp(
+            self.root_states[:, 7] - allowed_speed, min=0.0
+        )
+        lateral_speed = self.root_states[:, 8]
+        return torch.square(excess_forward) + torch.square(lateral_speed)
 
     def _reward_stairs_vertical_progress(self):
         _, _, step_height = self._current_stair_targets()
@@ -738,6 +1083,30 @@ class N2StairsEnv(N2Env):
             + 0.5 * yaw_error.square()
         )
 
+    def _reward_stairs_heading_alignment(self):
+        lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+        yaw = self.base_euler_xyz[:, 2]
+        yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
+        aligned = torch.exp(
+            -8.0 * torch.square(yaw_error)
+            -4.0 * torch.square(lateral_position)
+        )
+        upright = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
+        return aligned * upright
+
+    def _reward_stairs_leg_alignment(self):
+        joint_error = self.dof_pos[:, self.leg_alignment_idxs] - (
+            self.default_dof_pos[:, self.leg_alignment_idxs]
+        )
+        return torch.sum(torch.square(joint_error), dim=1)
+
+    def _reward_stairs_feet_yaw(self):
+        feet_quat = self.feet_quat.reshape(-1, 4)
+        _, _, foot_yaw = get_euler_xyz(feet_quat)
+        foot_yaw = torch.atan2(torch.sin(foot_yaw), torch.cos(foot_yaw))
+        foot_yaw = foot_yaw.reshape(self.num_envs, len(self.feet_indices))
+        return torch.mean(torch.square(foot_yaw), dim=1)
+
     def _reward_stairs_no_progress(self):
         grace_steps = int(self.cfg.env.progress_grace_s / self.dt)
         active = self.episode_length_buf > grace_steps
@@ -757,6 +1126,21 @@ class N2StairsEnv(N2Env):
         grace_steps = int(self.cfg.env.flight_grace_s / self.dt)
         return severity * (self.episode_length_buf > grace_steps).float()
 
+    def _reward_stairs_phase_contact(self):
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = self.episode_length_buf > grace_steps
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return self.phase_contact_match * (active & upright).float()
+
+    def _reward_stairs_phase_contact_mismatch(self):
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = self.episode_length_buf > grace_steps
+        return (1.0 - self.phase_contact_match) * active.float()
+
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""
         contact_filt = torch.logical_or(self.contacts, self.last_contacts)
@@ -775,7 +1159,10 @@ class N2StairsEnv(N2Env):
             self.feet_pos[:, :, :2]
         )
         clearance = self.feet_pos[:, :, 2] - foot_ground_height
-        swing = ~self.contacts
+        if self.include_gait_phase:
+            swing = ~self.desired_contacts & ~self.contacts
+        else:
+            swing = ~self.contacts
         score = torch.exp(-40.0 * torch.square(clearance - target)) * swing.float()
         swing_count = torch.sum(swing.float(), dim=1)
         score = torch.sum(score, dim=1) / torch.clamp(swing_count, min=1.0)

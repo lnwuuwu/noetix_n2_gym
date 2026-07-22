@@ -106,6 +106,27 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "max_foot_height_m": float(
                             env.last_episode_max_foot_height[env_id].item()
                         ),
+                        "mean_forward_speed_m_s": float(
+                            env.last_episode_mean_forward_speed[env_id].item()
+                        ),
+                        "mean_command_error_m_s": float(
+                            env.last_episode_mean_command_error[env_id].item()
+                        ),
+                        "phase_contact_match": float(
+                            env.last_episode_phase_contact_match[env_id].item()
+                        ),
+                        "double_flight_fraction": float(
+                            env.last_episode_double_flight_fraction[env_id].item()
+                        ),
+                        "max_lateral_deviation_m": float(
+                            env.last_episode_max_lateral_deviation[env_id].item()
+                        ),
+                        "max_yaw_deviation_rad": float(
+                            env.last_episode_max_yaw_deviation[env_id].item()
+                        ),
+                        "path_failure": float(
+                            env.last_episode_path_failure[env_id].item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -140,11 +161,22 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "stall_rate": mean("stall"),
         "first_step_rate": mean("first_step"),
         "mean_max_foot_height_m": mean("max_foot_height_m"),
+        "mean_forward_speed_m_s": mean("mean_forward_speed_m_s"),
+        "mean_command_error_m_s": mean("mean_command_error_m_s"),
+        "mean_phase_contact_match": mean("phase_contact_match"),
+        "mean_double_flight_fraction": mean("double_flight_fraction"),
+        "mean_max_lateral_deviation_m": mean("max_lateral_deviation_m"),
+        "mean_max_yaw_deviation_rad": mean("max_yaw_deviation_rad"),
+        "path_failure_rate": mean("path_failure"),
     }
 
 
 def evaluate(args):
-    if args.task not in ("n2_stairs", "n2_stairs_robust"):
+    if args.task not in (
+        "n2_stairs",
+        "n2_stairs_robust",
+        "n2_stairs_walk",
+    ):
         raise ValueError("eval_stairs.py only supports n2_stairs tasks")
     if args.num_envs is None:
         args.num_envs = 128
@@ -209,6 +241,9 @@ def evaluate(args):
             "level={terrain_level} height={step_height_m:.2f}m "
             "success={success_rate:.1%} distance={mean_forward_distance_m:.3f}m "
             "climb={mean_climb_height_m:.3f}m first_step={first_step_rate:.1%} "
+            "speed={mean_forward_speed_m_s:.3f}m/s "
+            "lateral={mean_max_lateral_deviation_m:.3f}m "
+            "flight={mean_double_flight_fraction:.1%} "
             "fall={fall_rate:.1%}".format(
                 **result
             )
