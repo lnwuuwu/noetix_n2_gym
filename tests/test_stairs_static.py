@@ -334,6 +334,9 @@ class StairConfigurationTests(unittest.TestCase):
                 walk_cfg.env.swing_knee_base_target,
             )
             self.assertGreater(walk_cfg.env.arm_swing_amplitude, 0.0)
+            self.assertAlmostEqual(
+                walk_cfg.env.sagittal_foot_phase_amplitude, 0.26
+            )
             self.assertEqual(train_cfg.runner.experiment_name, "n2_stairs")
             self.assertEqual(
                 walk_train_cfg.runner.experiment_name, "n2_stairs_walk"
@@ -474,6 +477,8 @@ class StairConfigurationTests(unittest.TestCase):
             "stairs_command_speed_error",
             "stairs_phase_contact",
             "stairs_phase_contact_mismatch",
+            "stairs_sagittal_foot_phase",
+            "stairs_sagittal_foot_phase_error",
             "stairs_heading_alignment",
             "stairs_leg_alignment",
             "stairs_feet_yaw",
@@ -493,6 +498,8 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertLessEqual(walk_scales["stairs_same_tread_join"], -3.0)
         self.assertLessEqual(walk_scales["stairs_overstride"], -8.0)
         self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
+        self.assertGreater(walk_scales["stairs_sagittal_foot_phase"], 0.0)
+        self.assertLess(walk_scales["stairs_sagittal_foot_phase_error"], 0.0)
 
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
@@ -519,6 +526,10 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("_scheduled_gait_frequency", stairs_source)
         self.assertIn("gait_frequency_transition_active", stairs_source)
         self.assertIn("Gait frequency transition: step", stairs_source)
+        self.assertIn(
+            "-amplitude * torch.cos(2.0 * torch.pi * phase)",
+            stairs_source,
+        )
         self.assertIn(
             "self.tread_advance_count + self.same_tread_join_count",
             stairs_source,
@@ -563,6 +574,7 @@ class StairConfigurationTests(unittest.TestCase):
             "mean_forward_speed_m_s",
             "mean_command_error_m_s",
             "mean_phase_contact_match",
+            "mean_sagittal_foot_phase_match",
             "mean_double_flight_fraction",
             "mean_max_lateral_deviation_m",
             "mean_max_yaw_deviation_rad",

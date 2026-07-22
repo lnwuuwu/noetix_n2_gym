@@ -115,6 +115,11 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "phase_contact_match": float(
                             env.last_episode_phase_contact_match[env_id].item()
                         ),
+                        "sagittal_foot_phase_match": float(
+                            env.last_episode_sagittal_foot_phase_match[
+                                env_id
+                            ].item()
+                        ),
                         "double_flight_fraction": float(
                             env.last_episode_double_flight_fraction[env_id].item()
                         ),
@@ -201,6 +206,9 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "mean_forward_speed_m_s": mean("mean_forward_speed_m_s"),
         "mean_command_error_m_s": mean("mean_command_error_m_s"),
         "mean_phase_contact_match": mean("phase_contact_match"),
+        "mean_sagittal_foot_phase_match": mean(
+            "sagittal_foot_phase_match"
+        ),
         "mean_double_flight_fraction": mean("double_flight_fraction"),
         "mean_max_lateral_deviation_m": mean("max_lateral_deviation_m"),
         "mean_max_yaw_deviation_rad": mean("max_yaw_deviation_rad"),
@@ -296,6 +304,7 @@ def evaluate(args):
             "flight={mean_double_flight_fraction:.1%} "
             "alternate={mean_alternating_tread_rate:.1%} "
             "join={mean_same_tread_join_rate:.1%} "
+            "footphase={mean_sagittal_foot_phase_match:.1%} "
             "stride={mean_max_sagittal_foot_separation_m:.3f}m "
             "knee={mean_swing_knee_flexion_rad:.2f}rad "
             "arm={mean_arm_swing_match:.2f} "

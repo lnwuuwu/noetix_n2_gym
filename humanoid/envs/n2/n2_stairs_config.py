@@ -370,6 +370,14 @@ class N2StairsWalkCfg(N2StairsCfg):
         arm_swing_amplitude = 0.22
         arm_swing_tracking_sharpness = 12.0
 
+        # Dense foot-order reference for stair-over-stair walking. At the
+        # start of right swing, the right foot should be behind the left; it
+        # crosses through zero separation and lands ahead half a cycle later.
+        # The next half-cycle mirrors that motion for the left foot.
+        sagittal_foot_phase_amplitude = 0.26
+        sagittal_foot_phase_sharpness = 12.0
+        sagittal_foot_phase_error_clip = 2.0
+
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
         corridor_half_width = 0.30
@@ -407,6 +415,8 @@ class N2StairsWalkCfg(N2StairsCfg):
             # Explicit alternating support/swing schedule.
             stairs_phase_contact = 2.00
             stairs_phase_contact_mismatch = -3.0
+            stairs_sagittal_foot_phase = 2.00
+            stairs_sagittal_foot_phase_error = -0.75
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10

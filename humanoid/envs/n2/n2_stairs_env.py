@@ -234,6 +234,9 @@ class N2StairsEnv(N2Env):
         self.forward_speed_sum = torch.zeros_like(self.best_forward_progress)
         self.command_error_sum = torch.zeros_like(self.best_forward_progress)
         self.phase_match_sum = torch.zeros_like(self.best_forward_progress)
+        self.sagittal_foot_phase_match_sum = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.double_flight_step_count = torch.zeros_like(
             self.best_forward_progress
         )
@@ -298,6 +301,9 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_phase_contact_match = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_sagittal_foot_phase_match = torch.zeros_like(
             self.best_forward_progress
         )
         self.last_episode_double_flight_fraction = torch.zeros_like(
@@ -812,6 +818,36 @@ class N2StairsEnv(N2Env):
             )
         )
 
+    def _sagittal_foot_phase_state(self):
+        """Return dense right-minus-left foot-order tracking quantities.
+
+        Just after phase zero the right leg starts swing behind the left leg.
+        It crosses the stance leg near phase 0.25 and lands ahead near phase
+        0.5. The cosine reference mirrors this trajectory for left swing in
+        the second half-cycle, directly distinguishing stair-over-stair motion
+        from a step-to gait that repeatedly brings both feet together.
+        """
+        phase = self._get_gait_phase()
+        amplitude = max(
+            float(self.cfg.env.sagittal_foot_phase_amplitude), 1.0e-3
+        )
+        target_separation = -amplitude * torch.cos(2.0 * torch.pi * phase)
+        actual_separation = (
+            self.feet_pos[:, 1, 0] - self.feet_pos[:, 0, 0]
+        )
+        error = actual_separation - target_separation
+        sharpness = float(self.cfg.env.sagittal_foot_phase_sharpness)
+        score = torch.exp(-sharpness * torch.square(error))
+        error_clip = float(self.cfg.env.sagittal_foot_phase_error_clip)
+        normalized_error = torch.clamp(
+            error / amplitude, min=-error_clip, max=error_clip
+        )
+        return score, normalized_error
+
+    def _sagittal_foot_phase_score(self):
+        score, _ = self._sagittal_foot_phase_state()
+        return score
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_desired_contacts()
@@ -846,6 +882,10 @@ class N2StairsEnv(N2Env):
             forward_speed - self.commands[:, 0]
         )
         self.phase_match_sum += self.phase_contact_match
+        if self.enforce_walk_gait:
+            self.sagittal_foot_phase_match_sum += (
+                self._sagittal_foot_phase_score()
+            )
         self.double_flight_step_count += (~torch.any(self.contacts, dim=1)).float()
         self.max_lateral_deviation[:] = torch.maximum(
             self.max_lateral_deviation, torch.abs(lateral_position)
@@ -1103,6 +1143,9 @@ class N2StairsEnv(N2Env):
         phase_contact_match = (
             self.phase_match_sum[env_ids] / episode_steps
         ) * valid.float()
+        sagittal_foot_phase_match = (
+            self.sagittal_foot_phase_match_sum[env_ids] / episode_steps
+        ) * valid.float()
         double_flight_fraction = (
             self.double_flight_step_count[env_ids] / episode_steps
         ) * valid.float()
@@ -1164,6 +1207,9 @@ class N2StairsEnv(N2Env):
         self.last_episode_mean_forward_speed[env_ids] = mean_forward_speed
         self.last_episode_mean_command_error[env_ids] = mean_command_error
         self.last_episode_phase_contact_match[env_ids] = phase_contact_match
+        self.last_episode_sagittal_foot_phase_match[env_ids] = (
+            sagittal_foot_phase_match
+        )
         self.last_episode_double_flight_fraction[env_ids] = (
             double_flight_fraction
         )
@@ -1240,6 +1286,9 @@ class N2StairsEnv(N2Env):
                 "stairs_mean_forward_speed": masked_mean(mean_forward_speed),
                 "stairs_mean_command_error": masked_mean(mean_command_error),
                 "stairs_phase_contact_match": masked_mean(phase_contact_match),
+                "stairs_sagittal_foot_phase_match": masked_mean(
+                    sagittal_foot_phase_match
+                ),
                 "stairs_double_flight_fraction": masked_mean(
                     double_flight_fraction
                 ),
@@ -1282,12 +1331,16 @@ class N2StairsEnv(N2Env):
                 "stairs_command_x": masked_mean(episode_command),
             }
         )
-        self.extras["episode"]["max_command_x"] = self._command_upper_for_levels(
-            self.terrain_levels[env_ids]
-        ).mean()
-        self.extras["episode"]["min_command_x"] = float(
-            self.command_ranges["lin_vel_x"][0]
-        )
+        command_lower = float(self.command_ranges["lin_vel_x"][0])
+        command_upper = float(self.command_ranges["lin_vel_x"][1])
+        if abs(command_upper - command_lower) < 1.0e-9:
+            logged_command_upper = command_upper
+        else:
+            logged_command_upper = self._command_upper_for_levels(
+                self.terrain_levels[env_ids]
+            ).mean()
+        self.extras["episode"]["max_command_x"] = logged_command_upper
+        self.extras["episode"]["min_command_x"] = command_lower
 
         self.best_forward_progress[env_ids] = 0.0
         self.progress_checkpoint[env_ids] = 0.0
@@ -1314,6 +1367,7 @@ class N2StairsEnv(N2Env):
         self.forward_speed_sum[env_ids] = 0.0
         self.command_error_sum[env_ids] = 0.0
         self.phase_match_sum[env_ids] = 0.0
+        self.sagittal_foot_phase_match_sum[env_ids] = 0.0
         self.double_flight_step_count[env_ids] = 0.0
         self.max_lateral_deviation[env_ids] = 0.0
         self.max_yaw_deviation[env_ids] = 0.0
@@ -1679,6 +1733,30 @@ class N2StairsEnv(N2Env):
         )
         active = self.episode_length_buf > grace_steps
         return (1.0 - self.phase_contact_match) * active.float()
+
+    def _reward_stairs_sagittal_foot_phase(self):
+        """Reward the scheduled swing foot crossing ahead of the stance foot."""
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = self.episode_length_buf > grace_steps
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        score, _ = self._sagittal_foot_phase_state()
+        return score * (active & moving & upright).float()
+
+    def _reward_stairs_sagittal_foot_phase_error(self):
+        """Supply a dense gradient when the feet have the wrong phase order."""
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = self.episode_length_buf > grace_steps
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        _, normalized_error = self._sagittal_foot_phase_state()
+        return torch.square(normalized_error) * (
+            active & moving & upright
+        ).float()
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""
