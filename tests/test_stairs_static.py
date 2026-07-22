@@ -467,6 +467,9 @@ class StairConfigurationTests(unittest.TestCase):
                 "scales",
             )
         )
+        walk_env = literal_assignments(
+            nested_class(self.config_tree, "N2StairsWalkCfg", "env")
+        )
         walk_missing = sorted(
             name for name, value in walk_scales.items()
             if value != 0 and name not in implemented
@@ -504,6 +507,10 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertLess(walk_scales["stairs_sagittal_foot_phase_error"], 0.0)
         self.assertGreater(walk_scales["stairs_next_tread_target"], 0.0)
         self.assertLess(walk_scales["stairs_next_tread_target_error"], 0.0)
+        self.assertLess(
+            walk_env["next_tread_target_start_phase"],
+            walk_env["next_tread_target_full_phase"],
+        )
 
         # Sparse events must cancel the base framework's unconditional dt
         # scaling, while retaining bounded configured magnitudes.
@@ -536,6 +543,7 @@ class StairConfigurationTests(unittest.TestCase):
         )
         self.assertIn("self.stair_start_x[levels, types]", stairs_source)
         self.assertIn("self.last_advanced_tread + 1", stairs_source)
+        self.assertIn("landing_weight = torch.square", stairs_source)
         self.assertIn(
             "self.tread_advance_count + self.same_tread_join_count",
             stairs_source,

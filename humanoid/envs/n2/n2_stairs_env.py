@@ -891,6 +891,27 @@ class N2StairsEnv(N2Env):
             1,
             expected_foot.unsqueeze(1),
         ).squeeze(1).bool()
+        phase = self._get_gait_phase()
+        right_swing_progress = 2.0 * phase
+        left_swing_progress = 2.0 * (phase - 0.5)
+        swing_progress = torch.where(
+            expected_foot == 1,
+            right_swing_progress,
+            left_swing_progress,
+        )
+        swing_progress = torch.clamp(swing_progress, min=0.0, max=1.0)
+        start_phase = float(self.cfg.env.next_tread_target_start_phase)
+        full_phase = float(self.cfg.env.next_tread_target_full_phase)
+        phase_span = max(full_phase - start_phase, 1.0e-3)
+        landing_weight = torch.clamp(
+            (swing_progress - start_phase) / phase_span,
+            min=0.0,
+            max=1.0,
+        )
+        # Smoothstep avoids an abrupt reward change halfway through swing.
+        landing_weight = torch.square(landing_weight) * (
+            3.0 - 2.0 * landing_weight
+        )
         grace_steps = int(
             getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
         )
@@ -902,7 +923,7 @@ class N2StairsEnv(N2Env):
             & (self.root_states[:, 7] > 0.03)
             & (-self.projected_gravity[:, 2] > 0.80)
         )
-        return score, normalized_error, active
+        return score, normalized_error, landing_weight * active.float()
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
@@ -1816,13 +1837,15 @@ class N2StairsEnv(N2Env):
 
     def _reward_stairs_next_tread_target(self):
         """Reward the opposite swing foot approaching the next tread center."""
-        score, _, active = self._next_tread_foot_target_state()
-        return score * active.float()
+        score, _, target_weight = self._next_tread_foot_target_state()
+        return score * target_weight
 
     def _reward_stairs_next_tread_target_error(self):
         """Penalize remaining fore-aft distance to the next tread center."""
-        _, normalized_error, active = self._next_tread_foot_target_state()
-        return torch.square(normalized_error) * active.float()
+        _, normalized_error, target_weight = (
+            self._next_tread_foot_target_state()
+        )
+        return torch.square(normalized_error) * target_weight
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""

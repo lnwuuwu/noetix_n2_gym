@@ -379,6 +379,10 @@ class N2StairsWalkCfg(N2StairsCfg):
         sagittal_foot_phase_error_clip = 2.0
         next_tread_target_sharpness = 2.0
         next_tread_target_error_clip = 2.0
+        # Preserve a natural early swing and introduce the absolute landing
+        # target only after the foot has crossed the stance leg.
+        next_tread_target_start_phase = 0.50
+        next_tread_target_full_phase = 0.85
 
         # Leaving this center corridor is a task failure. The yaw limit is
         # deliberately looser than the success tolerance to allow recovery.
