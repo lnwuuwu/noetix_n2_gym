@@ -500,13 +500,15 @@ class StairConfigurationTests(unittest.TestCase):
 
         self.assertGreaterEqual(walk_scales["stairs_alternating_tread"], 5.0)
         self.assertLessEqual(walk_scales["stairs_repeated_lead"], -5.0)
-        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -3.0)
+        self.assertLessEqual(walk_scales["stairs_same_tread_join"], -5.0)
         self.assertLessEqual(walk_scales["stairs_overstride"], -8.0)
         self.assertLess(walk_scales["stairs_swing_knee_deficit"], 0.0)
         self.assertGreater(walk_scales["stairs_sagittal_foot_phase"], 0.0)
         self.assertLess(walk_scales["stairs_sagittal_foot_phase_error"], 0.0)
-        self.assertGreater(walk_scales["stairs_next_tread_target"], 0.0)
-        self.assertLess(walk_scales["stairs_next_tread_target_error"], 0.0)
+        self.assertGreaterEqual(walk_scales["stairs_next_tread_target"], 3.5)
+        self.assertLessEqual(
+            walk_scales["stairs_next_tread_target_error"], -2.5
+        )
         self.assertLess(
             walk_env["next_tread_target_start_phase"],
             walk_env["next_tread_target_full_phase"],

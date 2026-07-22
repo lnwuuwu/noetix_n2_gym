@@ -423,15 +423,18 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_phase_contact_mismatch = -3.0
             stairs_sagittal_foot_phase = 2.00
             stairs_sagittal_foot_phase_error = -0.75
-            stairs_next_tread_target = 2.50
-            stairs_next_tread_target_error = -1.50
+            # Once stable top-reaching is established, make the late-swing
+            # landing target strong enough to beat the residual step-to gait.
+            # The phase ramp above still protects the natural early swing.
+            stairs_next_tread_target = 3.50
+            stairs_next_tread_target_error = -2.50
             stairs_double_flight = -8.0
             stairs_single_support = 0.40
             feet_air_time = 0.10
             stairs_foot_step_progress = 2.00
             stairs_alternating_tread = 5.00
             stairs_repeated_lead = -5.00
-            stairs_same_tread_join = -3.00
+            stairs_same_tread_join = -5.00
             stairs_skipped_tread = -3.00
             stairs_stable_contact = 0.50
 
