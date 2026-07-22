@@ -208,6 +208,12 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.gait_phase_offset = torch.zeros_like(self.best_forward_progress)
+        self.episode_gait_frequency = torch.zeros_like(
+            self.best_forward_progress
+        )
+        # Fresh policies use the tread-matched clock immediately. Loading a
+        # legacy checkpoint without saved transition state enables this flag.
+        self.gait_frequency_transition_active = False
         self.desired_contacts = torch.ones(
             self.num_envs,
             len(self.feet_indices),
@@ -324,6 +330,9 @@ class N2StairsEnv(N2Env):
         self.last_episode_mean_arm_swing_match = torch.zeros_like(
             self.best_forward_progress
         )
+        self.last_episode_gait_frequency = torch.zeros_like(
+            self.best_forward_progress
+        )
 
     def _get_noise_scale_vec(self, cfg):
         """Noise layout for commands, optional phase, proprioception, and terrain."""
@@ -364,8 +373,8 @@ class N2StairsEnv(N2Env):
         )
         return noise_vec
 
-    def _get_gait_phase(self):
-        """Return a per-environment deployable left/right gait clock in [0, 1)."""
+    def _target_gait_frequency(self):
+        """Return the final tread-matched frequency for each command."""
         base_frequency = float(getattr(self.cfg.env, "gait_frequency", 1.25))
         frequency_gain = float(
             getattr(self.cfg.env, "gait_frequency_gain", 0.0)
@@ -373,8 +382,36 @@ class N2StairsEnv(N2Env):
         reference_speed = float(
             getattr(self.cfg.env, "gait_reference_speed", 0.0)
         )
-        frequency = base_frequency + frequency_gain * torch.clamp(
+        return base_frequency + frequency_gain * torch.clamp(
             self.commands[:, 0] - reference_speed, min=0.0
+        )
+
+    def _gait_frequency_transition_fraction(self):
+        """Return global old-clock to tread-clock blend in ``[0, 1]``."""
+        transition_steps = int(
+            getattr(self.cfg.env, "gait_frequency_transition_steps", 0)
+        )
+        if not self.enforce_walk_gait or transition_steps <= 0:
+            return 1.0
+        if not self.gait_frequency_transition_active:
+            return 1.0
+        return min(max(self.common_step_counter / transition_steps, 0.0), 1.0)
+
+    def _scheduled_gait_frequency(self):
+        """Blend legacy timing into the deployable target without a phase jump."""
+        target = self._target_gait_frequency()
+        start = float(
+            getattr(self.cfg.env, "gait_frequency_start", 1.25)
+        )
+        blend = self._gait_frequency_transition_fraction()
+        return start + blend * (target - start)
+
+    def _get_gait_phase(self):
+        """Return a per-environment deployable left/right gait clock in [0, 1)."""
+        frequency = torch.where(
+            self.episode_gait_frequency > 0.0,
+            self.episode_gait_frequency,
+            self._scheduled_gait_frequency(),
         )
         elapsed = self.episode_length_buf.float() * self.dt
         return torch.remainder(
@@ -1014,6 +1051,9 @@ class N2StairsEnv(N2Env):
         climb = self.max_climb_height[env_ids].clone() * valid.float()
         survival = self.episode_length_buf[env_ids].float() * self.dt * valid.float()
         episode_command = self.commands[env_ids, 0].clone() * valid.float()
+        episode_gait_frequency = (
+            self.episode_gait_frequency[env_ids].clone() * valid.float()
+        )
         _, _, episode_step_height = self._current_stair_targets(env_ids)
         max_foot_height = torch.max(
             self.max_foot_contact_height[env_ids], dim=1
@@ -1121,6 +1161,7 @@ class N2StairsEnv(N2Env):
         self.last_episode_mean_arm_swing_match[env_ids] = (
             mean_arm_swing_match
         )
+        self.last_episode_gait_frequency[env_ids] = episode_gait_frequency
 
         super().reset_idx(env_ids)
 
@@ -1142,6 +1183,11 @@ class N2StairsEnv(N2Env):
             )
         else:
             self.gait_phase_offset[env_ids] = 0.0
+        if self.include_gait_phase:
+            scheduled_frequency = self._scheduled_gait_frequency()
+            self.episode_gait_frequency[env_ids] = scheduled_frequency[env_ids]
+        else:
+            self.episode_gait_frequency[env_ids] = 0.0
 
         metric_mask = valid
         metric_weight = metric_mask.float()
@@ -1194,6 +1240,12 @@ class N2StairsEnv(N2Env):
                 ),
                 "stairs_mean_arm_swing_match": masked_mean(
                     mean_arm_swing_match
+                ),
+                "stairs_gait_frequency_hz": masked_mean(
+                    episode_gait_frequency
+                ),
+                "stairs_gait_frequency_transition": (
+                    self._gait_frequency_transition_fraction()
                 ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
@@ -1249,19 +1301,24 @@ class N2StairsEnv(N2Env):
 
     def get_checkpoint_state(self):
         """Return the curriculum state needed for a faithful training resume."""
+        transition_steps = int(
+            getattr(self.cfg.env, "gait_frequency_transition_steps", 0)
+        )
+        transition_step = transition_steps
+        if self.gait_frequency_transition_active:
+            transition_step = min(self.common_step_counter, transition_steps)
         return {
-            "version": 1,
+            "version": 2,
             "task_name": getattr(self.cfg.env, "task_name", None),
             "terrain_levels": self.terrain_levels.detach().cpu(),
             "success_streak": self.curriculum_success_streak.detach().cpu(),
             "failure_streak": self.curriculum_failure_streak.detach().cpu(),
+            "gait_frequency_transition_step": transition_step,
         }
 
     def load_checkpoint_state(self, state):
         """Restore curriculum state while allowing a different environment count."""
-        if not state or not self.cfg.terrain.curriculum:
-            return
-        if int(getattr(self.cfg.terrain, "fixed_level", -1)) >= 0:
+        if not state:
             return
         source_task = state.get("task_name")
         current_task = getattr(self.cfg.env, "task_name", None)
@@ -1273,6 +1330,38 @@ class N2StairsEnv(N2Env):
                     )
                 )
                 return
+
+        transition_steps = int(
+            getattr(self.cfg.env, "gait_frequency_transition_steps", 0)
+        )
+        saved_transition_step = state.get("gait_frequency_transition_step")
+        if transition_steps > 0 and self.enforce_walk_gait:
+            # Version-1 strict checkpoints used a fixed 1.25 Hz clock and do
+            # not contain this key. Start their compatibility transition at
+            # zero. New checkpoints preserve progress, while fresh training
+            # never calls this loader and uses the final clock immediately.
+            restored_step = 0
+            if saved_transition_step is not None:
+                restored_step = max(
+                    0, min(int(saved_transition_step), transition_steps)
+                )
+            self.gait_frequency_transition_active = (
+                restored_step < transition_steps
+            )
+            self.common_step_counter = restored_step
+            self.episode_gait_frequency[:] = self._scheduled_gait_frequency()
+            print(
+                "Gait frequency transition: step {}/{} (active={})".format(
+                    restored_step,
+                    transition_steps,
+                    self.gait_frequency_transition_active,
+                )
+            )
+
+        if not self.cfg.terrain.curriculum:
+            return
+        if int(getattr(self.cfg.terrain, "fixed_level", -1)) >= 0:
+            return
 
         def expand_to_envs(key, target):
             source = state.get(key)

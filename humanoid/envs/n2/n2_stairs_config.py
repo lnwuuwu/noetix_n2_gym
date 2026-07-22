@@ -313,6 +313,12 @@ class N2StairsWalkCfg(N2StairsCfg):
         gait_frequency = 0.20
         gait_frequency_gain = 1.6666667
         gait_reference_speed = 0.12
+        # Existing model_5000 checkpoints learned with the original 1.25 Hz
+        # clock. Blend from that clock to the tread-matched target over 800
+        # PPO iterations (24 policy steps/iteration) instead of changing the
+        # temporal meaning of the phase observation in one update.
+        gait_frequency_start = 1.25
+        gait_frequency_transition_steps = 19200
         double_support_ratio = 0.16
         gait_reward_grace_s = 0.50
         randomize_gait_phase = True

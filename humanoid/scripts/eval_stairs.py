@@ -161,6 +161,9 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "mean_arm_swing_match": float(
                             env.last_episode_mean_arm_swing_match[env_id].item()
                         ),
+                        "gait_frequency_hz": float(
+                            env.last_episode_gait_frequency[env_id].item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -214,6 +217,7 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
             "mean_swing_knee_flexion_rad"
         ),
         "mean_arm_swing_match": mean("mean_arm_swing_match"),
+        "mean_gait_frequency_hz": mean("gait_frequency_hz"),
     }
 
 
@@ -295,6 +299,7 @@ def evaluate(args):
             "stride={mean_max_sagittal_foot_separation_m:.3f}m "
             "knee={mean_swing_knee_flexion_rad:.2f}rad "
             "arm={mean_arm_swing_match:.2f} "
+            "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(
                 **result
             )
