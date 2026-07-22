@@ -245,9 +245,21 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertTrue(walk_cfg.env.include_navigation_state)
             self.assertTrue(walk_cfg.env.enforce_walk_gait)
             self.assertEqual(walk_cfg.env.gait_frequency_start, 1.25)
+            self.assertEqual(walk_cfg.env.gait_frequency_start_gain, 0.75)
+            self.assertEqual(
+                walk_cfg.env.gait_frequency_start_reference_speed, 0.12
+            )
             self.assertEqual(
                 walk_cfg.env.gait_frequency_transition_steps, 800 * 24
             )
+            legacy_frequency_018 = walk_cfg.env.gait_frequency_start + (
+                walk_cfg.env.gait_frequency_start_gain
+                * (
+                    0.18
+                    - walk_cfg.env.gait_frequency_start_reference_speed
+                )
+            )
+            self.assertAlmostEqual(legacy_frequency_018, 1.295, places=6)
             target_frequency_018 = walk_cfg.env.gait_frequency + (
                 walk_cfg.env.gait_frequency_gain
                 * (0.18 - walk_cfg.env.gait_reference_speed)
@@ -485,6 +497,10 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("_scheduled_gait_frequency", stairs_source)
         self.assertIn("gait_frequency_transition_active", stairs_source)
         self.assertIn("Gait frequency transition: step", stairs_source)
+        self.assertIn(
+            "self.tread_advance_count + self.same_tread_join_count",
+            stairs_source,
+        )
         train_source = (
             ROOT / "humanoid" / "scripts" / "train.py"
         ).read_text()

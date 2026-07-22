@@ -400,8 +400,21 @@ class N2StairsEnv(N2Env):
     def _scheduled_gait_frequency(self):
         """Blend legacy timing into the deployable target without a phase jump."""
         target = self._target_gait_frequency()
-        start = float(
+        start_base = float(
             getattr(self.cfg.env, "gait_frequency_start", 1.25)
+        )
+        start_gain = float(
+            getattr(self.cfg.env, "gait_frequency_start_gain", 0.0)
+        )
+        start_reference_speed = float(
+            getattr(
+                self.cfg.env,
+                "gait_frequency_start_reference_speed",
+                0.0,
+            )
+        )
+        start = start_base + start_gain * torch.clamp(
+            self.commands[:, 0] - start_reference_speed, min=0.0
         )
         blend = self._gait_frequency_transition_fraction()
         return start + blend * (target - start)
@@ -907,17 +920,23 @@ class N2StairsEnv(N2Env):
                 self.double_flight_step_count / elapsed_steps
                 <= float(self.cfg.env.success_max_double_flight_fraction)
             )
-            tread_advance_denominator = torch.clamp(
-                self.tread_advance_count, min=1.0
+            # Step-to joins are sequence events but not advances. Include
+            # them in the denominator so every reported rate remains in
+            # [0, 1] and a join-heavy gait cannot produce percentages above
+            # 100%. Repeated-lead and skipped-tread events are already a
+            # subset of tread_advance_count.
+            tread_sequence_denominator = torch.clamp(
+                self.tread_advance_count + self.same_tread_join_count,
+                min=1.0,
             )
             alternating_tread_rate = (
-                self.alternating_tread_count / tread_advance_denominator
+                self.alternating_tread_count / tread_sequence_denominator
             )
             same_tread_join_rate = (
-                self.same_tread_join_count / tread_advance_denominator
+                self.same_tread_join_count / tread_sequence_denominator
             )
             skipped_tread_rate = (
-                self.skipped_tread_count / tread_advance_denominator
+                self.skipped_tread_count / tread_sequence_denominator
             )
             natural_step_sequence = (
                 self.alternating_tread_count
@@ -1084,27 +1103,29 @@ class N2StairsEnv(N2Env):
         path_failure = (
             self.path_failure_buf[env_ids] & valid
         ).float()
-        tread_advance_denominator = torch.clamp(
-            self.tread_advance_count[env_ids], min=1.0
+        tread_sequence_denominator = torch.clamp(
+            self.tread_advance_count[env_ids]
+            + self.same_tread_join_count[env_ids],
+            min=1.0,
         )
         alternating_tread_count = (
             self.alternating_tread_count[env_ids] * valid.float()
         )
         alternating_tread_rate = (
             self.alternating_tread_count[env_ids]
-            / tread_advance_denominator
+            / tread_sequence_denominator
         ) * valid.float()
         repeated_lead_rate = (
             self.repeated_lead_count[env_ids]
-            / tread_advance_denominator
+            / tread_sequence_denominator
         ) * valid.float()
         same_tread_join_rate = (
             self.same_tread_join_count[env_ids]
-            / tread_advance_denominator
+            / tread_sequence_denominator
         ) * valid.float()
         skipped_tread_rate = (
             self.skipped_tread_count[env_ids]
-            / tread_advance_denominator
+            / tread_sequence_denominator
         ) * valid.float()
         max_sagittal_foot_separation = (
             self.max_sagittal_foot_separation[env_ids] * valid.float()
