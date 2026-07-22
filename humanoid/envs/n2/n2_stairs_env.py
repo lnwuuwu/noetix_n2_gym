@@ -1136,16 +1136,77 @@ class N2StairsEnv(N2Env):
         self.reset_buf |= self.path_failure_buf
         self.reset_buf |= self.top_reached_buf
 
+    def _terrain_curriculum_success_mask(self, env_ids):
+        """Return the training promotion gate without weakening evaluation."""
+        if not self.enforce_walk_gait:
+            return self.top_reached_buf[env_ids]
+
+        episode_steps = torch.clamp(
+            self.episode_length_buf[env_ids].float(), min=1.0
+        )
+        sequence_denominator = torch.clamp(
+            self.tread_advance_count[env_ids]
+            + self.same_tread_join_count[env_ids],
+            min=1.0,
+        )
+        alternating_rate = (
+            self.alternating_tread_count[env_ids] / sequence_denominator
+        )
+        same_tread_join_rate = (
+            self.same_tread_join_count[env_ids] / sequence_denominator
+        )
+        skipped_tread_rate = (
+            self.skipped_tread_count[env_ids] / sequence_denominator
+        )
+        phase_match = self.phase_match_sum[env_ids] / episode_steps
+        double_flight_fraction = (
+            self.double_flight_step_count[env_ids] / episode_steps
+        )
+
+        return (
+            self.top_position_reached_buf[env_ids]
+            & ~self.fall_event_buf[env_ids]
+            & ~self.path_failure_buf[env_ids]
+            & (
+                self.alternating_tread_count[env_ids]
+                >= float(
+                    self.cfg.env.curriculum_min_alternating_tread_count
+                )
+            )
+            & (
+                alternating_rate
+                >= float(self.cfg.env.curriculum_min_alternating_tread_rate)
+            )
+            & (
+                same_tread_join_rate
+                <= float(self.cfg.env.curriculum_max_same_tread_join_rate)
+            )
+            & (
+                skipped_tread_rate
+                <= float(self.cfg.env.curriculum_max_skipped_tread_rate)
+            )
+            & (
+                phase_match
+                >= float(self.cfg.env.curriculum_min_phase_contact_match)
+            )
+            & (
+                double_flight_fraction
+                <= float(
+                    self.cfg.env.curriculum_max_double_flight_fraction
+                )
+            )
+        )
+
     def _update_terrain_curriculum(self, env_ids):
         valid = self.episode_started[env_ids]
-        success = self.top_reached_buf[env_ids] & valid
+        success = self._terrain_curriculum_success_mask(env_ids) & valid
 
         failure = (
             self.fall_event_buf[env_ids]
             | self.stall_buf[env_ids]
             | self.path_failure_buf[env_ids]
-            | (self.time_out_buf[env_ids] & ~success)
-        ) & valid
+            | self.time_out_buf[env_ids]
+        ) & ~success & valid
 
         success_streak = torch.where(
             success,
@@ -1188,6 +1249,9 @@ class N2StairsEnv(N2Env):
 
         valid = self.episode_started[env_ids].clone()
         success = (self.top_reached_buf[env_ids] & valid).float()
+        curriculum_pass = (
+            self._terrain_curriculum_success_mask(env_ids) & valid
+        ).float()
         top_reached = (
             self.top_position_reached_buf[env_ids] & valid
         ).float()
@@ -1353,6 +1417,7 @@ class N2StairsEnv(N2Env):
         self.extras["episode"].update(
             {
                 "stairs_success_rate": masked_mean(success),
+                "stairs_curriculum_pass_rate": masked_mean(curriculum_pass),
                 "stairs_top_rate": masked_mean(top_reached),
                 "stairs_fall_rate": masked_mean(fall),
                 "stairs_stall_rate": masked_mean(stall),

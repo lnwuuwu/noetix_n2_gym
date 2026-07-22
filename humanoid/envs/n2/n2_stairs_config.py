@@ -353,6 +353,18 @@ class N2StairsWalkCfg(N2StairsCfg):
         success_max_same_tread_join_rate = 0.20
         success_max_skipped_tread_rate = 0.20
 
+        # Curriculum promotion is intentionally easier than final policy
+        # acceptance. Requiring the strict success gate here trapped nearly
+        # every environment on the 2 cm row even after it could safely reach
+        # the top. These thresholds retain a recognisable alternating gait
+        # while allowing harder risers to become training data.
+        curriculum_min_alternating_tread_count = 3
+        curriculum_min_alternating_tread_rate = 0.35
+        curriculum_max_same_tread_join_rate = 0.50
+        curriculum_max_skipped_tread_rate = 0.25
+        curriculum_min_phase_contact_match = 0.55
+        curriculum_max_double_flight_fraction = 0.12
+
         # Prevent the visually unstable straight-leg reach seen in the first
         # strict policy. Adjacent 0.30 m treads remain comfortably reachable.
         max_sagittal_foot_offset = 0.34
@@ -389,6 +401,12 @@ class N2StairsWalkCfg(N2StairsCfg):
         corridor_half_width = 0.30
         corridor_yaw_limit = 0.40
         corridor_grace_s = 1.0
+
+    class terrain(N2StairsCfg.terrain):
+        # Promote after one capable climb; require two failures to demote.
+        # The final success metric remains strict and independent.
+        curriculum_successes = 1
+        curriculum_failures = 2
 
     class domain_rand(N2StairsCfg.domain_rand):
         # Discover the strict gait before adding actuator uncertainty. Surface

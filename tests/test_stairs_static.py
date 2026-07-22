@@ -323,6 +323,16 @@ class StairConfigurationTests(unittest.TestCase):
                 walk_cfg.env.success_max_skipped_tread_rate, 0.20
             )
             self.assertLess(
+                walk_cfg.env.curriculum_min_alternating_tread_rate,
+                walk_cfg.env.success_min_alternating_tread_rate,
+            )
+            self.assertGreater(
+                walk_cfg.env.curriculum_max_same_tread_join_rate,
+                walk_cfg.env.success_max_same_tread_join_rate,
+            )
+            self.assertEqual(walk_cfg.terrain.curriculum_successes, 1)
+            self.assertEqual(walk_cfg.terrain.curriculum_failures, 2)
+            self.assertLess(
                 walk_cfg.env.max_sagittal_foot_separation,
                 walk_cfg.env.success_max_sagittal_foot_separation,
             )
@@ -546,6 +556,11 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("self.stair_start_x[levels, types]", stairs_source)
         self.assertIn("self.last_advanced_tread + 1", stairs_source)
         self.assertIn("landing_weight = torch.square", stairs_source)
+        self.assertIn(
+            "success = self._terrain_curriculum_success_mask(env_ids) & valid",
+            stairs_source,
+        )
+        self.assertIn('"stairs_curriculum_pass_rate"', stairs_source)
         self.assertIn(
             "self.tread_advance_count + self.same_tread_join_count",
             stairs_source,
