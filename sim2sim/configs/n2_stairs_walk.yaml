@@ -5,6 +5,11 @@ xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/n2_18dof.xml"
 simulation_duration: 60.0
 simulation_dt: 0.002
 control_decimation: 10
+# Implicit integration is substantially more robust for the stiff N2 joint
+# servos and mesh-on-box stair contacts than MuJoCo's default explicit Euler.
+integrator: implicitfast
+solver_iterations: 100
+solver_noslip_iterations: 10
 
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20,
       30, 30, 30, 30, 80, 80, 120, 120, 20]
@@ -60,11 +65,34 @@ navigation_state:
 stairs:
   start_x: 0.60
   step_width: 0.30
-  step_height: 0.06
+  # Fixed Isaac Gym level 4 used by the current natural-gait checkpoint.
+  step_height: 0.10
   num_steps: 6
   stair_width: 2.0
   top_platform_length: 1.5
   friction: "0.8 0.005 0.0001"
+
+validation:
+  episode_duration: 30.0
+  initial_base_height: 0.75
+  initial_joint_noise: 0.01
+  initial_lateral_noise: 0.01
+  success_x: 2.60
+  completion_dwell_s: 0.60
+  fall_base_height: 0.42
+  fall_upright_z: -0.60
+  corridor_half_width: 0.30
+  corridor_yaw_limit: 0.40
+  support_normal_z: 0.65
+  contact_force_threshold: 2.0
+  riser_force_threshold: 10.0
+  lower_leg_force_threshold: 12.0
+  stable_contact_s: 0.04
+  stable_release_s: 0.06
+  success_min_alternating_tread_count: 4
+  success_min_alternating_tread_rate: 0.75
+  success_max_same_tread_join_rate: 0.20
+  success_max_double_flight_fraction: 0.08
 
 height_measurements:
   points_x: [0.25, 0.45, 0.65, 0.85]

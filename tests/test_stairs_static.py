@@ -25,6 +25,38 @@ def load_pure_stairs_module():
     return module
 
 
+def load_pure_mujoco_eval_module():
+    """Load the contact tracker without requiring MuJoCo or Isaac Gym."""
+    previous_mujoco = sys.modules.get("mujoco")
+    previous_sim2sim = sys.modules.get("sim2sim")
+    fake_mujoco = types.ModuleType("mujoco")
+    fake_sim2sim = types.ModuleType("sim2sim")
+    for name in (
+        "gait_phase_observations",
+        "get_obs",
+        "load_mujoco_model",
+        "pd_control",
+        "resolve_joint_layout",
+        "stair_height_observations",
+    ):
+        setattr(fake_sim2sim, name, lambda *args, **kwargs: None)
+    sys.modules["mujoco"] = fake_mujoco
+    sys.modules["sim2sim"] = fake_sim2sim
+    try:
+        return load_module(
+            "n2_mujoco_eval_test", "sim2sim/eval_stairs_mujoco.py"
+        )
+    finally:
+        if previous_mujoco is None:
+            sys.modules.pop("mujoco", None)
+        else:
+            sys.modules["mujoco"] = previous_mujoco
+        if previous_sim2sim is None:
+            sys.modules.pop("sim2sim", None)
+        else:
+            sys.modules["sim2sim"] = previous_sim2sim
+
+
 def parse_tree(relative_path):
     path = ROOT / relative_path
     return ast.parse(path.read_text(), filename=str(path))
@@ -395,6 +427,86 @@ class StairGeometryTests(unittest.TestCase):
                 [False, False],
             ],
         )
+
+
+class MujocoSim2SimTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.evaluator = load_pure_mujoco_eval_module()
+
+    def test_level_four_config_matches_deployable_policy(self):
+        config = yaml.safe_load(
+            (ROOT / "sim2sim/configs/n2_stairs_walk.yaml").read_text()
+        )
+        self.assertEqual(config["num_single_obs"], 82)
+        self.assertEqual(config["frame_stack"], 5)
+        self.assertEqual(config["num_obs"], 410)
+        self.assertEqual(config["stairs"]["step_height"], 0.10)
+        self.assertEqual(config["stairs"]["step_width"], 0.30)
+        self.assertEqual(config["stairs"]["num_steps"], 6)
+        self.assertEqual(config["cmd_init"], [0.18, 0.0, 0.0])
+        self.assertEqual(config["integrator"], "implicitfast")
+        self.assertIn("numerical_failure", (
+            ROOT / "sim2sim/eval_stairs_mujoco.py"
+        ).read_text())
+
+    def test_contact_tracker_accepts_true_alternating_stairs(self):
+        tracker = self.evaluator.GaitTracker(
+            0.02,
+            {"step_height": 0.10, "num_steps": 6},
+            {"stable_contact_s": 0.04, "stable_release_s": 0.06},
+        )
+
+        def update(raw_tread, site_z):
+            tracker.update(
+                np.asarray(raw_tread),
+                np.asarray(site_z),
+                np.zeros(2, dtype=bool),
+                np.zeros(2, dtype=bool),
+            )
+
+        update([0, 0], [0.045, 0.045])
+        update([0, 0], [0.045, 0.045])
+        for tread, foot in (
+            (1, 0),
+            (2, 1),
+            (3, 0),
+            (4, 1),
+            (5, 0),
+            (6, 1),
+        ):
+            raw = tracker.stable_tread.copy()
+            raw[foot] = -1
+            site_z = tracker.accepted_tread * 0.10 + 0.145
+            for _ in range(3):
+                update(raw, site_z)
+            raw[foot] = tread
+            site_z[foot] = tread * 0.10 + 0.045
+            for _ in range(2):
+                update(raw, site_z)
+
+        summary = tracker.summary()
+        self.assertEqual(summary["alternating_tread_count"], 6)
+        self.assertEqual(summary["alternating_tread_rate"], 1.0)
+        self.assertEqual(summary["same_tread_join_rate"], 0.0)
+        self.assertEqual(summary["left_tread_advances"], 3)
+        self.assertEqual(summary["right_tread_advances"], 3)
+
+    def test_headless_imports_do_not_open_x_server(self):
+        tree = parse_tree("sim2sim/sim2sim.py")
+        top_level_imports = [
+            node for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        ]
+        imported = []
+        for node in top_level_imports:
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            else:
+                imported.append(node.module or "")
+        imported = "\n".join(imported)
+        self.assertNotIn("mujoco_viewer", imported)
+        self.assertNotIn("pynput", imported)
 
 
 class StairConfigurationTests(unittest.TestCase):
@@ -1181,6 +1293,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "humanoid/scripts/play.py",
             "humanoid/scripts/stream_stairs.py",
             "humanoid/utils/stairs_terrain.py",
+            "sim2sim/eval_stairs_mujoco.py",
             "sim2sim/sim2sim.py",
         ]
         for relative_path in paths:

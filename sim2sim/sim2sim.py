@@ -1,17 +1,23 @@
 import math
 import os
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import numpy as np
-import mujoco, mujoco_viewer
+import mujoco
 from tqdm import tqdm
 from collections import deque
 from scipy.spatial.transform import Rotation as R
 from humanoid import LEGGED_GYM_ROOT_DIR
-from humanoid.utils.stairs_terrain import terrain_height_at_x
 import torch
-from pynput.keyboard import Listener, Key
 import yaml
+
+# Import the pure geometry helper without importing humanoid.utils.__init__,
+# whose Isaac Gym CLI helpers would make MuJoCo deployment depend on Isaac.
+_UTILS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, "humanoid", "utils")
+if _UTILS_DIR not in sys.path:
+    sys.path.insert(0, _UTILS_DIR)
+from stairs_terrain import terrain_height_at_x  # noqa: E402
 
 def load_mujoco_model(xml_path, stair_cfg=None):
     """Load MJCF, optionally replacing its direct-child boxes with training stairs."""
@@ -262,6 +268,20 @@ def run_mujoco(cfg):
     
     model = load_mujoco_model(xml_path, stair_cfg)
     model.opt.timestep = simulation_dt
+    integrator = str(config.get("integrator", "")).strip().upper()
+    if integrator:
+        enum_name = "mjINT_{}".format(integrator)
+        if not hasattr(mujoco.mjtIntegrator, enum_name):
+            raise ValueError("Unsupported MuJoCo integrator: " + integrator)
+        model.opt.integrator = getattr(mujoco.mjtIntegrator, enum_name)
+    model.opt.iterations = int(
+        config.get("solver_iterations", model.opt.iterations)
+    )
+    model.opt.noslip_iterations = int(
+        config.get(
+            "solver_noslip_iterations", model.opt.noslip_iterations
+        )
+    )
     data = mujoco.MjData(model)
 
     # load policy
@@ -283,6 +303,11 @@ def run_mujoco(cfg):
     data.qpos[qpos_indices] = defaut_dof_pos
 
     mujoco.mj_step(model, data)
+    # Import GLFW-dependent rendering only for the interactive legacy path.
+    # Headless validation imports the observation/model helpers in this file
+    # without requiring an X server or the optional viewer package.
+    import mujoco_viewer
+
     viewer = mujoco_viewer.MujocoViewer(model, data)
 
     target_q = np.zeros((num_actions), dtype=np.double)
@@ -438,6 +463,10 @@ if __name__ == '__main__':
         num_single_obs = config["num_single_obs"]
         frame_stack = config["frame_stack"]
     
+    # pynput also opens an X connection at import time on Linux, so keep it
+    # out of the module-level imports used by headless sim-to-sim evaluation.
+    from pynput.keyboard import Listener, Key
+
     command = cmd()
     command.cmd[:] = np.asarray(config.get("cmd_init", [0.0, 0.0, 0.0]), dtype=np.float32)
     print("initial_command:", command.cmd)
