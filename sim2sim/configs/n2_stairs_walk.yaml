@@ -119,6 +119,66 @@ validation:
   success_max_same_tread_join_rate: 0.20
   success_max_double_flight_fraction: 0.08
 
+# Native MuJoCo PPO fine-tuning.  This deliberately stays on the requested
+# fixed 10 cm flight: the first stage adapts the PhysX Actor to MuJoCo while
+# its feature trunk is frozen, then the full policy learns natural contacts.
+mujoco_training:
+  episode_duration: 20.0
+  command_speed_range: [0.16, 0.20]
+  initial_joint_noise: 0.015
+  initial_lateral_noise: 0.025
+  initial_yaw_noise: 0.06
+  randomize_gait_phase: true
+  progress_grace_s: 2.0
+  progress_timeout_s: 5.0
+  progress_epsilon_m: 0.05
+  completion_dwell_s: 0.20
+  completion_lateral_tolerance_m: 0.20
+  completion_yaw_tolerance_rad: 0.30
+  adaptation_corridor_half_width_m: 0.60
+  adaptation_corridor_yaw_limit_rad: 0.90
+  training_corridor_half_width_m: 0.40
+  training_corridor_yaw_limit_rad: 0.55
+  double_support_ratio: 0.16
+  target_sagittal_separation_m: 0.22
+  target_swing_knee_rad: 0.65
+  arm_swing_amplitude_rad: 0.22
+  arm_swing_sharpness: 12.0
+  reward_scales:
+    tracking_speed: 2.0
+    forward_progress: 1.5
+    alive: 0.05
+    upright_error: -1.5
+    heading_error: -5.0
+    lateral_error: -6.0
+    base_height_error: -2.0
+    phase_contact: 0.55
+    sagittal_foot_phase: 0.45
+    single_support: 0.20
+    swing_knee: 0.12
+    arm_swing: 0.35
+    no_progress: -0.12
+    double_flight: -1.5
+    same_tread_support: -0.35
+    foot_riser_collision: -1.0
+    lower_leg_collision: -3.0
+    hip_yaw: -0.12
+    action_rate: -0.025
+    action_smoothness: -0.015
+    torque: -0.025
+    energy: -0.010
+    angular_velocity_xy: -0.025
+    vertical_velocity: -0.08
+    tread_advance: 2.0
+    alternating_tread: 8.0
+    repeated_lead: -5.0
+    same_tread_join: -6.0
+    skipped_tread: -4.0
+    completion: 120.0
+    fall: -35.0
+    path_failure: -25.0
+    stall: -15.0
+
 height_measurements:
   points_x: [0.25, 0.45, 0.65, 0.85]
   points_y: [-0.24, 0.0, 0.24]

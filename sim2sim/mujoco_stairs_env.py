@@ -1,0 +1,957 @@
+"""Parallel, headless MuJoCo environment for native N2 stair PPO."""
+
+import math
+from concurrent.futures import ThreadPoolExecutor
+
+import mujoco
+import numpy as np
+import torch
+
+from humanoid.algo import VecEnv
+
+from eval_stairs_mujoco import (
+    ContactLayout,
+    GaitTracker,
+    _build_observation,
+    _configure_solver,
+    sample_contacts,
+    terrain_height_at_x,
+)
+from sim2sim import load_mujoco_model, pd_control, resolve_joint_layout
+
+
+class MujocoStairsVecEnv(VecEnv):
+    """Independent ``MjData`` instances sharing one immutable ``MjModel``."""
+
+    def __init__(
+        self,
+        config,
+        num_envs=32,
+        num_workers=8,
+        seed=42,
+    ):
+        self.cfg = config
+        self.training_cfg = config["mujoco_training"]
+        self.validation_cfg = config["validation"]
+        self.stair_cfg = config["stairs"]
+        if abs(float(self.stair_cfg["step_height"]) - 0.10) > 1.0e-9:
+            raise ValueError(
+                "Native stair training is fixed at the requested 0.10 m"
+            )
+
+        self.num_envs = int(num_envs)
+        self.num_actions = int(config["num_actions"])
+        self.num_obs = int(config["num_obs"])
+        self.num_privileged_obs = self.num_obs
+        self.device = torch.device("cpu")
+        self.control_decimation = int(config["control_decimation"])
+        self.simulation_dt = float(config["simulation_dt"])
+        self.dt = self.simulation_dt * self.control_decimation
+        self.max_episode_length = int(
+            round(
+                float(self.training_cfg["episode_duration"])
+                / self.dt
+            )
+        )
+        self.frame_stack = int(config["frame_stack"])
+        self.num_single_obs = int(config["num_single_obs"])
+        self.rng = np.random.default_rng(int(seed))
+        self.adaptation_stage = True
+
+        xml_path = config["_resolved_xml_path"]
+        urdf_path = config.get("_resolved_urdf_path")
+        self.model = load_mujoco_model(
+            xml_path,
+            self.stair_cfg,
+            config.get("mujoco_physics"),
+            urdf_path=urdf_path,
+        )
+        _configure_solver(self.model, config)
+        self.datas = [
+            mujoco.MjData(self.model) for _ in range(self.num_envs)
+        ]
+        self.layout = ContactLayout(
+            self.model, int(self.stair_cfg["num_steps"])
+        )
+
+        joint_order = list(config["joint_order"])
+        qpos, qvel, control = resolve_joint_layout(
+            self.model, joint_order
+        )
+        self.qpos_indices = np.asarray(qpos, dtype=np.int64)
+        self.qvel_indices = np.asarray(qvel, dtype=np.int64)
+        self.control_indices = np.asarray(control, dtype=np.int64)
+        self.left_knee_index = joint_order.index("L_leg_knee_joint")
+        self.right_knee_index = joint_order.index("R_leg_knee_joint")
+        self.left_shoulder_pitch_index = joint_order.index(
+            "L_arm_shoulder_pitch_joint"
+        )
+        self.right_shoulder_pitch_index = joint_order.index(
+            "R_arm_shoulder_pitch_joint"
+        )
+        self.left_hip_yaw_index = joint_order.index(
+            "L_leg_hip_yaw_joint"
+        )
+        self.right_hip_yaw_index = joint_order.index(
+            "R_leg_hip_yaw_joint"
+        )
+        gyro_id = mujoco.mj_name2id(
+            self.model,
+            mujoco.mjtObj.mjOBJ_SENSOR,
+            "angular-velocity",
+        )
+        if gyro_id < 0:
+            raise ValueError("MuJoCo angular-velocity sensor is missing")
+        self.gyro_address = int(self.model.sensor_adr[gyro_id])
+
+        self.default_angles = np.asarray(
+            config["default_angles"], dtype=np.float64
+        )
+        self.kps = np.asarray(config["kps"], dtype=np.float64)
+        self.kds = np.asarray(config["kds"], dtype=np.float64)
+        self.torque_limits = np.asarray(
+            config["torque_limits"], dtype=np.float64
+        )
+        self.action_scale = float(config["action_scale"])
+        self.clip_actions = float(config.get("clip_actions", 18.0))
+
+        workers = max(1, min(int(num_workers), self.num_envs))
+        self.num_workers = workers
+        self.executor = (
+            ThreadPoolExecutor(max_workers=workers)
+            if workers > 1
+            else None
+        )
+        self.worker_chunks = [
+            chunk
+            for chunk in np.array_split(
+                np.arange(self.num_envs, dtype=np.int64), workers
+            )
+            if len(chunk)
+        ]
+
+        self.commands = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self.phase_offsets = np.zeros(self.num_envs, dtype=np.float64)
+        self.actions = np.zeros(
+            (self.num_envs, self.num_actions), dtype=np.float32
+        )
+        self.last_actions = np.zeros_like(self.actions)
+        self.last_last_actions = np.zeros_like(self.actions)
+        self.last_torques = np.zeros_like(self.actions, dtype=np.float64)
+        self.history = np.zeros(
+            (
+                self.num_envs,
+                self.frame_stack,
+                self.num_single_obs,
+            ),
+            dtype=np.float32,
+        )
+        self.trackers = [
+            self._new_tracker() for _ in range(self.num_envs)
+        ]
+        self.episode_steps = np.zeros(self.num_envs, dtype=np.int64)
+        self.episode_length_buf = torch.zeros(
+            self.num_envs, dtype=torch.long
+        )
+        self.previous_x = np.zeros(self.num_envs, dtype=np.float64)
+        self.progress_checkpoint = np.zeros(
+            self.num_envs, dtype=np.float64
+        )
+        self.last_progress_step = np.zeros(
+            self.num_envs, dtype=np.int64
+        )
+        self.completion_steps = np.zeros(
+            self.num_envs, dtype=np.int64
+        )
+        self.episode_reward = np.zeros(
+            self.num_envs, dtype=np.float64
+        )
+        self.speed_sum = np.zeros(self.num_envs, dtype=np.float64)
+        self.phase_match_sum = np.zeros(
+            self.num_envs, dtype=np.float64
+        )
+        self.arm_match_sum = np.zeros(
+            self.num_envs, dtype=np.float64
+        )
+        self.max_lateral = np.zeros(self.num_envs, dtype=np.float64)
+        self.max_yaw = np.zeros(self.num_envs, dtype=np.float64)
+        self.max_climb = np.zeros(self.num_envs, dtype=np.float64)
+        self.reward_sums = {
+            name: np.zeros(self.num_envs, dtype=np.float64)
+            for name in self.training_cfg["reward_scales"]
+        }
+
+        self.obs_buf = torch.zeros(
+            self.num_envs, self.num_obs, dtype=torch.float32
+        )
+        self.privileged_obs_buf = self.obs_buf.clone()
+        self.rew_buf = torch.zeros(self.num_envs, dtype=torch.float32)
+        self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool)
+        self.extras = {}
+        self.reset()
+
+    def _new_tracker(self):
+        return GaitTracker(
+            self.dt, self.stair_cfg, self.validation_cfg
+        )
+
+    def set_adaptation_stage(self, active):
+        """Use a wide route gate while only the Actor head is adapting."""
+        self.adaptation_stage = bool(active)
+        stage = "actor-head adaptation" if active else "full-policy"
+        print("MuJoCo training stage: " + stage, flush=True)
+
+    def _gait_frequency(self, env_id):
+        phase = self.cfg["gait_phase"]
+        return float(phase.get("frequency", 1.25)) + float(
+            phase.get("frequency_gain", 0.0)
+        ) * max(
+            float(self.commands[env_id, 0])
+            - float(phase.get("reference_speed", 0.0)),
+            0.0,
+        )
+
+    def _phase_fraction(self, env_id):
+        elapsed = self.episode_steps[env_id] * self.dt
+        return (
+            self.phase_offsets[env_id]
+            + elapsed * self._gait_frequency(env_id)
+        ) % 1.0
+
+    @staticmethod
+    def _rotation_matrix_wxyz(quaternion):
+        w, x, y, z = quaternion
+        return np.asarray(
+            [
+                [
+                    1.0 - 2.0 * (y * y + z * z),
+                    2.0 * (x * y - z * w),
+                    2.0 * (x * z + y * w),
+                ],
+                [
+                    2.0 * (x * y + z * w),
+                    1.0 - 2.0 * (x * x + z * z),
+                    2.0 * (y * z - x * w),
+                ],
+                [
+                    2.0 * (x * z - y * w),
+                    2.0 * (y * z + x * w),
+                    1.0 - 2.0 * (x * x + y * y),
+                ],
+            ],
+            dtype=np.float64,
+        )
+
+    def _state(self, env_id):
+        data = self.datas[env_id]
+        quaternion_wxyz = np.asarray(data.qpos[3:7], dtype=np.float64)
+        norm = float(np.linalg.norm(quaternion_wxyz))
+        if norm > 1.0e-9:
+            quaternion_wxyz = quaternion_wxyz / norm
+        rotation = self._rotation_matrix_wxyz(quaternion_wxyz)
+        quaternion_xyzw = quaternion_wxyz[[1, 2, 3, 0]]
+        local_velocity = rotation.T.dot(
+            np.asarray(data.qvel[:3], dtype=np.float64)
+        )
+        gravity = rotation.T.dot(
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float64)
+        )
+        angular_velocity = np.asarray(
+            data.sensordata[
+                self.gyro_address:self.gyro_address + 3
+            ],
+            dtype=np.float64,
+        ).copy()
+        q = np.asarray(
+            data.qpos[self.qpos_indices], dtype=np.float64
+        ).copy()
+        dq = np.asarray(
+            data.qvel[self.qvel_indices], dtype=np.float64
+        ).copy()
+        yaw = math.atan2(
+            2.0
+            * (
+                quaternion_wxyz[0] * quaternion_wxyz[3]
+                + quaternion_wxyz[1] * quaternion_wxyz[2]
+            ),
+            1.0
+            - 2.0
+            * (
+                quaternion_wxyz[2] ** 2
+                + quaternion_wxyz[3] ** 2
+            ),
+        )
+        return {
+            "quat": quaternion_xyzw,
+            "velocity": local_velocity,
+            "omega": angular_velocity,
+            "gravity": gravity,
+            "q": q,
+            "dq": dq,
+            "yaw": yaw,
+        }
+
+    def _observation(self, env_id, state):
+        frequency = max(self._gait_frequency(env_id), 1.0e-6)
+        elapsed = self.episode_steps[env_id] * self.dt
+        phase_adjusted_time = (
+            elapsed + self.phase_offsets[env_id] / frequency
+        )
+        single = _build_observation(
+            self.cfg,
+            self.datas[env_id],
+            state["quat"],
+            state["velocity"],
+            state["omega"],
+            state["gravity"],
+            state["q"],
+            state["dq"],
+            self.actions[env_id],
+            self.commands[env_id],
+            phase_adjusted_time,
+        )[0]
+        self.history[env_id, :-1] = self.history[env_id, 1:]
+        self.history[env_id, -1] = single
+        return self.history[env_id].reshape(-1)
+
+    def _reset_one(self, env_id):
+        data = self.datas[env_id]
+        mujoco.mj_resetData(self.model, data)
+        data.qpos[:] = self.model.qpos0
+        data.qvel[:] = 0.0
+
+        joint_noise = float(
+            self.training_cfg["initial_joint_noise"]
+        )
+        data.qpos[self.qpos_indices] = (
+            self.default_angles
+            + self.rng.uniform(
+                -joint_noise,
+                joint_noise,
+                size=self.num_actions,
+            )
+        )
+        lateral_noise = float(
+            self.training_cfg["initial_lateral_noise"]
+        )
+        yaw_noise = float(self.training_cfg["initial_yaw_noise"])
+        data.qpos[0] += self.rng.uniform(-0.03, 0.03)
+        data.qpos[1] += self.rng.uniform(
+            -lateral_noise, lateral_noise
+        )
+        yaw = self.rng.uniform(-yaw_noise, yaw_noise)
+        data.qpos[3:7] = np.asarray(
+            [math.cos(0.5 * yaw), 0.0, 0.0, math.sin(0.5 * yaw)]
+        )
+        mujoco.mj_forward(self.model, data)
+
+        command_range = self.training_cfg["command_speed_range"]
+        self.commands[env_id, 0] = self.rng.uniform(
+            float(command_range[0]), float(command_range[1])
+        )
+        self.commands[env_id, 1:] = 0.0
+        self.phase_offsets[env_id] = (
+            self.rng.uniform(0.0, 1.0)
+            if bool(self.training_cfg["randomize_gait_phase"])
+            else float(self.cfg["gait_phase"].get("phase_offset", 0.0))
+        )
+        self.actions[env_id] = 0.0
+        self.last_actions[env_id] = 0.0
+        self.last_last_actions[env_id] = 0.0
+        self.last_torques[env_id] = 0.0
+        self.history[env_id] = 0.0
+        self.trackers[env_id] = self._new_tracker()
+        self.episode_steps[env_id] = 0
+        self.episode_length_buf[env_id] = 0
+        self.previous_x[env_id] = float(data.qpos[0])
+        self.progress_checkpoint[env_id] = float(data.qpos[0])
+        self.last_progress_step[env_id] = 0
+        self.completion_steps[env_id] = 0
+        self.episode_reward[env_id] = 0.0
+        self.speed_sum[env_id] = 0.0
+        self.phase_match_sum[env_id] = 0.0
+        self.arm_match_sum[env_id] = 0.0
+        self.max_lateral[env_id] = abs(float(data.qpos[1]))
+        self.max_yaw[env_id] = abs(yaw)
+        self.max_climb[env_id] = 0.0
+        for values in self.reward_sums.values():
+            values[env_id] = 0.0
+        state = self._state(env_id)
+        self.obs_buf[env_id] = torch.from_numpy(
+            self._observation(env_id, state).copy()
+        )
+
+    def reset(self, env_ids=None):
+        if env_ids is None:
+            indices = range(self.num_envs)
+        elif isinstance(env_ids, torch.Tensor):
+            indices = env_ids.detach().cpu().numpy().reshape(-1)
+        else:
+            indices = env_ids
+        for env_id in indices:
+            self._reset_one(int(env_id))
+        self.privileged_obs_buf.copy_(self.obs_buf)
+        return self.obs_buf, self.privileged_obs_buf
+
+    def _simulate_chunk(self, indices, targets):
+        for raw_env_id in indices:
+            env_id = int(raw_env_id)
+            data = self.datas[env_id]
+            target = targets[env_id]
+            torque = self.last_torques[env_id]
+            for _ in range(self.control_decimation):
+                q = np.asarray(
+                    data.qpos[self.qpos_indices], dtype=np.float64
+                )
+                dq = np.asarray(
+                    data.qvel[self.qvel_indices], dtype=np.float64
+                )
+                torque = pd_control(
+                    target,
+                    q,
+                    self.kps,
+                    np.zeros_like(self.kds),
+                    dq,
+                    self.kds,
+                )
+                torque = np.clip(
+                    torque, -self.torque_limits, self.torque_limits
+                )
+                data.ctrl[self.control_indices] = torque
+                mujoco.mj_step(self.model, data)
+            self.last_torques[env_id] = torque
+
+    def _simulate(self, targets):
+        if self.executor is None:
+            self._simulate_chunk(self.worker_chunks[0], targets)
+            return
+        futures = [
+            self.executor.submit(
+                self._simulate_chunk, chunk, targets
+            )
+            for chunk in self.worker_chunks
+        ]
+        for future in futures:
+            future.result()
+
+    def _desired_contacts(self, env_id):
+        sine = math.sin(2.0 * math.pi * self._phase_fraction(env_id))
+        ratio = float(self.training_cfg["double_support_ratio"])
+        threshold = math.sin(0.5 * math.pi * ratio)
+        double_support = abs(sine) < threshold
+        left_stance = sine >= 0.0
+        return (
+            np.asarray(
+                [
+                    left_stance or double_support,
+                    (not left_stance) or double_support,
+                ],
+                dtype=bool,
+            ),
+            sine,
+        )
+
+    def _reward_one(
+        self,
+        env_id,
+        state,
+        raw_tread,
+        riser,
+        lower_leg,
+        event_delta,
+    ):
+        scales = self.training_cfg["reward_scales"]
+        data = self.datas[env_id]
+        command_x = float(self.commands[env_id, 0])
+        velocity_x = float(state["velocity"][0])
+        progress_velocity = (
+            float(data.qpos[0]) - self.previous_x[env_id]
+        ) / self.dt
+        desired_contacts, phase_sine = self._desired_contacts(env_id)
+        actual_contacts = raw_tread >= 0
+        phase_match = 1.0 - float(
+            np.mean(
+                np.abs(
+                    actual_contacts.astype(np.float64)
+                    - desired_contacts.astype(np.float64)
+                )
+            )
+        )
+        single_support = float(np.sum(actual_contacts) == 1)
+
+        foot_x = np.asarray(
+            [
+                data.site_xpos[site_id, 0]
+                for site_id in self.layout.foot_sites
+            ],
+            dtype=np.float64,
+        )
+        sagittal_separation = float(foot_x[0] - foot_x[1])
+        target_separation = (
+            -float(
+                self.training_cfg["target_sagittal_separation_m"]
+            )
+            * phase_sine
+        )
+        sagittal_match = math.exp(
+            -22.0 * (sagittal_separation - target_separation) ** 2
+        )
+
+        swing_knee_index = (
+            self.right_knee_index
+            if phase_sine >= 0.0
+            else self.left_knee_index
+        )
+        knee_error = (
+            float(state["q"][swing_knee_index])
+            - float(self.training_cfg["target_swing_knee_rad"])
+        )
+        knee_match = math.exp(-4.0 * knee_error * knee_error)
+        arm_amplitude = float(
+            self.training_cfg["arm_swing_amplitude_rad"]
+        )
+        arm_targets = np.asarray(
+            [-arm_amplitude * phase_sine, arm_amplitude * phase_sine],
+            dtype=np.float64,
+        )
+        arm_positions = state["q"][
+            [
+                self.left_shoulder_pitch_index,
+                self.right_shoulder_pitch_index,
+            ]
+        ]
+        arm_match = math.exp(
+            -float(self.training_cfg["arm_swing_sharpness"])
+            * float(np.mean(np.square(arm_positions - arm_targets)))
+        )
+
+        terrain_height = float(
+            terrain_height_at_x(
+                np.asarray([float(data.qpos[0])]),
+                start_x=float(self.stair_cfg["start_x"]),
+                step_width=float(self.stair_cfg["step_width"]),
+                step_height=float(self.stair_cfg["step_height"]),
+                num_steps=int(self.stair_cfg["num_steps"]),
+            )[0]
+        )
+        initial_height = float(
+            self.validation_cfg["initial_base_height"]
+        )
+        height_error = (
+            float(data.qpos[2]) - terrain_height - initial_height
+        )
+        action_rate = float(
+            np.mean(
+                np.square(
+                    self.actions[env_id] - self.last_actions[env_id]
+                )
+            )
+        )
+        action_smoothness = float(
+            np.mean(
+                np.square(
+                    self.actions[env_id]
+                    - 2.0 * self.last_actions[env_id]
+                    + self.last_last_actions[env_id]
+                )
+            )
+        )
+        normalized_torque = (
+            self.last_torques[env_id] / self.torque_limits
+        )
+        normalized_energy = (
+            np.abs(
+                self.last_torques[env_id] * state["dq"]
+            )
+            / np.maximum(self.torque_limits, 1.0)
+        )
+        tracker = self.trackers[env_id]
+        terms = {
+            "tracking_speed": math.exp(
+                -((velocity_x - command_x) / 0.08) ** 2
+            ),
+            "forward_progress": float(
+                np.clip(progress_velocity, -0.20, 0.35)
+            ),
+            "alive": 1.0,
+            "upright_error": float(
+                state["gravity"][0] ** 2
+                + state["gravity"][1] ** 2
+            ),
+            "heading_error": float(state["yaw"] ** 2),
+            "lateral_error": float(data.qpos[1] ** 2),
+            "base_height_error": float(height_error ** 2),
+            "phase_contact": phase_match,
+            "sagittal_foot_phase": sagittal_match,
+            "single_support": single_support,
+            "swing_knee": knee_match,
+            "arm_swing": arm_match,
+            "no_progress": float(progress_velocity < 0.03),
+            "double_flight": float(np.all(raw_tread < 0)),
+            "same_tread_support": float(
+                tracker.stable_tread[0] == tracker.stable_tread[1]
+                and 0 < tracker.stable_tread[0] < tracker.num_steps
+            ),
+            "foot_riser_collision": float(np.any(riser)),
+            "lower_leg_collision": float(np.any(lower_leg)),
+            "hip_yaw": float(
+                state["q"][self.left_hip_yaw_index] ** 2
+                + state["q"][self.right_hip_yaw_index] ** 2
+            ),
+            "action_rate": action_rate,
+            "action_smoothness": action_smoothness,
+            "torque": float(np.mean(np.square(normalized_torque))),
+            "energy": float(np.mean(normalized_energy)),
+            "angular_velocity_xy": float(
+                np.sum(np.square(state["omega"][:2]))
+            ),
+            "vertical_velocity": float(state["velocity"][2] ** 2),
+            "tread_advance": float(event_delta["advance"]),
+            "alternating_tread": float(event_delta["alternating"]),
+            "repeated_lead": float(event_delta["repeated"]),
+            "same_tread_join": float(event_delta["joined"]),
+            "skipped_tread": float(event_delta["skipped"]),
+            "completion": 0.0,
+            "fall": 0.0,
+            "path_failure": 0.0,
+            "stall": 0.0,
+        }
+        self.phase_match_sum[env_id] += phase_match
+        self.arm_match_sum[env_id] += arm_match
+        reward = 0.0
+        for name, value in terms.items():
+            scaled = float(scales[name]) * float(value)
+            self.reward_sums[name][env_id] += scaled
+            reward += scaled
+        return reward, terms, terrain_height, progress_velocity
+
+    def _episode_info(
+        self,
+        env_ids,
+        completed,
+        fell,
+        path_failed,
+        stalled,
+    ):
+        if not env_ids:
+            return {}
+        summaries = [self.trackers[index].summary() for index in env_ids]
+        lengths = np.maximum(self.episode_steps[env_ids], 1)
+        info = {
+            "mujoco_completion_rate": np.mean(completed[env_ids]),
+            "mujoco_fall_rate": np.mean(fell[env_ids]),
+            "mujoco_path_failure_rate": np.mean(path_failed[env_ids]),
+            "mujoco_stall_rate": np.mean(stalled[env_ids]),
+            "mujoco_forward_distance": np.mean(
+                [
+                    float(self.datas[index].qpos[0])
+                    for index in env_ids
+                ]
+            ),
+            "mujoco_climb_height": np.mean(self.max_climb[env_ids]),
+            "mujoco_mean_speed": np.mean(
+                self.speed_sum[env_ids] / lengths
+            ),
+            "mujoco_phase_match": np.mean(
+                self.phase_match_sum[env_ids] / lengths
+            ),
+            "mujoco_arm_swing_match": np.mean(
+                self.arm_match_sum[env_ids] / lengths
+            ),
+            "mujoco_max_lateral": np.mean(self.max_lateral[env_ids]),
+            "mujoco_max_yaw": np.mean(self.max_yaw[env_ids]),
+            "mujoco_alternating_rate": np.mean(
+                [
+                    summary["alternating_tread_rate"]
+                    for summary in summaries
+                ]
+            ),
+            "mujoco_join_rate": np.mean(
+                [
+                    summary["same_tread_join_rate"]
+                    for summary in summaries
+                ]
+            ),
+            "mujoco_riser_fraction": np.mean(
+                [
+                    summary["foot_riser_collision_fraction"]
+                    for summary in summaries
+                ]
+            ),
+        }
+        return {
+            name: torch.tensor([float(value)], dtype=torch.float32)
+            for name, value in info.items()
+        }
+
+    def step(self, actions):
+        clipped = torch.clamp(
+            actions.detach().to("cpu"),
+            -self.clip_actions,
+            self.clip_actions,
+        )
+        self.actions[:] = clipped.numpy()
+        targets = (
+            self.default_angles[None, :]
+            + self.action_scale * self.actions
+        )
+        self._simulate(targets)
+        self.episode_steps += 1
+        self.episode_length_buf += 1
+
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        completed = np.zeros(self.num_envs, dtype=bool)
+        fell = np.zeros(self.num_envs, dtype=bool)
+        path_failed = np.zeros(self.num_envs, dtype=bool)
+        stalled = np.zeros(self.num_envs, dtype=bool)
+        timed_out = np.zeros(self.num_envs, dtype=bool)
+        numerical = np.zeros(self.num_envs, dtype=bool)
+
+        for env_id in range(self.num_envs):
+            data = self.datas[env_id]
+            if not (
+                np.all(np.isfinite(data.qpos))
+                and np.all(np.isfinite(data.qvel))
+            ):
+                numerical[env_id] = True
+                fell[env_id] = True
+                rewards[env_id] = -50.0
+                continue
+
+            state = self._state(env_id)
+            raw_tread, riser, lower_leg = sample_contacts(
+                self.model,
+                data,
+                self.layout,
+                self.validation_cfg,
+            )
+            tracker = self.trackers[env_id]
+            previous_counts = {
+                "advance": tracker.advance_count,
+                "alternating": tracker.alternating_count,
+                "repeated": tracker.repeated_count,
+                "joined": tracker.join_count,
+                "skipped": tracker.skipped_count,
+            }
+            foot_site_z = np.asarray(
+                [
+                    data.site_xpos[site_id, 2]
+                    for site_id in self.layout.foot_sites
+                ],
+                dtype=np.float64,
+            )
+            tracker.update(
+                raw_tread, foot_site_z, riser, lower_leg
+            )
+            current_counts = {
+                "advance": tracker.advance_count,
+                "alternating": tracker.alternating_count,
+                "repeated": tracker.repeated_count,
+                "joined": tracker.join_count,
+                "skipped": tracker.skipped_count,
+            }
+            event_delta = {
+                name: int(current_counts[name]) - previous
+                for name, previous in previous_counts.items()
+            }
+            reward, _, terrain_height, progress_velocity = (
+                self._reward_one(
+                    env_id,
+                    state,
+                    raw_tread,
+                    riser,
+                    lower_leg,
+                    event_delta,
+                )
+            )
+
+            elapsed = self.episode_steps[env_id] * self.dt
+            base_clearance = float(data.qpos[2]) - terrain_height
+            fell[env_id] = (
+                base_clearance
+                < float(self.validation_cfg["fall_base_height"])
+                or state["gravity"][2]
+                > float(self.validation_cfg["fall_upright_z"])
+            )
+            if self.adaptation_stage:
+                lateral_limit = float(
+                    self.training_cfg[
+                        "adaptation_corridor_half_width_m"
+                    ]
+                )
+                yaw_limit = float(
+                    self.training_cfg[
+                        "adaptation_corridor_yaw_limit_rad"
+                    ]
+                )
+            else:
+                lateral_limit = float(
+                    self.training_cfg[
+                        "training_corridor_half_width_m"
+                    ]
+                )
+                yaw_limit = float(
+                    self.training_cfg[
+                        "training_corridor_yaw_limit_rad"
+                    ]
+                )
+            path_failed[env_id] = (
+                elapsed
+                >= float(self.training_cfg["progress_grace_s"])
+                and (
+                    abs(float(data.qpos[1])) > lateral_limit
+                    or abs(float(state["yaw"])) > yaw_limit
+                )
+            )
+
+            current_x = float(data.qpos[0])
+            if (
+                current_x - self.progress_checkpoint[env_id]
+                >= float(self.training_cfg["progress_epsilon_m"])
+            ):
+                self.progress_checkpoint[env_id] = current_x
+                self.last_progress_step[env_id] = self.episode_steps[env_id]
+            progress_timeout_steps = int(
+                float(self.training_cfg["progress_timeout_s"]) / self.dt
+            )
+            grace_steps = int(
+                float(self.training_cfg["progress_grace_s"]) / self.dt
+            )
+            stalled[env_id] = (
+                self.episode_steps[env_id] >= grace_steps
+                and self.episode_steps[env_id]
+                - self.last_progress_step[env_id]
+                >= progress_timeout_steps
+            )
+
+            top_height = (
+                int(self.stair_cfg["num_steps"])
+                * float(self.stair_cfg["step_height"])
+            )
+            at_top = (
+                current_x >= float(self.validation_cfg["success_x"])
+                and float(data.qpos[2])
+                >= float(self.validation_cfg["initial_base_height"])
+                + top_height
+                - 0.04
+                and abs(float(data.qpos[1]))
+                <= float(
+                    self.training_cfg[
+                        "completion_lateral_tolerance_m"
+                    ]
+                )
+                and abs(float(state["yaw"]))
+                <= float(
+                    self.training_cfg[
+                        "completion_yaw_tolerance_rad"
+                    ]
+                )
+            )
+            self.completion_steps[env_id] = (
+                self.completion_steps[env_id] + 1 if at_top else 0
+            )
+            completed[env_id] = (
+                self.completion_steps[env_id]
+                >= int(
+                    float(
+                        self.training_cfg["completion_dwell_s"]
+                    )
+                    / self.dt
+                )
+            )
+            timed_out[env_id] = (
+                self.episode_steps[env_id] >= self.max_episode_length
+            )
+
+            scales = self.training_cfg["reward_scales"]
+            terminal_terms = {
+                "completion": float(completed[env_id]),
+                "fall": float(fell[env_id]),
+                "path_failure": float(path_failed[env_id]),
+                "stall": float(stalled[env_id]),
+            }
+            for name, value in terminal_terms.items():
+                scaled = float(scales[name]) * value
+                reward += scaled
+                self.reward_sums[name][env_id] += scaled
+
+            rewards[env_id] = reward
+            self.episode_reward[env_id] += reward
+            self.speed_sum[env_id] += float(state["velocity"][0])
+            self.max_lateral[env_id] = max(
+                self.max_lateral[env_id], abs(float(data.qpos[1]))
+            )
+            self.max_yaw[env_id] = max(
+                self.max_yaw[env_id], abs(float(state["yaw"]))
+            )
+            self.max_climb[env_id] = max(
+                self.max_climb[env_id],
+                float(data.qpos[2])
+                - float(self.validation_cfg["initial_base_height"]),
+            )
+            self.previous_x[env_id] = current_x
+            self.obs_buf[env_id] = torch.from_numpy(
+                self._observation(env_id, state).copy()
+            )
+
+        dones = (
+            completed
+            | fell
+            | path_failed
+            | stalled
+            | timed_out
+            | numerical
+        )
+        pure_time_outs = (
+            timed_out
+            & ~completed
+            & ~fell
+            & ~path_failed
+            & ~stalled
+            & ~numerical
+        )
+        done_ids = np.flatnonzero(dones).tolist()
+        episode_info = self._episode_info(
+            done_ids,
+            completed,
+            fell,
+            path_failed,
+            stalled,
+        )
+        self.rew_buf = torch.from_numpy(rewards)
+        self.reset_buf = torch.from_numpy(dones)
+        infos = {
+            "time_outs": torch.from_numpy(
+                pure_time_outs.astype(np.float32)
+            )
+        }
+        if episode_info:
+            infos["episode"] = episode_info
+
+        self.last_last_actions[:] = self.last_actions
+        self.last_actions[:] = self.actions
+        if done_ids:
+            self.reset(torch.tensor(done_ids, dtype=torch.long))
+        else:
+            self.privileged_obs_buf.copy_(self.obs_buf)
+        termination_ids = torch.tensor(done_ids, dtype=torch.long)
+        return (
+            self.obs_buf,
+            self.privileged_obs_buf,
+            self.rew_buf,
+            self.reset_buf,
+            infos,
+            termination_ids,
+            None,
+        )
+
+    def get_observations(self):
+        return self.obs_buf
+
+    def get_privileged_observations(self):
+        return self.privileged_obs_buf
+
+    def close(self):
+        if self.executor is not None:
+            self.executor.shutdown(wait=True)
+            self.executor = None

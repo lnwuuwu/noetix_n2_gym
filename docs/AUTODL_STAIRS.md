@@ -521,6 +521,35 @@ python sim2sim/eval_stairs_mujoco.py \
 python sim2sim/compare_isaac_checkpoints_mujoco.py
 ```
 
+四个 Isaac checkpoint 若都在到达楼梯前出现相同的 MuJoCo 偏航/路径失败，不再继续
+挑 checkpoint 或调外环。改用原生 MuJoCo PPO：只迁移最佳 410 维 Actor 的走路能力，
+critic、Adam 和探索噪声全部重新初始化；前 100 次只适配 Actor 输出层，之后解冻全网，
+并固定训练 10 cm、6 阶楼梯。每 100 次会自动做独立 MuJoCo 验收并保留
+`model_best.pt`，所以后续回退不会覆盖最佳版本。
+
+拉取代码后先运行真实物理冒烟：
+
+```bash
+sim2sim/run_mujoco_native_train.sh smoke
+```
+
+看到 `NATIVE_MUJOCO_CHECKPOINT=...model_5.pt` 后启动约两小时的后台长训：
+
+```bash
+sim2sim/run_mujoco_native_train.sh long
+```
+
+查看进度无需拼接日志路径：
+
+```bash
+sim2sim/run_mujoco_native_train.sh status
+```
+
+启动器优先使用 `/root/miniconda3/envs/n2/bin/python`，自动从既有比较报告中选择
+Isaac 里表现最好的 `natural_l4_9000` 作为初始化，并将日志和 PID 写到
+`/root/autodl-tmp/n2_train_logs/`。原始 Isaac checkpoint 不会被修改；原生模型位于
+`logs_mujoco/n2_stairs_walk/`。
+
 ## 8. 低台阶预训练、迁移和 robust 微调
 
 默认课程已经是首选方案：所有环境从 2 cm 开始，以每个环境的真实到顶结果逐级提升，

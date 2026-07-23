@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import git
 import importlib
 import os
 import pathlib
@@ -86,6 +85,11 @@ def store_code_state(logdir, repositories) -> list:
     git_log_dir = os.path.join(logdir, "git")
     os.makedirs(git_log_dir, exist_ok=True)
     file_paths = []
+    try:
+        import git
+    except ImportError:
+        print("GitPython is unavailable; skipping code-state snapshot.")
+        return file_paths
     for repository_file_path in repositories:
         try:
             repo = git.Repo(repository_file_path, search_parent_directories=True)

@@ -5,7 +5,12 @@ import tempfile
 import xml.etree.ElementTree as ET
 import numpy as np
 import mujoco
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **_kwargs):
+        """Keep headless deployment usable when progress bars are absent."""
+        return iterable
 from collections import deque
 from scipy.spatial.transform import Rotation as R
 from humanoid import LEGGED_GYM_ROOT_DIR

@@ -1600,6 +1600,74 @@ class SourceCompatibilityTests(unittest.TestCase):
             else:
                 sys.modules["isaacgym"] = previous
 
+    def test_native_mujoco_training_contract_is_fixed_and_complete(self):
+        path = ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
+        with path.open() as stream:
+            config = yaml.safe_load(stream)
+        training = config["mujoco_training"]
+        self.assertEqual(config["stairs"]["step_height"], 0.10)
+        self.assertEqual(config["stairs"]["num_steps"], 6)
+        self.assertEqual(config["num_obs"], 410)
+        self.assertLess(
+            training["training_corridor_half_width_m"],
+            training["adaptation_corridor_half_width_m"],
+        )
+        self.assertLess(
+            training["training_corridor_yaw_limit_rad"],
+            training["adaptation_corridor_yaw_limit_rad"],
+        )
+        required_rewards = {
+            "tracking_speed",
+            "forward_progress",
+            "heading_error",
+            "lateral_error",
+            "phase_contact",
+            "sagittal_foot_phase",
+            "single_support",
+            "swing_knee",
+            "arm_swing",
+            "foot_riser_collision",
+            "lower_leg_collision",
+            "tread_advance",
+            "alternating_tread",
+            "repeated_lead",
+            "same_tread_join",
+            "completion",
+            "fall",
+            "path_failure",
+            "stall",
+        }
+        self.assertTrue(
+            required_rewards.issubset(training["reward_scales"])
+        )
+
+    def test_native_mujoco_trainer_has_two_stages_and_best_selection(self):
+        source = (
+            ROOT / "sim2sim" / "train_stairs_mujoco.py"
+        ).read_text()
+        self.assertIn("set_actor_trunk_trainable", source)
+        self.assertIn("freeze_actor_iterations", source)
+        self.assertIn("critic and Adam reset", source)
+        self.assertIn("selection_score", source)
+        self.assertIn('"model_best.pt"', source)
+        launcher = (
+            ROOT / "sim2sim" / "run_mujoco_native_train.sh"
+        ).read_text()
+        self.assertIn("--max_iterations=2000", launcher)
+        self.assertIn("--selection_interval=100", launcher)
+        self.assertNotIn("humanoid/scripts/train.py", launcher)
+
+    def test_algorithm_utilities_do_not_eagerly_import_isaacgym(self):
+        init_source = (
+            ROOT / "humanoid" / "utils" / "__init__.py"
+        ).read_text()
+        self.assertIn("def __getattr__", init_source)
+        self.assertNotIn("from .helpers import", init_source)
+        utility_source = (
+            ROOT / "humanoid" / "utils" / "utils.py"
+        ).read_text()
+        self.assertNotIn("\nimport git\n", utility_source)
+
 
 if __name__ == "__main__":
     unittest.main()
