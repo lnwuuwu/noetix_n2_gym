@@ -1795,6 +1795,10 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
+            'RESUME_SYMMETRY_LOSS_COEFF="${N2_RESUME_SYMMETRY_LOSS_COEFF:-0.50}"',
+            launcher,
+        )
+        self.assertIn(
             'TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"',
             launcher,
         )
@@ -1833,6 +1837,10 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("ACTION_NOISE_STD=0.18", launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',
+            launcher,
+        )
+        self.assertIn(
+            '--symmetry_loss_coeff="${RESUME_SYMMETRY_LOSS_COEFF}"',
             launcher,
         )
         self.assertIn(

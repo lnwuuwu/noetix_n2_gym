@@ -10,6 +10,7 @@ INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"
 NO_WARM_START="${N2_NO_WARM_START:-0}"
 MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"
 RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.18}"
+RESUME_SYMMETRY_LOSS_COEFF="${N2_RESUME_SYMMETRY_LOSS_COEFF:-0.50}"
 if [[ ! "${TRAIN_SEED}" =~ ^[0-9]+$ ]]; then
     echo "N2_SEED must be a non-negative integer." >&2
     exit 2
@@ -167,7 +168,7 @@ case "${MODE}" in
             --learning_rate="${LEARNING_RATE}" \
             --action_noise_std="${ACTION_NOISE_STD}" \
             --resume_action_noise_std="${RESUME_ACTION_NOISE_STD}" \
-            --symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}" \
+            --symmetry_loss_coeff="${RESUME_SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
             --run_name="mujoco_curriculum_v6_resume_s${TRAIN_SEED}" \
