@@ -788,6 +788,10 @@ def run_episode(config, model, policy, seed, step_callback=None):
         joint_order.index("L_leg_hip_yaw_joint"),
         joint_order.index("R_leg_hip_yaw_joint"),
     )
+    shoulder_pitch_policy_indices = (
+        joint_order.index("L_arm_shoulder_pitch_joint"),
+        joint_order.index("R_arm_shoulder_pitch_joint"),
+    )
     default = np.asarray(config["default_angles"], dtype=np.float64)
     rng = np.random.default_rng(seed)
     joint_noise = float(validation.get("initial_joint_noise", 0.0))
@@ -823,6 +827,7 @@ def run_episode(config, model, policy, seed, step_callback=None):
     max_yaw = 0.0
     max_heading_correction = 0.0
     speed_sum = 0.0
+    arm_swing_match_sum = 0.0
     control_steps = 0
     elapsed = 0.0
 
@@ -882,6 +887,40 @@ def run_episode(config, model, policy, seed, step_callback=None):
             tracker.update(raw_tread, foot_site_z, riser, lower_leg)
             control_steps += 1
             speed_sum += float(velocity[0])
+            phase_cfg = config.get("gait_phase", {})
+            gait_frequency = float(
+                phase_cfg.get("frequency", 0.20)
+            ) + float(
+                phase_cfg.get("frequency_gain", 0.0)
+            ) * max(
+                float(command[0])
+                - float(phase_cfg.get("reference_speed", 0.0)),
+                0.0,
+            )
+            phase = (
+                float(phase_cfg.get("phase_offset", 0.0))
+                + elapsed * gait_frequency
+            ) % 1.0
+            phase_sine = math.sin(2.0 * math.pi * phase)
+            native_training = config.get("mujoco_training", {})
+            arm_amplitude = float(
+                native_training.get("arm_swing_amplitude_rad", 0.22)
+            )
+            arm_target = np.asarray(
+                [
+                    -arm_amplitude * phase_sine,
+                    arm_amplitude * phase_sine,
+                ]
+            )
+            arm_position = q[list(shoulder_pitch_policy_indices)]
+            arm_swing_match_sum += math.exp(
+                -float(
+                    native_training.get("arm_swing_sharpness", 12.0)
+                )
+                * float(
+                    np.mean(np.square(arm_position - arm_target))
+                )
+            )
             max_lateral = max(max_lateral, abs(float(data.qpos[1])))
             max_yaw = max(max_yaw, abs(yaw))
             path_failure = path_failure or (
@@ -978,6 +1017,9 @@ def run_episode(config, model, policy, seed, step_callback=None):
         ),
         "survival_time_s": float(elapsed),
         "mean_forward_speed_m_s": speed_sum / max(1, control_steps),
+        "mean_arm_swing_match": (
+            arm_swing_match_sum / max(1, control_steps)
+        ),
         "max_lateral_deviation_m": max_lateral,
         "max_yaw_deviation_rad": max_yaw,
         "final_lateral_position_m": float(data.qpos[1]),

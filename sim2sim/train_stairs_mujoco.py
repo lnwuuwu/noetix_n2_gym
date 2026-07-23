@@ -4,6 +4,7 @@ import argparse
 import copy
 import glob
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -263,7 +264,7 @@ def selection_score(summary):
         - 2.0 * float(summary["fall_rate"])
         + 0.75 * float(summary["mean_alternating_tread_rate"])
         - 0.75 * float(summary["mean_same_tread_join_rate"])
-        + 0.25 * float(summary["mean_arm_swing_match"])
+        + 0.25 * float(summary.get("mean_arm_swing_match", 0.0))
         - 0.50
         * float(summary["mean_foot_riser_collision_fraction"])
         + 0.25
@@ -452,6 +453,25 @@ def main(args):
         "iteration": None,
         "summary": None,
     }
+    previous_best_path = log_dir / "model_best.json"
+    if args.resume and previous_best_path.is_file():
+        try:
+            with previous_best_path.open() as previous_best_file:
+                previous_best = json.load(previous_best_file)
+            if math.isfinite(float(previous_best["score"])):
+                best.update(previous_best)
+                print(
+                    "Restored previous best native selection: "
+                    "iter={} score={:.4f}".format(
+                        best["iteration"], float(best["score"])
+                    ),
+                    flush=True,
+                )
+        except (OSError, ValueError, KeyError, TypeError):
+            print(
+                "Previous model_best.json is invalid; selecting again.",
+                flush=True,
+            )
 
     try:
         current = int(runner.current_learning_iteration)

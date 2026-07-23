@@ -135,9 +135,28 @@ def latest_native_checkpoint():
     ]
     if best:
         return max(best, key=lambda path: path.stat().st_mtime)
+    numeric = []
+    for path_string in glob.glob(str(root / "*" / "model_*.pt")):
+        path = Path(path_string)
+        try:
+            int(path.stem[len("model_"):])
+        except ValueError:
+            continue
+        if "smoke" not in path.parent.name:
+            numeric.append(path)
+    if numeric:
+        checkpoint = max(
+            numeric, key=lambda path: path.stat().st_mtime
+        )
+        print(
+            "No model_best.pt yet; visualizing latest saved checkpoint: "
+            + str(checkpoint),
+            flush=True,
+        )
+        return checkpoint
     raise ValueError(
-        "No native model_best.pt exists yet. Wait for the first "
-        "selection evaluation (iteration 100), or pass "
+        "No native MuJoCo checkpoint exists yet. Run training first, "
+        "or pass "
         "--checkpoint_path=/absolute/path/model_*.pt"
     )
 

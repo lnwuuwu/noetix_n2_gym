@@ -545,6 +545,14 @@ sim2sim/run_mujoco_native_train.sh long
 sim2sim/run_mujoco_native_train.sh status
 ```
 
+若进程因断线或自动测评异常退出，不要重新运行 `long`。以下命令会自动寻找最新的
+数字 checkpoint（包括 Adam、critic 和 iteration），在原 run 目录继续到总计
+2000 iteration：
+
+```bash
+sim2sim/run_mujoco_native_train.sh resume
+```
+
 长训结束后，用原生 MuJoCo（不是 Isaac Gym）循环播放自动选出的
 `model_best.pt`，并在本机浏览器实时查看：
 

@@ -58,6 +58,47 @@ case "${MODE}" in
         echo "Log: ${TRAIN_LOG}"
         echo "Watch: sim2sim/run_mujoco_native_train.sh status"
         ;;
+    resume)
+        if pgrep -f '[t]rain_stairs_mujoco.py' >/dev/null; then
+            echo "A MuJoCo stair trainer is already running:"
+            pgrep -af '[t]rain_stairs_mujoco.py'
+            exit 2
+        fi
+        LATEST_MODEL="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
+            -mindepth 2 -maxdepth 2 -type f \
+            ! -path '*smoke*' \
+            -name 'model_[0-9]*.pt' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -nr | head -n 1 | cut -d' ' -f2-)"
+        if [[ -z "${LATEST_MODEL}" ]]; then
+            echo "No native numeric checkpoint was found." >&2
+            exit 2
+        fi
+        RUN_DIR="$(dirname "${LATEST_MODEL}")"
+        STAMP="$(date +%m%d_%H-%M-%S)"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_native_l4_v1_s42_resume_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_native_l4_v1_s42.pid"
+        nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
+            --resume="${LATEST_MODEL}" \
+            --log_dir="${RUN_DIR}" \
+            --num_envs=32 \
+            --num_workers=8 \
+            --max_iterations=2000 \
+            --freeze_actor_iterations=100 \
+            --rollout_steps=48 \
+            --save_interval=50 \
+            --selection_interval=100 \
+            --selection_episodes=4 \
+            --eval_episodes=16 \
+            --device=cuda:0 \
+            --run_name=mujoco_native_l4_v1_s42 \
+            --seed=42 \
+            >"${TRAIN_LOG}" 2>&1 </dev/null &
+        TRAIN_PID=$!
+        printf '%s\n' "${TRAIN_PID}" >"${PID_FILE}"
+        echo "Resumed from: ${LATEST_MODEL}"
+        echo "PID=${TRAIN_PID}"
+        echo "Log: ${TRAIN_LOG}"
+        ;;
     status)
         pgrep -af '[t]rain_stairs_mujoco.py' || true
         LATEST_LOG="$(find "${LOG_ROOT}" -maxdepth 1 -type f \
@@ -78,7 +119,7 @@ case "${MODE}" in
             --seed=42
         ;;
     *)
-        echo "Usage: $0 {smoke|long|status|view}" >&2
+        echo "Usage: $0 {smoke|long|resume|status|view}" >&2
         exit 2
         ;;
 esac

@@ -1649,6 +1649,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("freeze_actor_iterations", source)
         self.assertIn("critic and Adam reset", source)
         self.assertIn("selection_score", source)
+        self.assertIn(
+            'summary.get("mean_arm_swing_match", 0.0)', source
+        )
         self.assertIn('"model_best.pt"', source)
         launcher = (
             ROOT / "sim2sim" / "run_mujoco_native_train.sh"
@@ -1656,6 +1659,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("--max_iterations=2000", launcher)
         self.assertIn("--selection_interval=100", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)
+        self.assertIn('resume="${LATEST_MODEL}"', launcher)
+        self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
 
         stream_source = (
@@ -1664,7 +1669,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn('os.environ.setdefault("MUJOCO_GL", "egl")', stream_source)
         self.assertIn("mujoco.Renderer", stream_source)
         self.assertIn("latest_native_checkpoint", stream_source)
+        self.assertIn("latest saved checkpoint", stream_source)
         self.assertIn("step_callback=callback", stream_source)
+        evaluator_source = (
+            ROOT / "sim2sim" / "eval_stairs_mujoco.py"
+        ).read_text()
+        self.assertIn('"mean_arm_swing_match"', evaluator_source)
 
     def test_algorithm_utilities_do_not_eagerly_import_isaacgym(self):
         init_source = (
