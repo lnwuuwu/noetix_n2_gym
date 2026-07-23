@@ -1756,6 +1756,16 @@ class SourceCompatibilityTests(unittest.TestCase):
         }
         self.assertTrue(required_rewards.issubset(training["reward_scales"]))
         reward_scales = training["reward_scales"]
+        regression_guard = training["regression_guard"]
+        self.assertEqual(
+            regression_guard["consecutive_evaluations"], 2
+        )
+        self.assertLessEqual(
+            regression_guard["absolute_max_completion_rate"], 0.40
+        )
+        self.assertGreaterEqual(
+            regression_guard["absolute_min_fall_rate"], 0.50
+        )
         self.assertGreater(
             reward_scales["completion"]
             + reward_scales["unnatural_completion"],
@@ -1820,6 +1830,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
         self.assertIn("NATIVE_MUJOCO_PROGRESS_BEST", source)
         self.assertIn("NATIVE_MUJOCO_BASELINE", source)
+        self.assertIn("absolute_regression", source)
         self.assertIn("NATIVE_MUJOCO_EARLY_STOP", source)
         self.assertIn("NATIVE_MUJOCO_STAGE_BEST", source)
         self.assertIn('"fixed" if args.fixed_learning_rate', source)

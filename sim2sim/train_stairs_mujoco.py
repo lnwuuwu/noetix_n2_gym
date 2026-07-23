@@ -585,20 +585,34 @@ def update_progress_best(
     return True
 
 
-def deterministic_regression(progress_best, height_index, summary):
+def deterministic_regression(
+    progress_best,
+    height_index,
+    summary,
+    guard,
+):
     """Detect sustained loss of a previously validated walking policy."""
+    completion = float(summary["completion_rate"])
+    fall = float(summary["fall_rate"])
+    absolute_regression = (
+        completion <= float(guard["absolute_max_completion_rate"])
+        and fall >= float(guard["absolute_min_fall_rate"])
+    )
     baseline = progress_best.get("summary")
     if (
         baseline is None
         or int(height_index) != int(progress_best["height_index"])
     ):
-        return False
-    return (
-        float(summary["completion_rate"])
-        <= float(baseline["completion_rate"]) - 0.20
-        and float(summary["fall_rate"])
-        >= float(baseline["fall_rate"]) + 0.20
+        return absolute_regression
+    relative_regression = (
+        completion
+        <= float(baseline["completion_rate"])
+        - float(guard["relative_completion_drop"])
+        and fall
+        >= float(baseline["fall_rate"])
+        + float(guard["relative_fall_increase"])
     )
+    return absolute_regression or relative_regression
 
 
 def evaluate_initial_policy(
@@ -768,6 +782,10 @@ def train_stage(
 ):
     set_actor_trunk_trainable(runner.alg.policy, trunk_trainable)
     env.set_adaptation_stage(not trunk_trainable)
+    regression_guard = env.training_cfg["regression_guard"]
+    regression_limit = int(
+        regression_guard["consecutive_evaluations"]
+    )
     regression_streak = 0
     while runner.current_learning_iteration < target_iteration:
         current = int(runner.current_learning_iteration)
@@ -848,6 +866,7 @@ def train_stage(
             progress_best,
             evaluated_height_index,
             summary,
+            regression_guard,
         )
         regression_streak = (
             regression_streak + 1 if regressed else 0
@@ -894,16 +913,17 @@ def train_stage(
         )
         if regressed:
             print(
-                "NATIVE_MUJOCO_REGRESSION iter={} streak={}/2 "
+                "NATIVE_MUJOCO_REGRESSION iter={} streak={}/{} "
                 "completion={:.1%} fall={:.1%}".format(
                     current,
                     regression_streak,
+                    regression_limit,
                     summary["completion_rate"],
                     summary["fall_rate"],
                 ),
                 flush=True,
             )
-        if regression_streak >= 2:
+        if regression_streak >= regression_limit:
             print(
                 "NATIVE_MUJOCO_EARLY_STOP iter={} reason=deterministic_"
                 "regression restore=model_progress_best.pt".format(

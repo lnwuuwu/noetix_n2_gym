@@ -186,6 +186,16 @@ mujoco_training:
   base_support_backward_allowance_m: 0.08
   base_support_backward_scale_m: 0.10
   foot_pitch_normalizer_rad: 0.25
+  # Deterministic evaluations, rather than noisy rollout episode rates, guard
+  # against catastrophic forgetting.  The absolute clause also protects the
+  # first evaluations immediately after a physical-height promotion, where no
+  # same-height progress-best baseline exists yet.
+  regression_guard:
+    consecutive_evaluations: 2
+    relative_completion_drop: 0.20
+    relative_fall_increase: 0.20
+    absolute_max_completion_rate: 0.40
+    absolute_min_fall_rate: 0.50
   # The episode goal moves from straight flat approach to one, two, ...,
   # six completed risers at each physical-height stage.
   curriculum:
