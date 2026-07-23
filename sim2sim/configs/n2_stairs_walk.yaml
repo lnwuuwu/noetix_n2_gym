@@ -208,7 +208,7 @@ mujoco_training:
   # The episode goal moves from straight flat approach to one, two, ...,
   # six completed risers at each physical-height stage.
   curriculum:
-    # v9 also raises the *physical* riser height. v3 started directly at
+    # v10 also raises the *physical* riser height. v3 started directly at
     # 10 cm, so noisy training rollouts occasionally advanced the logical
     # target while the deterministic Actor still fell at the first riser.
     # Full-flight deterministic evaluations gate physical height.  The gait
@@ -328,10 +328,14 @@ mujoco_training:
     # additional bonus below.
     unnatural_completion: -15.0
     gait_completion: 35.0
+    # During the two-step discovery stage, non-alternating landing events end
+    # the attempt immediately.  Keep this preferable to deliberate falling
+    # while still making it much worse than a correct alternating completion.
+    gait_failure: -20.0
     natural_completion: 100.0
-    fall: -30.0
-    path_failure: -10.0
-    stall: -8.0
+    fall: -35.0
+    path_failure: -15.0
+    stall: -25.0
 
 height_measurements:
   points_x: [0.25, 0.45, 0.65, 0.85]

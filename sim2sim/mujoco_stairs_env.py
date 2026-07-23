@@ -34,6 +34,7 @@ class MujocoStairsVecEnv(VecEnv):
         "completion",
         "unnatural_completion",
         "gait_completion",
+        "gait_failure",
         "natural_completion",
         "fall",
         "path_failure",
@@ -1678,6 +1679,7 @@ class MujocoStairsVecEnv(VecEnv):
             "completion": 0.0,
             "unnatural_completion": 0.0,
             "gait_completion": 0.0,
+            "gait_failure": 0.0,
             "natural_completion": 0.0,
             "fall": 0.0,
             "path_failure": 0.0,
@@ -1831,6 +1833,15 @@ class MujocoStairsVecEnv(VecEnv):
             self.curriculum_cfg["gait_promotion_min_target_steps"]
         )
 
+    def _curriculum_micro_gait_gate_active(self, ended_level):
+        """Return whether this is the two-step gait-discovery stage."""
+        target_steps = int(
+            self.curriculum_target_steps[int(ended_level)]
+        )
+        return target_steps == int(
+            self.curriculum_cfg["gait_promotion_min_target_steps"]
+        )
+
     def _curriculum_gait_gate_passed(self, env_id, ended_level):
         if not self._curriculum_gait_gate_active(ended_level):
             return True
@@ -1888,6 +1899,7 @@ class MujocoStairsVecEnv(VecEnv):
         curriculum_completed,
         natural_success,
         fell,
+        gait_failed,
         path_failed,
         stalled,
         timed_out,
@@ -1920,6 +1932,7 @@ class MujocoStairsVecEnv(VecEnv):
             ),
             "mujoco_natural_success_rate": natural_success[env_ids],
             "mujoco_fall_rate": fell[env_ids],
+            "mujoco_gait_failure_rate": gait_failed[env_ids],
             "mujoco_path_failure_rate": path_failed[env_ids],
             "mujoco_stall_rate": stalled[env_ids],
             "mujoco_timeout_rate": timed_out[env_ids],
@@ -1986,6 +1999,7 @@ class MujocoStairsVecEnv(VecEnv):
         final_completed = np.zeros(self.num_envs, dtype=bool)
         natural_success = np.zeros(self.num_envs, dtype=bool)
         fell = np.zeros(self.num_envs, dtype=bool)
+        gait_failed = np.zeros(self.num_envs, dtype=bool)
         path_failed = np.zeros(self.num_envs, dtype=bool)
         stalled = np.zeros(self.num_envs, dtype=bool)
         timed_out = np.zeros(self.num_envs, dtype=bool)
@@ -2038,6 +2052,25 @@ class MujocoStairsVecEnv(VecEnv):
                 name: int(current_counts[name]) - previous
                 for name, previous in previous_counts.items()
             }
+            # At the two-step discovery stage, a step-to join, repeated lead,
+            # skipped tread, or simultaneous hop is an immediate failed
+            # attempt.  Soft terminal scoring left all 32 v9 environments in
+            # the step-to local optimum: they could collect completion reward
+            # first and tolerate the delayed gait penalty.  The first proper
+            # landing is classified as alternating, so advance > alternating
+            # precisely catches every non-alternating advance event here.
+            gait_failed[env_id] = (
+                self._curriculum_micro_gait_gate_active(
+                    self.episode_levels[env_id]
+                )
+                and (
+                    event_delta["joined"] > 0
+                    or event_delta["repeated"] > 0
+                    or event_delta["skipped"] > 0
+                    or event_delta["advance"]
+                    > event_delta["alternating"]
+                )
+            )
             if event_delta["advance"] > 0:
                 self._synchronize_phase_after_advance(env_id)
             reward, _, terrain_height, progress_velocity = (
@@ -2123,9 +2156,19 @@ class MujocoStairsVecEnv(VecEnv):
                 self.episode_steps[env_id] >= self.max_episode_length
             )
 
-            # Assign exactly one terminal reason. A completed goal wins over
-            # route/stall/timeout gates, while a physical fall wins over all.
+            # Assign exactly one terminal reason. A physical fall wins over
+            # all; at the two-step discovery stage a gait violation must win
+            # over physical completion so step-to motion cannot collect its
+            # former completion shortcut.
             if fell[env_id]:
+                curriculum_completed[env_id] = False
+                final_completed[env_id] = False
+                natural_success[env_id] = False
+                gait_failed[env_id] = False
+                path_failed[env_id] = False
+                stalled[env_id] = False
+                timed_out[env_id] = False
+            elif gait_failed[env_id]:
                 curriculum_completed[env_id] = False
                 final_completed[env_id] = False
                 natural_success[env_id] = False
@@ -2167,6 +2210,7 @@ class MujocoStairsVecEnv(VecEnv):
                 "completion": float(curriculum_completed[env_id]),
                 "unnatural_completion": float(unnatural_completion),
                 "gait_completion": float(gait_completion),
+                "gait_failure": float(gait_failed[env_id]),
                 "natural_completion": float(natural_success[env_id]),
                 "fall": float(fell[env_id]),
                 "path_failure": float(path_failed[env_id]),
@@ -2201,6 +2245,7 @@ class MujocoStairsVecEnv(VecEnv):
         dones = (
             curriculum_completed
             | fell
+            | gait_failed
             | path_failed
             | stalled
             | timed_out
@@ -2210,6 +2255,7 @@ class MujocoStairsVecEnv(VecEnv):
             timed_out
             & ~curriculum_completed
             & ~fell
+            & ~gait_failed
             & ~path_failed
             & ~stalled
             & ~numerical
@@ -2223,6 +2269,7 @@ class MujocoStairsVecEnv(VecEnv):
             curriculum_completed,
             natural_success,
             fell,
+            gait_failed,
             path_failed,
             stalled,
             pure_time_outs,
@@ -2288,7 +2335,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 9,
+            "version": 10,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -2301,7 +2348,9 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (4, 5, 6, 7, 8, 9):
+        if int(state.get("version", -1)) not in (
+            4, 5, 6, 7, 8, 9, 10
+        ):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64

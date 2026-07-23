@@ -1760,6 +1760,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "completion",
             "unnatural_completion",
             "gait_completion",
+            "gait_failure",
             "natural_completion",
             "fall",
             "path_failure",
@@ -1794,6 +1795,12 @@ class SourceCompatibilityTests(unittest.TestCase):
             reward_scales["completion"]
             + reward_scales["gait_completion"],
         )
+        self.assertGreater(
+            reward_scales["gait_failure"], reward_scales["fall"]
+        )
+        self.assertGreater(
+            reward_scales["stall"], reward_scales["fall"]
+        )
 
         env_source = (
             ROOT / "sim2sim" / "mujoco_stairs_env.py"
@@ -1822,9 +1829,19 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 9', env_source)
-        self.assertIn("not in (4, 5, 6, 7, 8, 9)", env_source)
+        self.assertIn('"version": 10', env_source)
+        self.assertIn("4, 5, 6, 7, 8, 9, 10", env_source)
         self.assertIn('"gait_completion"', env_source)
+        self.assertIn('"gait_failure"', env_source)
+        self.assertIn("mujoco_gait_failure_rate", env_source)
+        self.assertIn(
+            "def _curriculum_micro_gait_gate_active", env_source
+        )
+        self.assertIn(
+            'event_delta["advance"]\n                    '
+            '> event_delta["alternating"]',
+            env_source,
+        )
         self.assertIn('"scheduled_active"', env_source)
         self.assertIn("scheduled_clearance_base_m", env_source)
         self.assertIn("actual_contacts[opposite_foot]", env_source)
@@ -1919,12 +1936,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v9_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v10_recover_s${TRAIN_SEED}"',
             launcher,
         )
-        self.assertIn("LEARNING_RATE=1e-5", launcher)
-        self.assertIn("ACTION_NOISE_STD=0.12", launcher)
-        self.assertIn("FREEZE_ACTOR_ITERATIONS=50", launcher)
+        self.assertIn("LEARNING_RATE=2e-5", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.18", launcher)
+        self.assertIn("FREEZE_ACTOR_ITERATIONS=25", launcher)
         self.assertIn('LEARNING_RATE_ARGS=("--fixed_learning_rate")', launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',
@@ -1945,7 +1962,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("Viewing progress-best policy", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
         self.assertIn(
-            '-path "*mujoco_curriculum_v[456789]_*_s${TRAIN_SEED}*"',
+            '-path "*mujoco_curriculum_v[0-9]*_*_s${TRAIN_SEED}*"',
             launcher,
         )
         self.assertIn("! -path '*smoke*'", launcher)
