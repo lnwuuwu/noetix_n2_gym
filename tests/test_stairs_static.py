@@ -455,6 +455,10 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertTrue(
             config["mujoco_physics"]["align_inertials_from_urdf"]
         )
+        self.assertEqual(
+            config["heading_stabilizer"]["yaw_observation_gain"], 1.0
+        )
+        self.assertEqual(config["heading_stabilizer"]["hip_yaw_kp"], 0.0)
         self.assertIn("numerical_failure", (
             ROOT / "sim2sim/eval_stairs_mujoco.py"
         ).read_text())
@@ -521,6 +525,30 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertEqual(
             self.evaluator.PHASE_SWEEP_OFFSETS,
             (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875),
+        )
+        self.assertIn(
+            "yaw_obs_2_hip_030", self.evaluator.STABILIZATION_PRESETS
+        )
+
+    def test_heading_stabilizer_is_bounded_and_has_expected_sign(self):
+        config = {
+            "heading_stabilizer": {
+                "hip_yaw_kp": 0.30,
+                "hip_yaw_kd": 0.06,
+                "max_hip_yaw_offset": 0.18,
+            }
+        }
+        self.assertAlmostEqual(
+            self.evaluator.heading_stabilizer_offset(0.2, 0.1, config),
+            0.066,
+        )
+        self.assertEqual(
+            self.evaluator.heading_stabilizer_offset(2.0, 1.0, config),
+            0.18,
+        )
+        self.assertEqual(
+            self.evaluator.heading_stabilizer_offset(-2.0, -1.0, config),
+            -0.18,
         )
 
     def test_mjcf_inertias_are_rebuilt_from_training_urdf(self):

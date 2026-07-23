@@ -103,6 +103,55 @@ PHYSICS_PRESETS = {
 
 PHASE_SWEEP_OFFSETS = tuple(index / 8.0 for index in range(8))
 
+STABILIZATION_PRESETS = {
+    # Preserve the exported policy exactly as the baseline.
+    "policy": {
+        "yaw_observation_gain": 1.0,
+        "hip_yaw_kp": 0.0,
+        "hip_yaw_kd": 0.0,
+    },
+    # Increase the feedback state already learned by the policy.
+    "yaw_obs_2": {
+        "yaw_observation_gain": 2.0,
+        "hip_yaw_kp": 0.0,
+        "hip_yaw_kd": 0.0,
+    },
+    "yaw_obs_4": {
+        "yaw_observation_gain": 4.0,
+        "hip_yaw_kp": 0.0,
+        "hip_yaw_kd": 0.0,
+    },
+    # Add a bounded, symmetric hip-yaw residual. With planted feet, a positive
+    # joint residual produces the opposite base-yaw reaction.
+    "hip_yaw_015": {
+        "yaw_observation_gain": 1.0,
+        "hip_yaw_kp": 0.15,
+        "hip_yaw_kd": 0.03,
+    },
+    "hip_yaw_030": {
+        "yaw_observation_gain": 1.0,
+        "hip_yaw_kp": 0.30,
+        "hip_yaw_kd": 0.06,
+    },
+    "hip_yaw_060": {
+        "yaw_observation_gain": 1.0,
+        "hip_yaw_kp": 0.60,
+        "hip_yaw_kd": 0.10,
+    },
+    "yaw_obs_2_hip_030": {
+        "yaw_observation_gain": 2.0,
+        "hip_yaw_kp": 0.30,
+        "hip_yaw_kd": 0.06,
+    },
+    # Keep one reverse-sign candidate so the sweep detects a coordinate-sign
+    # mismatch instead of silently assuming the analytical reaction sign.
+    "hip_yaw_reverse": {
+        "yaw_observation_gain": 1.0,
+        "hip_yaw_kp": -0.30,
+        "hip_yaw_kd": -0.06,
+    },
+}
+
 
 def _resolve_config_path(value):
     if os.path.isabs(value):
@@ -484,8 +533,14 @@ def _build_observation(
         obs[0, cursor] = (
             data.qpos[1] - float(navigation.get("center_y", 0.0))
         ) * float(navigation.get("lateral_scale", 2.0))
-        obs[0, cursor + 1] = yaw_error * float(
-            navigation.get("yaw_scale", 1.0)
+        obs[0, cursor + 1] = (
+            yaw_error
+            * float(navigation.get("yaw_scale", 1.0))
+            * float(
+                config.get("heading_stabilizer", {}).get(
+                    "yaw_observation_gain", 1.0
+                )
+            )
         )
         cursor += 2
 
@@ -527,6 +582,19 @@ def _build_observation(
     )
 
 
+def heading_stabilizer_offset(yaw, yaw_rate, config):
+    """Return a bounded symmetric hip-yaw target residual in radians."""
+    stabilizer = config.get("heading_stabilizer", {})
+    limit = float(stabilizer.get("max_hip_yaw_offset", 0.18))
+    if limit < 0.0:
+        raise ValueError("max_hip_yaw_offset must be non-negative")
+    offset = (
+        float(stabilizer.get("hip_yaw_kp", 0.0)) * float(yaw)
+        + float(stabilizer.get("hip_yaw_kd", 0.0)) * float(yaw_rate)
+    )
+    return float(np.clip(offset, -limit, limit))
+
+
 def run_episode(config, model, policy, seed):
     validation = config["validation"]
     stair_cfg = config["stairs"]
@@ -543,6 +611,10 @@ def run_episode(config, model, policy, seed):
     joint_order = list(config["joint_order"])
     qpos_indices, qvel_indices, control_indices = resolve_joint_layout(
         model, joint_order
+    )
+    hip_yaw_policy_indices = (
+        joint_order.index("L_leg_hip_yaw_joint"),
+        joint_order.index("R_leg_hip_yaw_joint"),
     )
     default = np.asarray(config["default_angles"], dtype=np.float64)
     rng = np.random.default_rng(seed)
@@ -577,6 +649,7 @@ def run_episode(config, model, policy, seed):
     numerical_failure = False
     max_lateral = 0.0
     max_yaw = 0.0
+    max_heading_correction = 0.0
     speed_sum = 0.0
     control_steps = 0
     elapsed = 0.0
@@ -588,6 +661,11 @@ def run_episode(config, model, policy, seed):
         dq = data.qvel[qvel_indices].copy()
 
         if lowlevel_step % control_decimation == 0:
+            x, y, z, w = quat
+            yaw = math.atan2(
+                2.0 * (w * z + x * y),
+                1.0 - 2.0 * (y * y + z * z),
+            )
             obs = _build_observation(
                 config,
                 data,
@@ -615,6 +693,13 @@ def run_episode(config, model, policy, seed):
                 output.detach().cpu().numpy(), -clip_actions, clip_actions
             )
             target_q = action * action_scale + default
+            heading_correction = heading_stabilizer_offset(
+                yaw, omega[2], config
+            )
+            target_q[list(hip_yaw_policy_indices)] += heading_correction
+            max_heading_correction = max(
+                max_heading_correction, abs(heading_correction)
+            )
 
             raw_tread, riser, lower_leg = sample_contacts(
                 model, data, layout, validation
@@ -626,11 +711,6 @@ def run_episode(config, model, policy, seed):
             control_steps += 1
             speed_sum += float(velocity[0])
             max_lateral = max(max_lateral, abs(float(data.qpos[1])))
-            x, y, z, w = quat
-            yaw = math.atan2(
-                2.0 * (w * z + x * y),
-                1.0 - 2.0 * (y * y + z * z),
-            )
             max_yaw = max(max_yaw, abs(yaw))
             path_failure = path_failure or (
                 max_lateral > float(validation["corridor_half_width"])
@@ -715,6 +795,7 @@ def run_episode(config, model, policy, seed):
         "max_yaw_deviation_rad": max_yaw,
         "final_lateral_position_m": float(data.qpos[1]),
         "final_yaw_rad": float(yaw),
+        "max_heading_correction_rad": max_heading_correction,
     }
     result.update({key: float(value) for key, value in gait.items()})
     return result
@@ -743,6 +824,17 @@ def aggregate_results(results, config, policy_path):
         "command_speed_m_s": float(config["cmd_init"][0]),
         "gait_phase_offset": float(
             config.get("gait_phase", {}).get("phase_offset", 0.0)
+        ),
+        "yaw_observation_gain": float(
+            config.get("heading_stabilizer", {}).get(
+                "yaw_observation_gain", 1.0
+            )
+        ),
+        "hip_yaw_kp": float(
+            config.get("heading_stabilizer", {}).get("hip_yaw_kp", 0.0)
+        ),
+        "hip_yaw_kd": float(
+            config.get("heading_stabilizer", {}).get("hip_yaw_kd", 0.0)
         ),
     }
     for key in keys:
@@ -822,6 +914,20 @@ def _apply_cli_overrides(config, args):
         physics = config.setdefault("mujoco_physics", {})
         physics.update(PHYSICS_PRESETS[args.physics_preset])
         physics["preset"] = args.physics_preset
+    stabilizer = config.setdefault("heading_stabilizer", {})
+    for argument_name in (
+        "yaw_observation_gain",
+        "hip_yaw_kp",
+        "hip_yaw_kd",
+        "max_hip_yaw_offset",
+    ):
+        value = getattr(args, argument_name, None)
+        if value is not None:
+            stabilizer[argument_name] = float(value)
+    if float(stabilizer.get("yaw_observation_gain", 1.0)) < 0.0:
+        raise ValueError("--yaw_observation_gain must be non-negative")
+    if float(stabilizer.get("max_hip_yaw_offset", 0.18)) < 0.0:
+        raise ValueError("--max_hip_yaw_offset must be non-negative")
     for name in ("initial_joint_noise", "initial_lateral_noise"):
         if float(config["validation"].get(name, 0.0)) < 0.0:
             raise ValueError("--{} must be non-negative".format(name))
@@ -886,6 +992,7 @@ def evaluate(args):
         "MuJoCo physics={physics_preset} inertia={inertial_source} "
         "start={stair_start_x_m:.2f}m "
         "step={step_height_m:.2f}m phase={gait_phase_offset:.3f} "
+        "yawobs={yaw_observation_gain:.2f} hipkp={hip_yaw_kp:+.2f} "
         "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
         "path={path_failure_rate:.1%} "
@@ -920,18 +1027,34 @@ if __name__ == "__main__":
     parser.add_argument("--initial_joint_noise", type=float, default=None)
     parser.add_argument("--initial_lateral_noise", type=float, default=None)
     parser.add_argument("--phase_offset", type=float, default=None)
+    parser.add_argument("--yaw_observation_gain", type=float, default=None)
+    parser.add_argument("--hip_yaw_kp", type=float, default=None)
+    parser.add_argument("--hip_yaw_kd", type=float, default=None)
+    parser.add_argument("--max_hip_yaw_offset", type=float, default=None)
     parser.add_argument(
         "--physics_preset", choices=tuple(PHYSICS_PRESETS), default=None
     )
     parser.add_argument("--physics_sweep", action="store_true")
     parser.add_argument("--phase_sweep", action="store_true")
+    parser.add_argument("--stabilization_sweep", action="store_true")
     parser.add_argument("--output", default=None)
     parser.add_argument("--seed", type=int, default=42)
     arguments = parser.parse_args()
     if arguments.episodes < 1:
         raise ValueError("--episodes must be positive")
-    if arguments.physics_sweep and arguments.phase_sweep:
-        raise ValueError("Choose only one of --physics_sweep/--phase_sweep")
+    sweep_count = sum(
+        bool(value)
+        for value in (
+            arguments.physics_sweep,
+            arguments.phase_sweep,
+            arguments.stabilization_sweep,
+        )
+    )
+    if sweep_count > 1:
+        raise ValueError(
+            "Choose only one of --physics_sweep/--phase_sweep/"
+            "--stabilization_sweep"
+        )
     if arguments.physics_sweep:
         output_path = arguments.output
         for preset_name in PHYSICS_PRESETS:
@@ -967,5 +1090,51 @@ if __name__ == "__main__":
                 )
             )
             evaluate(sweep_arguments)
+    elif arguments.stabilization_sweep:
+        output_path = arguments.output
+        candidates = []
+        for preset_name, preset in STABILIZATION_PRESETS.items():
+            sweep_arguments = copy.copy(arguments)
+            sweep_arguments.stabilization_sweep = False
+            sweep_arguments.yaw_observation_gain = preset[
+                "yaw_observation_gain"
+            ]
+            sweep_arguments.hip_yaw_kp = preset["hip_yaw_kp"]
+            sweep_arguments.hip_yaw_kd = preset["hip_yaw_kd"]
+            if output_path:
+                output_root, output_extension = os.path.splitext(output_path)
+                if output_extension.lower() != ".csv":
+                    output_root = output_path
+                sweep_arguments.output = (
+                    output_root + "_" + preset_name + ".csv"
+                )
+            print(
+                "\n=== MuJoCo heading stabilizer: {} ===".format(
+                    preset_name
+                )
+            )
+            candidates.append((preset_name, evaluate(sweep_arguments)))
+
+        recommended_name, recommended = max(
+            candidates,
+            key=lambda item: (
+                -item[1]["numerical_failure_rate"],
+                -item[1]["fall_rate"],
+                -item[1]["path_failure_rate"],
+                item[1]["mean_survival_time_s"],
+                -item[1]["mean_max_yaw_deviation_rad"],
+                -item[1]["mean_max_lateral_deviation_m"],
+            ),
+        )
+        print(
+            "MuJoCo stabilization recommendation={} sim_time={:.2f}s "
+            "path={:.1%} fall={:.1%} yaw={:.3f}rad".format(
+                recommended_name,
+                recommended["mean_survival_time_s"],
+                recommended["path_failure_rate"],
+                recommended["fall_rate"],
+                recommended["mean_max_yaw_deviation_rad"],
+            )
+        )
     else:
         evaluate(arguments)

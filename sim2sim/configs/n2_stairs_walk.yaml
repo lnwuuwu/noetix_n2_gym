@@ -79,6 +79,14 @@ navigation_state:
   lateral_scale: 2.0
   yaw_scale: 1.0
 
+# Optional deploy-time heading outer loop. The baseline remains policy-only;
+# ``--stabilization_sweep`` selects a bounded setting using the target engine.
+heading_stabilizer:
+  yaw_observation_gain: 1.0
+  hip_yaw_kp: 0.0
+  hip_yaw_kd: 0.0
+  max_hip_yaw_offset: 0.18
+
 stairs:
   start_x: 0.60
   step_width: 0.30
