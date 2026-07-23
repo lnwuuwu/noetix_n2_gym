@@ -8,10 +8,10 @@ import torch
 
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
+import humanoid.utils.helpers as humanoid_helpers
 from humanoid.utils.helpers import (
     export_policy_as_jit,
     export_policy_as_onnx,
-    get_args,
 )
 from humanoid.utils import task_registry
 
@@ -195,4 +195,4 @@ if __name__ == "__main__":
             "help": "Move the viewer camera slowly along +X.",
         },
     ]
-    play(get_args(extra_parameters))
+    play(humanoid_helpers.get_args(extra_parameters))

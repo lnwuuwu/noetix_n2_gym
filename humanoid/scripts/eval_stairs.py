@@ -10,7 +10,7 @@ import torch
 
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-from humanoid.utils.helpers import get_args
+import humanoid.utils.helpers as humanoid_helpers
 from humanoid.utils import task_registry
 
 
@@ -463,4 +463,4 @@ if __name__ == "__main__":
             "help": "CSV output path; a JSON summary is written beside it.",
         },
     ]
-    evaluate(get_args(extra_parameters))
+    evaluate(humanoid_helpers.get_args(extra_parameters))

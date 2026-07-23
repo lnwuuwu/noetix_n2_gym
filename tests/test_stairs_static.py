@@ -1743,7 +1743,11 @@ class SourceCompatibilityTests(unittest.TestCase):
                 ROOT / "humanoid" / "scripts" / script_name
             ).read_text()
             self.assertIn(
-                "from humanoid.utils.helpers import", script_source
+                "import humanoid.utils.helpers as humanoid_helpers",
+                script_source,
+            )
+            self.assertIn(
+                "humanoid_helpers.get_args(", script_source
             )
 
         ppo_source = (

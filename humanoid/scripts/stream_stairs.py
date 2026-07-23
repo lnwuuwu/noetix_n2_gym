@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-from humanoid.utils.helpers import get_args
+import humanoid.utils.helpers as humanoid_helpers
 from humanoid.utils import task_registry
 
 
@@ -347,4 +347,4 @@ if __name__ == "__main__":
             "help": "JPEG quality from 1 to 100.",
         },
     ]
-    stream(get_args(extra_parameters))
+    stream(humanoid_helpers.get_args(extra_parameters))
