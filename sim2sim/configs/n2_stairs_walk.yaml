@@ -1,6 +1,7 @@
 # JIT exported by: python humanoid/scripts/play.py --task=n2_stairs_walk ... --export_policy
 policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/n2_stairs_walk/exported/policies/policy.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/n2_18dof.xml"
+urdf_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/urdf/N2.urdf"
 
 simulation_duration: 60.0
 simulation_dt: 0.002
@@ -25,6 +26,7 @@ mujoco_physics:
   robot_conaffinity: 2
   terrain_contype: 2
   terrain_conaffinity: 1
+  align_inertials_from_urdf: true
 
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20,
       30, 30, 30, 30, 80, 80, 120, 120, 20]

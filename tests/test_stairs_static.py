@@ -433,6 +433,9 @@ class MujocoSim2SimTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.evaluator = load_pure_mujoco_eval_module()
+        cls.inertia = load_module(
+            "n2_urdf_inertia_test", "sim2sim/urdf_inertia.py"
+        )
 
     def test_level_four_config_matches_deployable_policy(self):
         config = yaml.safe_load(
@@ -449,6 +452,9 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertEqual(config["mujoco_physics"]["joint_armature"], 0.0)
         self.assertEqual(config["mujoco_physics"]["joint_frictionloss"], 0.0)
         self.assertEqual(config["mujoco_physics"]["contact_dim"], 3)
+        self.assertTrue(
+            config["mujoco_physics"]["align_inertials_from_urdf"]
+        )
         self.assertIn("numerical_failure", (
             ROOT / "sim2sim/eval_stairs_mujoco.py"
         ).read_text())
@@ -492,6 +498,7 @@ class MujocoSim2SimTests(unittest.TestCase):
             [result], config, "policy.pt"
         )
         self.assertEqual(summary["mean_forward_speed_m_s"], 0.17)
+        self.assertEqual(summary["inertial_source"], "mjcf")
         self.assertNotIn("mean_mean_forward_speed_m_s", summary)
 
     def test_physics_presets_isolate_joint_contact_and_self_collision(self):
@@ -499,6 +506,12 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertEqual(presets["legacy_mjcf"]["joint_armature"], 0.01)
         self.assertFalse(
             presets["legacy_mjcf"]["disable_self_collisions"]
+        )
+        self.assertFalse(
+            presets["legacy_mjcf"]["align_inertials_from_urdf"]
+        )
+        self.assertTrue(
+            presets["legacy_urdf_inertias"]["align_inertials_from_urdf"]
         )
         self.assertTrue(
             presets["legacy_no_self"]["disable_self_collisions"]
@@ -509,6 +522,60 @@ class MujocoSim2SimTests(unittest.TestCase):
             self.evaluator.PHASE_SWEEP_OFFSETS,
             (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875),
         )
+
+    def test_mjcf_inertias_are_rebuilt_from_training_urdf(self):
+        mjcf_root = ET.parse(
+            ROOT / "resources/robots/N2/mjcf/n2_18dof.xml"
+        ).getroot()
+        urdf_path = ROOT / "resources/robots/N2/urdf/N2.urdf"
+        updated = self.inertia.align_mjcf_inertials_from_urdf(
+            mjcf_root, str(urdf_path)
+        )
+        self.assertEqual(len(updated), 19)
+
+        ankle = mjcf_root.find(
+            ".//body[@name='L_leg_ankle_link']/inertial"
+        )
+        ankle_values = np.fromstring(
+            ankle.attrib["fullinertia"], sep=" "
+        )
+        np.testing.assert_allclose(
+            ankle_values[:3], [0.01, 0.01, 0.01], rtol=0.0, atol=1e-12
+        )
+        self.assertNotIn("diaginertia", ankle.attrib)
+        self.assertNotIn("quat", ankle.attrib)
+
+        shoulder = mjcf_root.find(
+            ".//body[@name='R_arm_shoulder_yaw_Link']/inertial"
+        )
+        shoulder_values = np.fromstring(
+            shoulder.attrib["fullinertia"], sep=" "
+        )
+        np.testing.assert_allclose(
+            shoulder_values[:3], [0.01, 0.01, 0.01], rtol=0.0, atol=1e-12
+        )
+
+        elbow = mjcf_root.find(
+            ".//body[@name='L_arm_elbow_Link']/inertial"
+        )
+        self.assertAlmostEqual(float(elbow.attrib["mass"]), 0.421265)
+        np.testing.assert_allclose(
+            np.fromstring(elbow.attrib["pos"], sep=" "),
+            [-0.003975, 0.000743355, -0.0898509],
+            rtol=0.0,
+            atol=1e-7,
+        )
+
+        urdf_root = ET.parse(urdf_path).getroot()
+        urdf_mass = sum(
+            float(link.find("inertial/mass").attrib["value"])
+            for link in urdf_root.findall("link")
+        )
+        mjcf_mass = sum(
+            float(body.find("inertial").attrib["mass"])
+            for body in mjcf_root.findall("./worldbody//body")
+        )
+        self.assertAlmostEqual(mjcf_mass, urdf_mass, places=9)
 
     def test_contact_tracker_accepts_true_alternating_stairs(self):
         tracker = self.evaluator.GaitTracker(

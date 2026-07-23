@@ -19,7 +19,15 @@ if _UTILS_DIR not in sys.path:
     sys.path.insert(0, _UTILS_DIR)
 from stairs_terrain import terrain_height_at_x  # noqa: E402
 
-def load_mujoco_model(xml_path, stair_cfg=None, physics_cfg=None):
+_SIM2SIM_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SIM2SIM_DIR not in sys.path:
+    sys.path.insert(0, _SIM2SIM_DIR)
+from urdf_inertia import align_mjcf_inertials_from_urdf  # noqa: E402
+
+
+def load_mujoco_model(
+    xml_path, stair_cfg=None, physics_cfg=None, urdf_path=None
+):
     """Load MJCF and optionally align its contacts/joints with training."""
     if stair_cfg is None:
         return mujoco.MjModel.from_xml_path(xml_path)
@@ -62,6 +70,13 @@ def load_mujoco_model(xml_path, stair_cfg=None, physics_cfg=None):
                 ):
                     geom.set("contype", robot_contype)
                     geom.set("conaffinity", robot_conaffinity)
+
+    if bool(physics_cfg.get("align_inertials_from_urdf", False)):
+        if not urdf_path:
+            raise ValueError(
+                "MuJoCo inertia alignment requires a URDF path"
+            )
+        align_mjcf_inertials_from_urdf(root, urdf_path)
 
     # The repository's 18-DoF MJCF already contains a historical staircase.
     # Remove only world-level boxes; robot collision geoms are nested in bodies.
@@ -310,8 +325,16 @@ def run_mujoco(cfg):
         navigation_cfg = config.get("navigation_state")
         include_base_lin_vel = bool(config.get("include_base_lin_vel", False))
     
+    urdf_path = config.get("urdf_path")
+    if urdf_path:
+        urdf_path = urdf_path.replace(
+            "{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR
+        )
     model = load_mujoco_model(
-        xml_path, stair_cfg, config.get("mujoco_physics")
+        xml_path,
+        stair_cfg,
+        config.get("mujoco_physics"),
+        urdf_path=urdf_path,
     )
     model.opt.timestep = simulation_dt
     integrator = str(config.get("integrator", "")).strip().upper()

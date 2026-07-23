@@ -56,6 +56,18 @@ PHYSICS_PRESETS = {
         "contact_dim": 1,
         "contact_priority": 0,
         "disable_self_collisions": False,
+        "align_inertials_from_urdf": False,
+    },
+    # Isolate the stale-MJCF inertia mismatch while retaining the best contact
+    # and joint-side settings from the initial transfer sweep.
+    "legacy_urdf_inertias": {
+        "joint_damping": 0.001,
+        "joint_armature": 0.01,
+        "joint_frictionloss": 0.1,
+        "contact_dim": 1,
+        "contact_priority": 0,
+        "disable_self_collisions": False,
+        "align_inertials_from_urdf": True,
     },
     # Isolate the self-collision mismatch while retaining legacy dynamics.
     "legacy_no_self": {
@@ -65,6 +77,7 @@ PHYSICS_PRESETS = {
         "contact_dim": 1,
         "contact_priority": 0,
         "disable_self_collisions": True,
+        "align_inertials_from_urdf": False,
     },
     # Preserve the stabilizing MJCF joint dynamics but align contact handling.
     "hybrid": {
@@ -74,6 +87,7 @@ PHYSICS_PRESETS = {
         "contact_dim": 3,
         "contact_priority": 1,
         "disable_self_collisions": True,
+        "align_inertials_from_urdf": False,
     },
     # Match the Isaac URDF import as closely as the MJCF permits.
     "isaac_aligned": {
@@ -83,6 +97,7 @@ PHYSICS_PRESETS = {
         "contact_dim": 3,
         "contact_priority": 1,
         "disable_self_collisions": True,
+        "align_inertials_from_urdf": True,
     },
 }
 
@@ -712,6 +727,15 @@ def aggregate_results(results, config, policy_path):
         "physics_preset": str(
             config.get("mujoco_physics", {}).get("preset", "configured")
         ),
+        "inertial_source": (
+            "urdf"
+            if bool(
+                config.get("mujoco_physics", {}).get(
+                    "align_inertials_from_urdf", False
+                )
+            )
+            else "mjcf"
+        ),
         "policy_path": policy_path,
         "episodes": len(results),
         "stair_start_x_m": float(config["stairs"]["start_x"]),
@@ -812,13 +836,23 @@ def evaluate(args):
 
     policy_path = _expanded_path(config["policy_path"])
     xml_path = _expanded_path(config["xml_path"])
+    urdf_path = (
+        _expanded_path(config["urdf_path"])
+        if config.get("urdf_path")
+        else None
+    )
     if not os.path.isfile(policy_path):
         raise ValueError("JIT policy does not exist: " + policy_path)
     if not os.path.isfile(xml_path):
         raise ValueError("MJCF does not exist: " + xml_path)
+    if urdf_path is not None and not os.path.isfile(urdf_path):
+        raise ValueError("URDF does not exist: " + urdf_path)
 
     model = load_mujoco_model(
-        xml_path, config["stairs"], config.get("mujoco_physics")
+        xml_path,
+        config["stairs"],
+        config.get("mujoco_physics"),
+        urdf_path=urdf_path,
     )
     _configure_solver(model, config)
     policy = torch.jit.load(policy_path, map_location="cpu")
@@ -849,7 +883,8 @@ def evaluate(args):
         )
     summary = aggregate_results(results, config, policy_path)
     print(
-        "MuJoCo physics={physics_preset} start={stair_start_x_m:.2f}m "
+        "MuJoCo physics={physics_preset} inertia={inertial_source} "
+        "start={stair_start_x_m:.2f}m "
         "step={step_height_m:.2f}m phase={gait_phase_offset:.3f} "
         "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
