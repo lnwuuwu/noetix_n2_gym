@@ -567,10 +567,12 @@ grep -E 'NATIVE_MUJOCO_CURRICULUM|NATIVE_MUJOCO_SELECTION|NATIVE_MUJOCO_TOURNAME
 ```
 
 `NATIVE_MUJOCO_CURRICULUM` 中 `max` 至少到 2、`mean` 至少约为 1，并且 selection
-的平均最大偏航应明显低于旧版约 0.41 rad，才值得续训。全楼梯 completion 在这个阶段
-仍可能为 0；若 `max=0` 或偏航完全没有下降，应停止而不是继续烧算力。门槛通过后，
-以下命令会保留 Actor、critic、Adam、iteration 以及每个环境的课程进度，在同一 run
-目录继续到总计 1600 iteration：
+不应再是旧版固定的 `path=100% / distance≈0.70m`，才值得续训。v3 使用持续越界判定，
+所以失败轨迹会在 0.40 rad 以外再运行 0.5 秒，不能把 v3 的 `max_yaw` 与 v2 的
+0.41 rad 截断值直接比较。全楼梯 completion 在这个阶段仍可能为 0；若 `max=0`，
+或仍是 `path=100% / distance≈0.70m`，应停止而不是继续烧算力。门槛通过后，以下命令
+会保留 Actor、critic、Adam、iteration 以及每个环境的课程进度，在同一 run 目录继续
+到总计 1600 iteration：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh resume
