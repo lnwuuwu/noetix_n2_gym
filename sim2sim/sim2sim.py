@@ -46,6 +46,23 @@ def load_mujoco_model(xml_path, stair_cfg=None, physics_cfg=None):
                 str(float(physics_cfg.get("joint_" + attribute, default))),
             )
 
+    # Isaac's N2 asset disables self-collisions. Use disjoint collision bits
+    # for robot/terrain so feet still contact the ground and stairs without
+    # MuJoCo introducing limb-to-limb constraints absent during training.
+    if bool(physics_cfg.get("disable_self_collisions", False)):
+        robot_contype = str(int(physics_cfg.get("robot_contype", 1)))
+        robot_conaffinity = str(
+            int(physics_cfg.get("robot_conaffinity", 2))
+        )
+        for top_level_body in worldbody.findall("body"):
+            for geom in top_level_body.findall(".//geom"):
+                if (
+                    geom.attrib.get("contype", "1") != "0"
+                    or geom.attrib.get("conaffinity", "1") != "0"
+                ):
+                    geom.set("contype", robot_contype)
+                    geom.set("conaffinity", robot_conaffinity)
+
     # The repository's 18-DoF MJCF already contains a historical staircase.
     # Remove only world-level boxes; robot collision geoms are nested in bodies.
     # It also contains two coincident planes, which would duplicate contacts.
@@ -55,6 +72,10 @@ def load_mujoco_model(xml_path, stair_cfg=None, physics_cfg=None):
         "condim": str(int(physics_cfg.get("contact_dim", 3))),
         # Give terrain parameters priority over the collision-mesh defaults.
         "priority": str(int(physics_cfg.get("contact_priority", 1))),
+        "contype": str(int(physics_cfg.get("terrain_contype", 2))),
+        "conaffinity": str(
+            int(physics_cfg.get("terrain_conaffinity", 1))
+        ),
     }
     seen_ground_plane = False
     for geom in list(worldbody.findall("geom")):

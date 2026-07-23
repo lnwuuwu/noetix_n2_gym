@@ -7,6 +7,7 @@ policies which only succeed by exploiting PhysX stair contacts.
 """
 
 import argparse
+import copy
 import csv
 import json
 import math
@@ -45,6 +46,45 @@ from sim2sim import (  # noqa: E402
 FOOT_BODIES = ("L_leg_ankle_link", "R_leg_ankle_link")
 LOWER_LEG_BODIES = ("L_leg_knee_link", "R_leg_knee_link")
 FOOT_SITES = ("L_leg_foot_contact_ground", "R_leg_foot_contact_ground")
+
+PHYSICS_PRESETS = {
+    # Exact historical MJCF joint/contact values, including self-collision.
+    "legacy_mjcf": {
+        "joint_damping": 0.001,
+        "joint_armature": 0.01,
+        "joint_frictionloss": 0.1,
+        "contact_dim": 1,
+        "contact_priority": 0,
+        "disable_self_collisions": False,
+    },
+    # Isolate the self-collision mismatch while retaining legacy dynamics.
+    "legacy_no_self": {
+        "joint_damping": 0.001,
+        "joint_armature": 0.01,
+        "joint_frictionloss": 0.1,
+        "contact_dim": 1,
+        "contact_priority": 0,
+        "disable_self_collisions": True,
+    },
+    # Preserve the stabilizing MJCF joint dynamics but align contact handling.
+    "hybrid": {
+        "joint_damping": 0.001,
+        "joint_armature": 0.01,
+        "joint_frictionloss": 0.1,
+        "contact_dim": 3,
+        "contact_priority": 1,
+        "disable_self_collisions": True,
+    },
+    # Match the Isaac URDF import as closely as the MJCF permits.
+    "isaac_aligned": {
+        "joint_damping": 0.0,
+        "joint_armature": 0.0,
+        "joint_frictionloss": 0.0,
+        "contact_dim": 3,
+        "contact_priority": 1,
+        "disable_self_collisions": True,
+    },
+}
 
 
 def _resolve_config_path(value):
@@ -665,6 +705,9 @@ def aggregate_results(results, config, policy_path):
     keys = list(results[0].keys())
     summary = {
         "engine": "mujoco",
+        "physics_preset": str(
+            config.get("mujoco_physics", {}).get("preset", "configured")
+        ),
         "policy_path": policy_path,
         "episodes": len(results),
         "stair_start_x_m": float(config["stairs"]["start_x"]),
@@ -735,6 +778,14 @@ def _apply_cli_overrides(config, args):
         config["validation"]["initial_lateral_noise"] = float(
             args.initial_lateral_noise
         )
+    if args.physics_preset is not None:
+        if args.physics_preset not in PHYSICS_PRESETS:
+            raise ValueError(
+                "Unknown MuJoCo physics preset: " + args.physics_preset
+            )
+        physics = config.setdefault("mujoco_physics", {})
+        physics.update(PHYSICS_PRESETS[args.physics_preset])
+        physics["preset"] = args.physics_preset
     for name in ("initial_joint_noise", "initial_lateral_noise"):
         if float(config["validation"].get(name, 0.0)) < 0.0:
             raise ValueError("--{} must be non-negative".format(name))
@@ -786,7 +837,8 @@ def evaluate(args):
         )
     summary = aggregate_results(results, config, policy_path)
     print(
-        "MuJoCo start={stair_start_x_m:.2f}m step={step_height_m:.2f}m "
+        "MuJoCo physics={physics_preset} start={stair_start_x_m:.2f}m "
+        "step={step_height_m:.2f}m "
         "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
         "numeric={numerical_failure_rate:.1%} "
@@ -814,9 +866,29 @@ if __name__ == "__main__":
     parser.add_argument("--command_speed", type=float, default=None)
     parser.add_argument("--initial_joint_noise", type=float, default=None)
     parser.add_argument("--initial_lateral_noise", type=float, default=None)
+    parser.add_argument(
+        "--physics_preset", choices=tuple(PHYSICS_PRESETS), default=None
+    )
+    parser.add_argument("--physics_sweep", action="store_true")
     parser.add_argument("--output", default=None)
     parser.add_argument("--seed", type=int, default=42)
     arguments = parser.parse_args()
     if arguments.episodes < 1:
         raise ValueError("--episodes must be positive")
-    evaluate(arguments)
+    if arguments.physics_sweep:
+        output_path = arguments.output
+        for preset_name in PHYSICS_PRESETS:
+            sweep_arguments = copy.copy(arguments)
+            sweep_arguments.physics_sweep = False
+            sweep_arguments.physics_preset = preset_name
+            if output_path:
+                output_root, output_extension = os.path.splitext(output_path)
+                if output_extension.lower() != ".csv":
+                    output_root = output_path
+                sweep_arguments.output = (
+                    output_root + "_" + preset_name + ".csv"
+                )
+            print("\n=== MuJoCo physics preset: {} ===".format(preset_name))
+            evaluate(sweep_arguments)
+    else:
+        evaluate(arguments)

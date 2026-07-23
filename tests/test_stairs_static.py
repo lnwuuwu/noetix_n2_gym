@@ -465,6 +465,7 @@ class MujocoSim2SimTests(unittest.TestCase):
             stair_start_x=100.0,
             initial_joint_noise=0.0,
             initial_lateral_noise=0.0,
+            physics_preset=None,
         )
         updated = self.evaluator._apply_cli_overrides(config, args)
         self.assertEqual(updated["stairs"]["start_x"], 100.0)
@@ -476,6 +477,7 @@ class MujocoSim2SimTests(unittest.TestCase):
         config = {
             "stairs": {"start_x": 0.60, "step_height": 0.10},
             "cmd_init": [0.18, 0.0, 0.0],
+            "mujoco_physics": {"preset": "test"},
         }
         result = {
             "success": 0.0,
@@ -490,6 +492,18 @@ class MujocoSim2SimTests(unittest.TestCase):
         )
         self.assertEqual(summary["mean_forward_speed_m_s"], 0.17)
         self.assertNotIn("mean_mean_forward_speed_m_s", summary)
+
+    def test_physics_presets_isolate_joint_contact_and_self_collision(self):
+        presets = self.evaluator.PHYSICS_PRESETS
+        self.assertEqual(presets["legacy_mjcf"]["joint_armature"], 0.01)
+        self.assertFalse(
+            presets["legacy_mjcf"]["disable_self_collisions"]
+        )
+        self.assertTrue(
+            presets["legacy_no_self"]["disable_self_collisions"]
+        )
+        self.assertEqual(presets["hybrid"]["contact_priority"], 1)
+        self.assertEqual(presets["isaac_aligned"]["joint_armature"], 0.0)
 
     def test_contact_tracker_accepts_true_alternating_stairs(self):
         tracker = self.evaluator.GaitTracker(

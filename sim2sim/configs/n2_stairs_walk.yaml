@@ -14,11 +14,17 @@ solver_noslip_iterations: 10
 # Match the Isaac Gym URDF import before measuring sim-to-sim transfer. The
 # legacy MJCF added joint-side physics that is absent from the training plant.
 mujoco_physics:
+  preset: isaac_aligned
   joint_damping: 0.0
   joint_armature: 0.0
   joint_frictionloss: 0.0
   contact_dim: 3
   contact_priority: 1
+  disable_self_collisions: true
+  robot_contype: 1
+  robot_conaffinity: 2
+  terrain_contype: 2
+  terrain_conaffinity: 1
 
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20,
       30, 30, 30, 30, 80, 80, 120, 120, 20]
