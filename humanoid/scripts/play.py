@@ -20,7 +20,7 @@ from humanoid.utils.helpers import (
     export_policy_as_onnx,
     parse_humanoid_args,
 )
-from humanoid.utils import task_registry
+from humanoid.utils.task_registry import task_registry
 
 
 def _disable_randomization(env_cfg):

@@ -1750,6 +1750,13 @@ class SourceCompatibilityTests(unittest.TestCase):
                 "parse_humanoid_args(", script_source
             )
             self.assertIn(
+                "from humanoid.utils.task_registry import task_registry",
+                script_source,
+            )
+            self.assertNotIn(
+                "from humanoid.utils import task_registry", script_source
+            )
+            self.assertIn(
                 "sys.path.insert(0, _REPOSITORY_ROOT)", script_source
             )
 

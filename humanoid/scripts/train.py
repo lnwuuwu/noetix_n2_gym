@@ -21,7 +21,7 @@ import torch
 # Use the repository-specific name.  Isaac Gym exposes a different
 # zero-argument ``get_args`` in some Python 3.8 import orders.
 from humanoid.utils.helpers import parse_humanoid_args
-from humanoid.utils import task_registry
+from humanoid.utils.task_registry import task_registry
 
 def train(args):
     """
