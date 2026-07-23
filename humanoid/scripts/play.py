@@ -1,6 +1,13 @@
 """Visualize a checkpoint without silently changing its task definition."""
 
 import os
+import sys
+
+_REPOSITORY_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+)
+if not sys.path or os.path.realpath(sys.path[0]) != _REPOSITORY_ROOT:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
 import isaacgym  # noqa: F401 - Isaac Gym must load before torch
 import numpy as np
@@ -8,10 +15,10 @@ import torch
 
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-import humanoid.utils.helpers as humanoid_helpers
 from humanoid.utils.helpers import (
     export_policy_as_jit,
     export_policy_as_onnx,
+    parse_humanoid_args,
 )
 from humanoid.utils import task_registry
 
@@ -195,4 +202,4 @@ if __name__ == "__main__":
             "help": "Move the viewer camera slowly along +X.",
         },
     ]
-    play(humanoid_helpers.parse_humanoid_args(extra_parameters))
+    play(parse_humanoid_args(extra_parameters))

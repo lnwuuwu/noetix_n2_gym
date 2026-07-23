@@ -1,14 +1,26 @@
 import math
 import os
 import signal
+import sys
+
+# Running ``python humanoid/scripts/train.py`` normally puts this scripts
+# directory, not the checkout root, first on sys.path.  Pin the checkout root
+# so a sibling/installed ``humanoid`` package cannot be mixed with this file.
+_REPOSITORY_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+)
+if not sys.path or os.path.realpath(sys.path[0]) != _REPOSITORY_ROOT:
+    sys.path.insert(0, _REPOSITORY_ROOT)
+
+# Isaac Gym Preview 4 must load its bindings before importing torch.
+import isaacgym  # noqa: F401
 
 # 导入所有环境相关模块
 from humanoid.envs import *
-# Isaac Gym Preview 4 must load its bindings before importing torch.
 import torch
 # Use the repository-specific name.  Isaac Gym exposes a different
 # zero-argument ``get_args`` in some Python 3.8 import orders.
-import humanoid.utils.helpers as humanoid_helpers
+from humanoid.utils.helpers import parse_humanoid_args
 from humanoid.utils import task_registry
 
 def train(args):
@@ -167,7 +179,7 @@ def train(args):
 # 程序入口点
 if __name__ == '__main__':
     # 解析命令行参数
-    args = humanoid_helpers.parse_humanoid_args(
+    args = parse_humanoid_args(
         [
             {
                 "name": "--fixed_terrain_level",

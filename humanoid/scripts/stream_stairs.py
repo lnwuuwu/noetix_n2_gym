@@ -8,8 +8,16 @@ from a normal browser.
 """
 
 import io
+import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_REPOSITORY_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+)
+if not sys.path or os.path.realpath(sys.path[0]) != _REPOSITORY_ROOT:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
 import isaacgym  # noqa: F401 - Isaac Gym must load before torch
 from isaacgym import gymapi
@@ -17,7 +25,7 @@ import numpy as np
 import torch
 
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-import humanoid.utils.helpers as humanoid_helpers
+from humanoid.utils.helpers import parse_humanoid_args
 from humanoid.utils import task_registry
 
 
@@ -347,4 +355,4 @@ if __name__ == "__main__":
             "help": "JPEG quality from 1 to 100.",
         },
     ]
-    stream(humanoid_helpers.parse_humanoid_args(extra_parameters))
+    stream(parse_humanoid_args(extra_parameters))

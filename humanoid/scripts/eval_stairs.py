@@ -3,14 +3,21 @@
 import csv
 import json
 import os
+import sys
 from datetime import datetime
+
+_REPOSITORY_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+)
+if not sys.path or os.path.realpath(sys.path[0]) != _REPOSITORY_ROOT:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
 import isaacgym  # noqa: F401 - Isaac Gym must load before torch
 import torch
 
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-import humanoid.utils.helpers as humanoid_helpers
+from humanoid.utils.helpers import parse_humanoid_args
 from humanoid.utils import task_registry
 
 
@@ -463,4 +470,4 @@ if __name__ == "__main__":
             "help": "CSV output path; a JSON summary is written beside it.",
         },
     ]
-    evaluate(humanoid_helpers.parse_humanoid_args(extra_parameters))
+    evaluate(parse_humanoid_args(extra_parameters))
