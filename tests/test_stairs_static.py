@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
+import torch
 import yaml
 
 
@@ -462,6 +463,47 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertIn("numerical_failure", (
             ROOT / "sim2sim/eval_stairs_mujoco.py"
         ).read_text())
+
+    def test_raw_isaac_checkpoint_actor_loads_without_isaacgym(self):
+        widths = (410, 512, 256, 128, 18)
+        state = {}
+        for sequence_index, (input_dim, output_dim) in enumerate(
+            zip(widths, widths[1:])
+        ):
+            module_index = 2 * sequence_index
+            state["actor.{}.weight".format(module_index)] = torch.zeros(
+                output_dim, input_dim
+            )
+            state["actor.{}.bias".format(module_index)] = torch.zeros(
+                output_dim
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model_123.pt"
+            torch.save(
+                {"model_state_dict": state, "iter": 123},
+                path,
+            )
+            policy, metadata = self.evaluator.load_checkpoint_actor(
+                str(path)
+            )
+        self.assertEqual(metadata["iteration"], 123)
+        self.assertEqual(metadata["input_dim"], 410)
+        self.assertEqual(metadata["output_dim"], 18)
+        self.assertEqual(metadata["hidden_dims"], [512, 256, 128])
+        self.assertEqual(tuple(policy(torch.zeros(1, 410)).shape), (1, 18))
+
+    def test_raw_checkpoint_auto_selects_legacy_observation_layout(self):
+        config = yaml.safe_load(
+            (ROOT / "sim2sim/configs/n2_stairs_walk.yaml").read_text()
+        )
+        updated = self.evaluator.configure_observation_layout_for_policy(
+            config, 375
+        )
+        self.assertEqual(updated["num_single_obs"], 75)
+        self.assertEqual(updated["num_obs"], 375)
+        self.assertFalse(updated["include_base_lin_vel"])
+        self.assertNotIn("gait_phase", updated)
+        self.assertNotIn("navigation_state", updated)
 
     def test_flat_diagnostic_moves_stairs_and_disables_initial_noise(self):
         config = yaml.safe_load(
@@ -1449,6 +1491,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "humanoid/scripts/stream_stairs.py",
             "humanoid/utils/stairs_terrain.py",
             "sim2sim/eval_stairs_mujoco.py",
+            "sim2sim/compare_isaac_checkpoints_mujoco.py",
             "sim2sim/sim2sim.py",
         ]
         for relative_path in paths:

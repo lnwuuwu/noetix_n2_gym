@@ -502,6 +502,25 @@ python humanoid/scripts/play.py \
 python sim2sim/sim2sim.py --config_file=n2_stairs_walk.yaml
 ```
 
+也可以跳过 Isaac Gym 环境和 JIT 导出，直接读取原始 checkpoint。评估器会只重建
+Actor，并自动选择早期 375 维或当前 410 维观测：
+
+```bash
+python sim2sim/eval_stairs_mujoco.py \
+  --checkpoint_path=/绝对路径/model_9000.pt \
+  --physics_preset=isaac_aligned \
+  --step_height=0.10 \
+  --episodes=4 \
+  --output=/root/autodl-tmp/n2_eval/raw_checkpoint.csv
+```
+
+若训练目录中保留了本项目的阶段 checkpoint，下面的一条命令会在完全相同的 MuJoCo
+条件下比较 `5000/8000/8600/9000` 四个代表版本，并写出排序。缺失的版本会明确跳过：
+
+```bash
+python sim2sim/compare_isaac_checkpoints_mujoco.py
+```
+
 ## 8. 低台阶预训练、迁移和 robust 微调
 
 默认课程已经是首选方案：所有环境从 2 cm 开始，以每个环境的真实到顶结果逐级提升，

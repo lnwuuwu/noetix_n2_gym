@@ -12,6 +12,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -165,6 +166,177 @@ def _expanded_path(value):
             str(value).replace("{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR)
         )
     )
+
+
+class CheckpointActor(torch.nn.Module):
+    """Inference-only Actor reconstructed from an Isaac Gym checkpoint."""
+
+    def __init__(self, linear_parameters):
+        super().__init__()
+        layers = []
+        for layer_index, (weight, bias) in enumerate(linear_parameters):
+            output_dim, input_dim = weight.shape
+            linear = torch.nn.Linear(input_dim, output_dim)
+            with torch.no_grad():
+                linear.weight.copy_(weight)
+                linear.bias.copy_(bias)
+            layers.append(linear)
+            if layer_index + 1 < len(linear_parameters):
+                layers.append(torch.nn.ELU())
+        self.actor = torch.nn.Sequential(*layers)
+
+    def forward(self, observation):
+        return self.actor(observation)
+
+
+def load_checkpoint_actor(checkpoint_path):
+    """Load only the deployable Actor without importing Isaac Gym."""
+    try:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(checkpoint, dict):
+        raise ValueError(
+            "Isaac checkpoint must contain a dictionary: " + checkpoint_path
+        )
+    state = checkpoint.get("model_state_dict", checkpoint)
+    if not isinstance(state, dict):
+        raise ValueError(
+            "Checkpoint has no model_state_dict: " + checkpoint_path
+        )
+    if checkpoint.get("obs_norm_state_dict"):
+        raise ValueError(
+            "This checkpoint uses an observation normalizer; export it with "
+            "humanoid/scripts/play.py before MuJoCo evaluation"
+        )
+
+    weights = {}
+    biases = {}
+    actor_pattern = re.compile(
+        r"^(?:module\.)?actor\.(\d+)\.(weight|bias)$"
+    )
+    for name, value in state.items():
+        match = actor_pattern.match(name)
+        if match is None:
+            continue
+        layer_number = int(match.group(1))
+        if match.group(2) == "weight":
+            weights[layer_number] = value.detach().cpu()
+        else:
+            biases[layer_number] = value.detach().cpu()
+    layer_numbers = sorted(weights)
+    if not layer_numbers:
+        raise ValueError(
+            "Checkpoint contains no actor.*.weight tensors: "
+            + checkpoint_path
+        )
+    if set(layer_numbers) != set(biases):
+        raise ValueError(
+            "Actor weight/bias layers do not match in " + checkpoint_path
+        )
+
+    parameters = []
+    previous_output = None
+    for layer_number in layer_numbers:
+        weight = weights[layer_number]
+        bias = biases[layer_number]
+        if weight.ndim != 2 or bias.shape != (weight.shape[0],):
+            raise ValueError(
+                "Invalid Actor Linear layer {} in {}".format(
+                    layer_number, checkpoint_path
+                )
+            )
+        if previous_output is not None and weight.shape[1] != previous_output:
+            raise ValueError(
+                "Disconnected Actor layers in " + checkpoint_path
+            )
+        parameters.append((weight, bias))
+        previous_output = weight.shape[0]
+
+    policy = CheckpointActor(parameters)
+    policy.eval()
+    metadata = {
+        "iteration": int(checkpoint.get("iter", -1)),
+        "input_dim": int(parameters[0][0].shape[1]),
+        "output_dim": int(parameters[-1][0].shape[0]),
+        "hidden_dims": [
+            int(weight.shape[0]) for weight, _ in parameters[:-1]
+        ],
+    }
+    return policy, metadata
+
+
+def configure_observation_layout_for_policy(config, actor_input_dim):
+    """Select the matching historical 375-D or current 410-D Actor layout."""
+    frame_stack = int(config["frame_stack"])
+    configured_dim = int(config["num_obs"])
+    if actor_input_dim == configured_dim:
+        return config
+    if actor_input_dim == 75 * frame_stack:
+        # Early n2_stairs/n2_stairs_walk actors predate the 7 deployable
+        # phase/velocity/navigation values added to every stacked frame.
+        config.pop("gait_phase", None)
+        config.pop("navigation_state", None)
+        config["include_base_lin_vel"] = False
+        config["num_single_obs"] = 75
+        config["num_obs"] = 75 * frame_stack
+        return config
+    raise ValueError(
+        "Actor input dimension {} is incompatible with configured {} and "
+        "legacy {}".format(
+            actor_input_dim, configured_dim, 75 * frame_stack
+        )
+    )
+
+
+def load_policy(config, policy_path=None, checkpoint_path=None):
+    """Load either an exported JIT policy or a raw Isaac Gym checkpoint."""
+    if checkpoint_path is not None:
+        checkpoint_path = _expanded_path(checkpoint_path)
+        if not os.path.isfile(checkpoint_path):
+            raise ValueError(
+                "Isaac checkpoint does not exist: " + checkpoint_path
+            )
+        policy, metadata = load_checkpoint_actor(checkpoint_path)
+        configure_observation_layout_for_policy(
+            config, metadata["input_dim"]
+        )
+        if metadata["output_dim"] != int(config["num_actions"]):
+            raise ValueError(
+                "Actor output dimension {} != {}".format(
+                    metadata["output_dim"], config["num_actions"]
+                )
+            )
+        print(
+            "Loaded Isaac checkpoint iter={iteration} actor={input_dim}"
+            "->{hidden}->{output_dim}: {path}".format(
+                hidden="->".join(
+                    str(value) for value in metadata["hidden_dims"]
+                ),
+                path=checkpoint_path,
+                **metadata,
+            )
+        )
+        return policy, checkpoint_path
+
+    policy_path = _expanded_path(policy_path or config["policy_path"])
+    if not os.path.isfile(policy_path):
+        raise ValueError("JIT policy does not exist: " + policy_path)
+    policy = torch.jit.load(policy_path, map_location="cpu")
+    policy.eval()
+    with torch.inference_mode():
+        output = policy(
+            torch.zeros((1, int(config["num_obs"])), dtype=torch.float32)
+        )
+    if output.shape != (1, int(config["num_actions"])):
+        raise ValueError(
+            "JIT policy output {} != (1, {})".format(
+                tuple(output.shape), config["num_actions"]
+            )
+        )
+    return policy, policy_path
 
 
 def _named_ids(model, object_type, names):
@@ -940,20 +1112,22 @@ def evaluate(args):
         config = yaml.load(config_file, Loader=yaml.FullLoader)
     config = _apply_cli_overrides(config, args)
 
-    policy_path = _expanded_path(config["policy_path"])
     xml_path = _expanded_path(config["xml_path"])
     urdf_path = (
         _expanded_path(config["urdf_path"])
         if config.get("urdf_path")
         else None
     )
-    if not os.path.isfile(policy_path):
-        raise ValueError("JIT policy does not exist: " + policy_path)
     if not os.path.isfile(xml_path):
         raise ValueError("MJCF does not exist: " + xml_path)
     if urdf_path is not None and not os.path.isfile(urdf_path):
         raise ValueError("URDF does not exist: " + urdf_path)
 
+    policy, policy_path = load_policy(
+        config,
+        policy_path=args.policy_path,
+        checkpoint_path=args.checkpoint_path,
+    )
     model = load_mujoco_model(
         xml_path,
         config["stairs"],
@@ -961,8 +1135,6 @@ def evaluate(args):
         urdf_path=urdf_path,
     )
     _configure_solver(model, config)
-    policy = torch.jit.load(policy_path, map_location="cpu")
-    policy.eval()
     results = []
     started = time.monotonic()
     for episode in range(args.episodes):
@@ -1019,6 +1191,14 @@ if __name__ == "__main__":
         "--config_file", default="n2_stairs_walk.yaml"
     )
     parser.add_argument("--policy_path", default=None)
+    parser.add_argument(
+        "--checkpoint_path",
+        default=None,
+        help=(
+            "Raw Isaac Gym model_*.pt. The Actor is reconstructed directly "
+            "and legacy 375-D/current 410-D observations are auto-selected."
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--duration", type=float, default=None)
     parser.add_argument("--step_height", type=float, default=None)
