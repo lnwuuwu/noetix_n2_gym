@@ -15,6 +15,7 @@ from eval_stairs_mujoco import (
     GaitTracker,
     _build_observation,
     _configure_solver,
+    contact_synchronized_phase_offset,
     sample_contacts,
     terrain_height_at_x,
 )
@@ -634,6 +635,29 @@ class MujocoStairsVecEnv(VecEnv):
             + elapsed * self._gait_frequency(env_id)
         ) % 1.0
 
+    def _synchronize_phase_after_advance(self, env_id):
+        """Make the next observable half-cycle swing the opposite foot."""
+        if not bool(
+            self.cfg["gait_phase"].get("contact_phase_reset", False)
+        ):
+            return
+        advanced_foot = int(
+            self.trackers[env_id].last_advanced_foot
+        )
+        if advanced_foot < 0:
+            return
+        # Right swing occupies phase (0.0, 0.5), and left swing occupies
+        # (0.5, 1.0).  A touchdown therefore anchors right at 0.5 and left
+        # at 0.0, followed by the opposite foot's scheduled half-cycle.
+        elapsed = self.episode_steps[env_id] * self.dt
+        self.phase_offsets[env_id] = (
+            contact_synchronized_phase_offset(
+                elapsed,
+                self._gait_frequency(env_id),
+                advanced_foot,
+            )
+        )
+
     @staticmethod
     def _rotation_matrix_wxyz(quaternion):
         w, x, y, z = quaternion
@@ -724,8 +748,15 @@ class MujocoStairsVecEnv(VecEnv):
     def _observation(self, env_id, state):
         frequency = max(self._gait_frequency(env_id), 1.0e-6)
         elapsed = self.episode_steps[env_id] * self.dt
+        configured_offset = float(
+            self.cfg["gait_phase"].get("phase_offset", 0.0)
+        )
         phase_adjusted_time = (
-            elapsed + self.phase_offsets[env_id] / frequency
+            elapsed
+            + (
+                self.phase_offsets[env_id] - configured_offset
+            )
+            / frequency
         )
         single = _build_observation(
             self.cfg,
@@ -960,15 +991,12 @@ class MujocoStairsVecEnv(VecEnv):
             scheduled_foot = int(np.argmax(scheduled_swing))
         else:
             scheduled_foot = -1
-        if np.any(physical_airborne):
-            initial_foot = int(np.argmax(physical_airborne))
-        else:
-            initial_foot = scheduled_foot
-        expected_foot = (
-            1 - int(tracker.last_advanced_foot)
-            if int(tracker.last_advanced_foot) >= 0
-            else initial_foot
-        )
+        # The target foot must be derivable from the Actor observation.
+        # Contact-phase reset above aligns this observable clock with the
+        # latest landing, so the scheduled foot is also the next foot that
+        # should advance.  The former hidden last-advanced-foot target made
+        # identical observations receive contradictory left/right rewards.
+        expected_foot = scheduled_foot
         self.expected_swing_foot[env_id] = expected_foot
 
         inactive = {
@@ -1016,6 +1044,7 @@ class MujocoStairsVecEnv(VecEnv):
         scheduled_expected = bool(scheduled_swing[expected_foot])
         inactive["expected_liftoff"] = float(
             behavior_active
+            and scheduled_expected
             and expected_airborne
             and bool(tracker.opposite_valid[expected_foot])
         )
@@ -1028,15 +1057,13 @@ class MujocoStairsVecEnv(VecEnv):
         )
         inactive["wrong_foot_swing"] = float(
             behavior_active
+            and scheduled_expected
             and bool(np.any(physical_airborne))
             and not expected_airborne
         )
         active = (
             behavior_active
-            and (
-                scheduled_expected
-                or bool(physical_swing[expected_foot])
-            )
+            and scheduled_expected
             and expected_airborne
             and bool(tracker.opposite_valid[expected_foot])
         )
@@ -1927,6 +1954,8 @@ class MujocoStairsVecEnv(VecEnv):
                 name: int(current_counts[name]) - previous
                 for name, previous in previous_counts.items()
             }
+            if event_delta["advance"] > 0:
+                self._synchronize_phase_after_advance(env_id)
             reward, _, terrain_height, progress_velocity = (
                 self._reward_one(
                     env_id,
@@ -2036,17 +2065,17 @@ class MujocoStairsVecEnv(VecEnv):
             gait_gate_passed = self._curriculum_gait_gate_passed(
                 env_id, self.episode_levels[env_id]
             )
-            qualified_completion = (
-                curriculum_completed[env_id]
-                and (not gait_gate_active or gait_gate_passed)
-            )
             unnatural_completion = (
                 curriculum_completed[env_id]
                 and gait_gate_active
                 and not gait_gate_passed
             )
             terminal_terms = {
-                "completion": float(qualified_completion),
+                # Reaching the physical goal must always beat deliberate
+                # falling.  The old qualified-only reward made an unnatural
+                # completion (-35) worse than a fall (-25), so PPO learned to
+                # stop or fall instead of converting its gait.
+                "completion": float(curriculum_completed[env_id]),
                 "unnatural_completion": float(unnatural_completion),
                 "natural_completion": float(natural_success[env_id]),
                 "fall": float(fell[env_id]),
@@ -2169,7 +2198,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 7,
+            "version": 8,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -2182,7 +2211,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (4, 5, 6, 7):
+        if int(state.get("version", -1)) not in (4, 5, 6, 7, 8):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64

@@ -192,7 +192,9 @@ def train_configuration(args, env):
             "gamma": 0.997,
             "lam": 0.95,
             "desired_kl": 0.008,
-            "schedule": "adaptive",
+            "schedule": (
+                "fixed" if args.fixed_learning_rate else "adaptive"
+            ),
             "normalize_advantage_per_mini_batch": False,
             "symmetry_cfg": {
                 "_env": env,
@@ -583,6 +585,77 @@ def update_progress_best(
     return True
 
 
+def deterministic_regression(progress_best, height_index, summary):
+    """Detect sustained loss of a previously validated walking policy."""
+    baseline = progress_best.get("summary")
+    if (
+        baseline is None
+        or int(height_index) != int(progress_best["height_index"])
+    ):
+        return False
+    return (
+        float(summary["completion_rate"])
+        <= float(baseline["completion_rate"]) - 0.20
+        and float(summary["fall_rate"])
+        >= float(baseline["fall_rate"]) + 0.20
+    )
+
+
+def evaluate_initial_policy(
+    runner,
+    env,
+    args,
+    log_dir,
+    progress_best,
+):
+    """Save and validate the untouched warm-start Actor before PPO updates."""
+    if args.skip_eval or int(runner.current_learning_iteration) != 0:
+        return
+    checkpoint = log_dir / "model_0.pt"
+    runner.save(str(checkpoint))
+    output = log_dir / "baseline_00000.csv"
+    summary = run_mujoco_evaluation(
+        args,
+        checkpoint,
+        output,
+        args.selection_episodes,
+        promotion_evaluation_seed(args, env),
+        step_height=env.physical_step_height,
+    )
+    if summary is None:
+        return
+    score = selection_score(summary)
+    readiness_score = physical_promotion_readiness(env, summary)
+    update_progress_best(
+        log_dir,
+        checkpoint,
+        0,
+        int(env.physical_height_index),
+        summary,
+        score,
+        readiness_score,
+        progress_best,
+    )
+    print(
+        "NATIVE_MUJOCO_BASELINE score={:.4f} readiness={:.1f} "
+        "height={:.2f}m completion={:.1%} fall={:.1%} "
+        "speederr={:.3f}m/s alternate={:.1%} join={:.1%}".format(
+            score,
+            readiness_score,
+            summary["step_height_m"],
+            summary["completion_rate"],
+            summary["fall_rate"],
+            abs(
+                summary["mean_forward_speed_m_s"]
+                - summary["command_speed_m_s"]
+            ),
+            summary["mean_alternating_tread_rate"],
+            summary["mean_same_tread_join_rate"],
+        ),
+        flush=True,
+    )
+
+
 def robust_checkpoint_tournament(
     args, log_dir, best, curriculum_cfg
 ):
@@ -695,6 +768,7 @@ def train_stage(
 ):
     set_actor_trunk_trainable(runner.alg.policy, trunk_trainable)
     env.set_adaptation_stage(not trunk_trainable)
+    regression_streak = 0
     while runner.current_learning_iteration < target_iteration:
         current = int(runner.current_learning_iteration)
         chunk = target_iteration - current
@@ -770,6 +844,14 @@ def train_stage(
             env.physical_curriculum_complete
             or env._physical_gate_passed(summary, promotion_gate)
         )
+        regressed = deterministic_regression(
+            progress_best,
+            evaluated_height_index,
+            summary,
+        )
+        regression_streak = (
+            regression_streak + 1 if regressed else 0
+        )
         promoted = env.update_physical_curriculum(summary)
         reported_gate_streak = (
             int(promotion_gate["consecutive_evaluations"])
@@ -780,16 +862,17 @@ def train_stage(
         # updated gate streak/height in the same numeric checkpoint so resume
         # cannot silently fall back one physical stage.
         runner.save(str(checkpoint))
-        update_progress_best(
-            log_dir,
-            checkpoint,
-            current,
-            evaluated_height_index,
-            summary,
-            score,
-            readiness_score,
-            progress_best,
-        )
+        if not regressed:
+            update_progress_best(
+                log_dir,
+                checkpoint,
+                current,
+                evaluated_height_index,
+                summary,
+                score,
+                readiness_score,
+                progress_best,
+            )
         print(
             "NATIVE_MUJOCO_HEIGHT_GATE iter={} passed={} streak={}/{} "
             "height={:.2f}m alternate={:.1%} join={:.1%} "
@@ -809,6 +892,26 @@ def train_stage(
             ),
             flush=True,
         )
+        if regressed:
+            print(
+                "NATIVE_MUJOCO_REGRESSION iter={} streak={}/2 "
+                "completion={:.1%} fall={:.1%}".format(
+                    current,
+                    regression_streak,
+                    summary["completion_rate"],
+                    summary["fall_rate"],
+                ),
+                flush=True,
+            )
+        if regression_streak >= 2:
+            print(
+                "NATIVE_MUJOCO_EARLY_STOP iter={} reason=deterministic_"
+                "regression restore=model_progress_best.pt".format(
+                    current
+                ),
+                flush=True,
+            )
+            return True
         if promoted:
             print(
                 "NATIVE_MUJOCO_CURRICULUM_RESET iter={} height={:.2f}m".format(
@@ -854,6 +957,7 @@ def train_stage(
                 ),
                 flush=True,
             )
+    return False
 
 
 def main(args):
@@ -950,8 +1054,9 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 7,
+        "curriculum_version": 8,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
+        "fixed_learning_rate": bool(args.fixed_learning_rate),
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
         "source_checkpoint": (
@@ -999,7 +1104,16 @@ def main(args):
                 flush=True,
             )
 
+    evaluate_initial_policy(
+        runner,
+        env,
+        args,
+        log_dir,
+        progress_best,
+    )
     signal.signal(signal.SIGTERM, request_safe_stop)
+    stopped_early = False
+    curriculum_finished = False
     try:
         current = int(runner.current_learning_iteration)
         target = int(args.max_iterations)
@@ -1013,7 +1127,7 @@ def main(args):
             target, int(args.freeze_actor_iterations)
         )
         if current < adaptation_target:
-            train_stage(
+            stopped_early = train_stage(
                 runner,
                 env,
                 args,
@@ -1024,8 +1138,8 @@ def main(args):
                 progress_best,
             )
             current = int(runner.current_learning_iteration)
-        if current < target:
-            train_stage(
+        if not stopped_early and current < target:
+            stopped_early = train_stage(
                 runner,
                 env,
                 args,
@@ -1035,6 +1149,9 @@ def main(args):
                 best,
                 progress_best,
             )
+        curriculum_finished = bool(
+            env.physical_curriculum_complete
+        )
     except KeyboardInterrupt:
         interrupted_path = log_dir / "model_interrupted.pt"
         runner.save(str(interrupted_path))
@@ -1046,6 +1163,13 @@ def main(args):
     finally:
         env.close()
 
+    if stopped_early:
+        print(
+            "Native MuJoCo training stopped before the target iteration "
+            "to preserve the deterministic progress-best policy.",
+            flush=True,
+        )
+
     final_checkpoint = (
         log_dir
         / "model_{}.pt".format(runner.current_learning_iteration)
@@ -1053,9 +1177,6 @@ def main(args):
     if not final_checkpoint.is_file():
         runner.save(str(final_checkpoint))
     curriculum_cfg = config["mujoco_training"]["curriculum"]
-    robust_checkpoint_tournament(
-        args, log_dir, best, curriculum_cfg
-    )
     best_checkpoint = log_dir / "model_best.pt"
     progress_checkpoint = log_dir / "model_progress_best.pt"
     if args.skip_eval:
@@ -1066,6 +1187,53 @@ def main(args):
         )
         return 0
 
+    candidate = (
+        best_checkpoint
+        if best_checkpoint.is_file()
+        else (
+            progress_checkpoint
+            if progress_checkpoint.is_file()
+            else final_checkpoint
+        )
+    )
+    if not curriculum_finished:
+        stage_checkpoint = log_dir / "model_stage_best.pt"
+        if candidate != stage_checkpoint:
+            shutil.copy2(candidate, stage_checkpoint)
+        stage_json = log_dir / "model_progress_best.json"
+        if stage_json.is_file():
+            shutil.copy2(
+                stage_json,
+                log_dir / "model_stage_best.json",
+            )
+        export_checkpoint_actor(
+            stage_checkpoint,
+            log_dir / "policy_stage_best.pt",
+        )
+        print(
+            "NATIVE_MUJOCO_STAGE_BEST iter={} height={:.2f}m "
+            "checkpoint={}".format(
+                progress_best["iteration"],
+                progress_best["height_m"],
+                stage_checkpoint,
+            ),
+            flush=True,
+        )
+        print(
+            "NATIVE_MUJOCO_PROGRESS_CHECKPOINT="
+            + str(stage_checkpoint),
+            flush=True,
+        )
+        print(
+            "NATIVE_MUJOCO_CHECKPOINT=NONE "
+            "(10 cm curriculum not reached)",
+            flush=True,
+        )
+        return 0
+
+    robust_checkpoint_tournament(
+        args, log_dir, best, curriculum_cfg
+    )
     candidate = (
         best_checkpoint
         if best_checkpoint.is_file()
@@ -1151,6 +1319,7 @@ if __name__ == "__main__":
         "--freeze_actor_iterations", type=int, default=0
     )
     parser.add_argument("--learning_rate", type=float, default=5.0e-5)
+    parser.add_argument("--fixed_learning_rate", action="store_true")
     parser.add_argument("--action_noise_std", type=float, default=0.20)
     parser.add_argument(
         "--resume_action_noise_std", type=float, default=None
@@ -1165,7 +1334,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v7_s42"
+        "--run_name", default="mujoco_curriculum_v8_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(
@@ -1187,6 +1356,8 @@ if __name__ == "__main__":
         raise ValueError("--max_iterations must be non-negative")
     if arguments.rollout_steps < 1:
         raise ValueError("--rollout_steps must be positive")
+    if arguments.learning_rate <= 0.0:
+        raise ValueError("--learning_rate must be positive")
     if arguments.action_noise_std <= 0.0:
         raise ValueError("--action_noise_std must be positive")
     if (

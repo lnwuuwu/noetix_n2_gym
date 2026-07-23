@@ -70,6 +70,11 @@ gait_phase:
   frequency_gain: 1.6666667
   reference_speed: 0.12
   phase_offset: 0.0
+  # A tread advance is an observable hybrid event.  Re-anchor the clock at
+  # touchdown so the next half-cycle always schedules the opposite foot.
+  # This removes the hidden conflict between a free-running clock and the
+  # contact-history-based stair target.
+  contact_phase_reset: true
 
 # Route-relative state is available from MuJoCo base pose. On hardware this
 # requires a heading/localization estimate relative to the stair centerline.
@@ -184,7 +189,7 @@ mujoco_training:
   # The episode goal moves from straight flat approach to one, two, ...,
   # six completed risers at each physical-height stage.
   curriculum:
-    # v7 also raises the *physical* riser height. v3 started directly at
+    # v8 also raises the *physical* riser height. v3 started directly at
     # 10 cm, so noisy training rollouts occasionally advanced the logical
     # target while the deterministic Actor still fell at the first riser.
     # Full-flight deterministic evaluations gate physical height.  The gait
@@ -265,7 +270,7 @@ mujoco_training:
     base_behind_support: -2.0
     foot_pitch: -0.50
     phase_contact: 1.50
-    phase_contact_mismatch: -3.0
+    phase_contact_mismatch: -2.0
     sagittal_foot_phase: 0.75
     sagittal_foot_phase_error: -1.50
     single_support: 0.50
@@ -275,13 +280,13 @@ mujoco_training:
     swing_trajectory_error: -5.0
     next_tread_target: 2.0
     foothold_lateral: 1.0
-    expected_swing_liftoff: 2.0
-    expected_swing_delay: -3.0
-    wrong_foot_swing: -6.0
+    expected_swing_liftoff: 1.0
+    expected_swing_delay: -1.0
+    wrong_foot_swing: -2.0
     arm_swing: 0.20
     no_progress: -0.50
     double_flight: -4.0
-    same_tread_support: -4.0
+    same_tread_support: -3.0
     foot_riser_collision: -4.0
     lower_leg_collision: -6.0
     hip_yaw: -0.20
@@ -291,15 +296,18 @@ mujoco_training:
     energy: -0.02
     angular_velocity_xy: -0.08
     vertical_velocity: -0.15
-    tread_advance: 2.0
-    alternating_tread: 20.0
-    repeated_lead: -16.0
-    same_tread_join: -14.0
+    tread_advance: 4.0
+    alternating_tread: 16.0
+    repeated_lead: -10.0
+    same_tread_join: -10.0
     skipped_tread: -5.0
     completion: 30.0
-    unnatural_completion: -35.0
+    # Physical completion must remain preferable to falling while the policy
+    # is converting from step-to gait.  Natural gait receives the larger
+    # additional bonus below.
+    unnatural_completion: -15.0
     natural_completion: 100.0
-    fall: -25.0
+    fall: -30.0
     path_failure: -10.0
     stall: -8.0
 

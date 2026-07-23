@@ -776,6 +776,21 @@ def heading_stabilizer_offset(yaw, yaw_rate, config):
     return float(np.clip(offset, -limit, limit))
 
 
+def contact_synchronized_phase_offset(
+    elapsed,
+    gait_frequency,
+    advanced_foot,
+):
+    """Return the clock offset at a left/right tread touchdown."""
+    foot = int(advanced_foot)
+    if foot not in (0, 1):
+        raise ValueError("advanced_foot must be 0 (left) or 1 (right)")
+    touchdown_phase = 0.0 if foot == 0 else 0.5
+    return (
+        touchdown_phase - float(elapsed) * float(gait_frequency)
+    ) % 1.0
+
+
 def run_episode(config, model, policy, seed, step_callback=None):
     validation = config["validation"]
     stair_cfg = config["stairs"]
@@ -840,6 +855,24 @@ def run_episode(config, model, policy, seed, step_callback=None):
     arm_swing_match_sum = 0.0
     control_steps = 0
     elapsed = 0.0
+    phase_cfg = config.get("gait_phase", {})
+    gait_frequency = float(
+        phase_cfg.get("frequency", 0.20)
+    ) + float(
+        phase_cfg.get("frequency_gain", 0.0)
+    ) * max(
+        float(command[0])
+        - float(phase_cfg.get("reference_speed", 0.0)),
+        0.0,
+    )
+    gait_frequency = max(gait_frequency, 1.0e-6)
+    configured_phase_offset = float(
+        phase_cfg.get("phase_offset", 0.0)
+    )
+    runtime_phase_offset = configured_phase_offset
+    contact_phase_reset = bool(
+        phase_cfg.get("contact_phase_reset", False)
+    )
 
     lowlevel_steps = int(math.ceil(duration / simulation_dt))
     for lowlevel_step in range(lowlevel_steps):
@@ -864,7 +897,11 @@ def run_episode(config, model, policy, seed, step_callback=None):
                 dq,
                 action,
                 command,
-                elapsed,
+                elapsed
+                + (
+                    runtime_phase_offset - configured_phase_offset
+                )
+                / gait_frequency,
             )
             history.append(obs)
             model_input = np.concatenate(list(history), axis=1)
@@ -894,21 +931,24 @@ def run_episode(config, model, policy, seed, step_callback=None):
             foot_site_z = np.asarray(
                 [data.site_xpos[site_id, 2] for site_id in layout.foot_sites]
             )
+            previous_advance_count = tracker.advance_count
             tracker.update(raw_tread, foot_site_z, riser, lower_leg)
+            if (
+                contact_phase_reset
+                and tracker.advance_count > previous_advance_count
+                and tracker.last_advanced_foot >= 0
+            ):
+                runtime_phase_offset = (
+                    contact_synchronized_phase_offset(
+                        elapsed,
+                        gait_frequency,
+                        tracker.last_advanced_foot,
+                    )
+                )
             control_steps += 1
             speed_sum += float(velocity[0])
-            phase_cfg = config.get("gait_phase", {})
-            gait_frequency = float(
-                phase_cfg.get("frequency", 0.20)
-            ) + float(
-                phase_cfg.get("frequency_gain", 0.0)
-            ) * max(
-                float(command[0])
-                - float(phase_cfg.get("reference_speed", 0.0)),
-                0.0,
-            )
             phase = (
-                float(phase_cfg.get("phase_offset", 0.0))
+                runtime_phase_offset
                 + elapsed * gait_frequency
             ) % 1.0
             phase_sine = math.sin(2.0 * math.pi * phase)

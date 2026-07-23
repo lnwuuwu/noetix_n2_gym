@@ -9,7 +9,7 @@ TRAIN_SEED="${N2_SEED:-42}"
 INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"
 NO_WARM_START="${N2_NO_WARM_START:-0}"
 MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"
-RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.18}"
+RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.10}"
 RESUME_SYMMETRY_LOSS_COEFF="${N2_RESUME_SYMMETRY_LOSS_COEFF:-0.50}"
 if [[ ! "${TRAIN_SEED}" =~ ^[0-9]+$ ]]; then
     echo "N2_SEED must be a non-negative integer." >&2
@@ -30,6 +30,7 @@ FREEZE_ACTOR_ITERATIONS=100
 LEARNING_RATE=2e-5
 ACTION_NOISE_STD=0.15
 SYMMETRY_LOSS_COEFF=0.75
+LEARNING_RATE_ARGS=()
 if [[ "${NO_WARM_START}" == "1" ]]; then
     WARM_START_ARGS=("--no_warm_start")
     RUN_VARIANT="_scratch"
@@ -59,7 +60,7 @@ case "${MODE}" in
             --smoke \
             "${WARM_START_ARGS[@]}" \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v7_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v8_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}"
         ;;
     pilot|long|recover|retune)
@@ -71,10 +72,10 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
             TARGET_ITERATIONS=800
-            RUN_NAME="mujoco_curriculum_v7_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v8_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
         elif [[ "${MODE}" == "long" ]]; then
             TARGET_ITERATIONS=3000
-            RUN_NAME="mujoco_curriculum_v7_long${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v8_long${RUN_VARIANT}_s${TRAIN_SEED}"
         else
             if [[ "${NO_WARM_START}" == "1" ]]; then
                 echo "recover reuses an Actor; set N2_NO_WARM_START=0." >&2
@@ -85,22 +86,23 @@ case "${MODE}" in
                   -z "${RECOVERY_CHECKPOINT}" || \
                   ! -f "${RECOVERY_CHECKPOINT}" ]]; then
                 echo "recover requires an explicit known-good checkpoint:" >&2
-                echo "N2_INIT_CHECKPOINT=/absolute/model_rejected.pt $0 recover" >&2
+                echo "N2_INIT_CHECKPOINT=/absolute/model_*.pt $0 recover" >&2
                 exit 2
             fi
             WARM_START_ARGS=("--init_checkpoint=${RECOVERY_CHECKPOINT}")
-            TARGET_ITERATIONS=600
-            RUN_NAME="mujoco_curriculum_v7_recover_s${TRAIN_SEED}"
-            FREEZE_ACTOR_ITERATIONS=0
-            LEARNING_RATE=3e-5
-            ACTION_NOISE_STD=0.18
+            TARGET_ITERATIONS=300
+            RUN_NAME="mujoco_curriculum_v8_recover_s${TRAIN_SEED}"
+            FREEZE_ACTOR_ITERATIONS=100
+            LEARNING_RATE=1e-5
+            ACTION_NOISE_STD=0.10
             SYMMETRY_LOSS_COEFF=0.50
+            LEARNING_RATE_ARGS=("--fixed_learning_rate")
         fi
         if [[ -n "${MAX_ITERATIONS_OVERRIDE}" ]]; then
             TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE}"
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v7_s${TRAIN_SEED}.pid"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v8_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             "${WARM_START_ARGS[@]}" \
             --num_envs=32 \
@@ -115,6 +117,7 @@ case "${MODE}" in
             --tournament_candidates=3 \
             --tournament_episodes=32 \
             --learning_rate="${LEARNING_RATE}" \
+            "${LEARNING_RATE_ARGS[@]}" \
             --action_noise_std="${ACTION_NOISE_STD}" \
             --symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
@@ -137,7 +140,7 @@ case "${MODE}" in
         fi
         LATEST_MODEL="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
             -mindepth 2 -maxdepth 2 -type f \
-            -path "*mujoco_curriculum_v[4567]_*_s${TRAIN_SEED}*" \
+            -path "*mujoco_curriculum_v[45678]_*_s${TRAIN_SEED}*" \
             ! -path '*smoke*' \
             \( -name 'model_[0-9]*.pt' -o -name 'model_interrupted.pt' \) \
             -printf '%T@ %p\n' 2>/dev/null \
@@ -148,8 +151,8 @@ case "${MODE}" in
         fi
         RUN_DIR="$(dirname "${LATEST_MODEL}")"
         STAMP="$(date +%m%d_%H-%M-%S)"
-        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v7_resume_s${TRAIN_SEED}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v7_s${TRAIN_SEED}.pid"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v8_resume_s${TRAIN_SEED}_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v8_s${TRAIN_SEED}.pid"
         TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
@@ -166,12 +169,13 @@ case "${MODE}" in
             --tournament_candidates=3 \
             --tournament_episodes=32 \
             --learning_rate="${LEARNING_RATE}" \
+            --fixed_learning_rate \
             --action_noise_std="${ACTION_NOISE_STD}" \
             --resume_action_noise_std="${RESUME_ACTION_NOISE_STD}" \
             --symmetry_loss_coeff="${RESUME_SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v7_resume_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v8_resume_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}" \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
@@ -184,7 +188,7 @@ case "${MODE}" in
     status)
         pgrep -af '[t]rain_stairs_mujoco.py' || true
         LATEST_LOG="$(find "${LOG_ROOT}" -maxdepth 1 -type f \
-            -name "mujoco_curriculum_v[4567]_*s${TRAIN_SEED}*.log" \
+            -name "mujoco_curriculum_v[45678]_*s${TRAIN_SEED}*.log" \
             -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
         if [[ -n "${LATEST_LOG}" ]]; then
@@ -219,14 +223,25 @@ case "${MODE}" in
     view)
         LATEST_BEST="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
             -mindepth 2 -maxdepth 2 -type f \
-            -path "*mujoco_curriculum_v[4567]_*_s${TRAIN_SEED}*" \
+            -path "*mujoco_curriculum_v[45678]_*_s${TRAIN_SEED}*" \
             ! -path '*smoke*' \
             -name 'model_best.pt' -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
         if [[ -z "${LATEST_BEST}" ]]; then
-            echo "No accepted v4/v5/v6/v7 model_best.pt exists yet." >&2
-            echo "Inspect model_rejected.pt or keep training with resume." >&2
-            exit 2
+            LATEST_BEST="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
+                -mindepth 2 -maxdepth 2 -type f \
+                -path "*mujoco_curriculum_v[45678]_*_s${TRAIN_SEED}*" \
+                ! -path '*smoke*' \
+                \( -name 'model_stage_best.pt' -o \
+                   -name 'model_progress_best.pt' \) \
+                -printf '%T@ %p\n' 2>/dev/null \
+                | sort -nr | head -n 1 | cut -d' ' -f2-)"
+            if [[ -z "${LATEST_BEST}" ]]; then
+                echo "No accepted or progress-best v4-v8 model exists yet." >&2
+                exit 2
+            fi
+            echo "Viewing progress-best policy (not yet accepted at 10 cm):"
+            echo "${LATEST_BEST}"
         fi
         export MUJOCO_GL="${MUJOCO_GL:-egl}"
         exec "${PYTHON_BIN}" -u sim2sim/stream_stairs_mujoco.py \
