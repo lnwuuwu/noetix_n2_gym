@@ -1636,7 +1636,24 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertEqual(curriculum["target_steps"], list(range(7)))
         self.assertEqual(len(curriculum["target_x_m"]), 7)
         self.assertEqual(curriculum["target_steps"][-1], 6)
-        self.assertEqual(curriculum["successes_before_promotion"], 2)
+        self.assertEqual(
+            curriculum["physical_step_heights_m"],
+            [0.02, 0.04, 0.06, 0.08, 0.10],
+        )
+        self.assertEqual(curriculum["successes_before_promotion"], 6)
+        self.assertEqual(
+            curriculum["physical_promotion"]["consecutive_evaluations"],
+            2,
+        )
+        self.assertGreater(
+            curriculum["checkpoint_gate"]["min_completion_rate"], 0.0
+        )
+        self.assertGreater(
+            curriculum["checkpoint_gate"]["min_success_rate"], 0.0
+        )
+        self.assertLess(
+            curriculum["checkpoint_gate"]["max_fall_rate"], 1.0
+        )
         self.assertGreater(curriculum["path_violation_dwell_s"], 0.0)
         self.assertGreater(
             curriculum["natural_min_alternating_tread_rate"],
@@ -1685,14 +1702,19 @@ class SourceCompatibilityTests(unittest.TestCase):
         env_source = (
             ROOT / "sim2sim" / "mujoco_stairs_env.py"
         ).read_text()
-        self.assertIn("self.num_privileged_obs = self.num_obs + 2", env_source)
+        self.assertIn(
+            "self.num_privileged_obs = self.num_obs + 3", env_source
+        )
         self.assertIn("def mirror_observations", env_source)
         self.assertIn("def mirror_actions", env_source)
         self.assertIn("scaled *= self.dt", env_source)
         self.assertIn("self.path_violation_steps", env_source)
         self.assertIn("def _advance_curriculum", env_source)
+        self.assertIn("def _apply_physical_step_height", env_source)
+        self.assertIn("def update_physical_curriculum", env_source)
+        self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 3', env_source)
+        self.assertIn('"version": 4', env_source)
         self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
 
     def test_native_mujoco_trainer_has_curriculum_and_robust_selection(self):
@@ -1703,11 +1725,15 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("freeze_actor_iterations", source)
         self.assertIn("critic and Adam reset", source)
         self.assertIn("selection_score", source)
+        self.assertIn("checkpoint_gate_passed", source)
+        self.assertIn("promotion_evaluation_seed", source)
         self.assertIn("robust_checkpoint_tournament", source)
         self.assertIn("NATIVE_MUJOCO_CURRICULUM", source)
+        self.assertIn("NATIVE_MUJOCO_BEST_REJECT", source)
         self.assertIn("NATIVE_MUJOCO_TOURNAMENT", source)
         self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
-        self.assertIn("args.seed + 20000", source)
+        self.assertIn("NATIVE_MUJOCO_CHECKPOINT=NONE", source)
+        self.assertIn("int(args.seed) + 20000", source)
         self.assertIn("args.seed + 30000", source)
         self.assertIn('"gamma": 0.997', source)
         self.assertIn('"symmetry_cfg"', source)
@@ -1718,18 +1744,21 @@ class SourceCompatibilityTests(unittest.TestCase):
         launcher = (
             ROOT / "sim2sim" / "run_mujoco_native_train.sh"
         ).read_text()
-        self.assertIn("TARGET_ITERATIONS=400", launcher)
-        self.assertIn("TARGET_ITERATIONS=1600", launcher)
-        self.assertIn("--max_iterations=1600", launcher)
-        self.assertIn("--selection_interval=100", launcher)
+        self.assertIn("TARGET_ITERATIONS=1000", launcher)
+        self.assertIn("TARGET_ITERATIONS=3000", launcher)
+        self.assertIn("--max_iterations=3000", launcher)
+        self.assertIn("--selection_interval=50", launcher)
         self.assertIn("--selection_episodes=16", launcher)
         self.assertIn("--tournament_episodes=32", launcher)
-        self.assertIn("--symmetry_loss_coeff=0.50", launcher)
+        self.assertIn("--symmetry_loss_coeff=0.75", launcher)
         self.assertIn("pilot|long", launcher)
-        self.assertIn("--init_checkpoint=auto_v2", launcher)
+        self.assertIn("--init_checkpoint=auto", launcher)
+        self.assertNotIn("--init_checkpoint=auto_v2", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)
+        self.assertIn('checkpoint_path="${LATEST_BEST}"', launcher)
+        self.assertIn("No accepted v4 model_best.pt exists yet.", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
-        self.assertIn("-path '*mujoco_curriculum_v3_*'", launcher)
+        self.assertIn("-path '*mujoco_curriculum_v4_*'", launcher)
         self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
 

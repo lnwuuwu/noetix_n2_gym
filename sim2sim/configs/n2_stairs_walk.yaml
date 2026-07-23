@@ -123,9 +123,10 @@ validation:
   success_max_same_tread_join_rate: 0.20
   success_max_double_flight_fraction: 0.08
 
-# Native MuJoCo PPO fine-tuning. This deliberately stays on the requested
-# fixed 10 cm risers while a goal curriculum advances from the flat approach
-# through one, two, ..., six completed steps.
+# Native MuJoCo PPO fine-tuning. A physical-height curriculum first adapts on
+# 2 cm risers and raises them to the requested 10 cm only after deterministic
+# full-flight validation. Within each height it also advances the episode goal
+# from the flat approach through one, two, ..., six completed steps.
 mujoco_training:
   episode_duration: 20.0
   command_speed_range: [0.16, 0.20]
@@ -155,13 +156,35 @@ mujoco_training:
   base_support_backward_allowance_m: 0.08
   base_support_backward_scale_m: 0.10
   foot_pitch_normalizer_rad: 0.25
-  # All stages retain the physical 10 cm risers. Only the episode goal moves
-  # from straight flat approach to one, two, ..., six completed risers.
+  # The episode goal moves from straight flat approach to one, two, ...,
+  # six completed risers at each physical-height stage.
   curriculum:
+    # v4 also raises the *physical* riser height. v3 started directly at
+    # 10 cm, so noisy training rollouts occasionally advanced the logical
+    # target while the deterministic Actor still fell at the first riser.
+    # Every height promotion now requires two independent deterministic
+    # full-flight evaluations; logical tread mastery is reset afterwards.
+    physical_step_heights_m: [0.02, 0.04, 0.06, 0.08, 0.10]
+    physical_promotion:
+      consecutive_evaluations: 2
+      min_completion_rate: 0.25
+      max_fall_rate: 0.50
+      max_path_failure_rate: 0.50
+      min_climb_fraction: 0.80
+    checkpoint_gate:
+      min_completion_rate: 0.50
+      min_success_rate: 0.10
+      max_fall_rate: 0.20
+      max_path_failure_rate: 0.35
+      min_climb_fraction: 0.85
+      min_alternating_tread_rate: 0.55
+      max_same_tread_join_rate: 0.35
+      max_lateral_deviation_m: 0.20
+      max_yaw_deviation_rad: 0.30
     target_steps: [0, 1, 2, 3, 4, 5, 6]
     target_x_m: [0.45, 0.78, 1.08, 1.38, 1.68, 1.98, 2.60]
-    successes_before_promotion: 2
-    replay_probability: 0.15
+    successes_before_promotion: 6
+    replay_probability: 0.25
     intermediate_dwell_s: 0.08
     height_tolerance_m: 0.06
     initial_completion_lateral_tolerance_m: 0.35

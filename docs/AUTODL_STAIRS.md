@@ -522,24 +522,22 @@ python sim2sim/compare_isaac_checkpoints_mujoco.py
 ```
 
 四个 Isaac checkpoint 若都在到达楼梯前出现相同的 MuJoCo 偏航/路径失败，不再继续
-挑 checkpoint 或调外环。改用原生 MuJoCo PPO v3：只迁移 410 维 Actor，critic、
-Adam 和探索噪声重新初始化。物理环境始终是 10 cm、6 阶楼梯，但训练目标从平地接近
-依次推进到第 1、2、…、6 阶。Actor 仍使用可部署的 410 维观测，critic 额外看到课程
-阶段和剩余距离；左右镜像损失用于抑制固定右脚领步。路径偏离必须持续 0.5 秒才终止，
-避免一次瞬时偏航把整条轨迹截断。
+挑 checkpoint 或调外环。改用原生 MuJoCo PPO v4：只迁移 Isaac 中最自然的 410 维
+Actor，critic、Adam 和探索噪声重新初始化，不继承失败的 v2/v3 native Actor。
 
-v2 pilot 暴露出训练/验收门槛不一致：level 2 训练仍允许约 0.87 rad 偏航，而验证在
-0.40 rad 的第一个采样点立即结束，所以日志总在约 0.7 m 显示 `path=100%`。v3 将
-初始/最终课程走廊收紧到 0.60/0.40 rad，完成门槛收紧到 0.30/0.20 rad，提高航向损失，
-并把有效前进奖励用更尖锐的航向门控。验证也采用与训练相同的 0.5 秒持续越界判定，
-但 natural success 仍要求整个回合最大偏航不超过严格的 0.40 rad。
+v3 的训练 rollout 曾把逻辑课程推进到 level 2，但确定性评估仍在 10 cm 第一阶附近
+摔倒，说明“课程 level 上升”不能证明策略真的会爬。v4 因此同时使用两层课程：
 
-v3 优先只复用现有 v2 pilot 的最佳 Actor（若不存在则回退到 Isaac `model_9000.pt`），
-critic、Adam 和课程等级全部重新初始化，避免把 v2 的宽走廊课程状态带进来。只有
-`resume` 才会加载 v3 自己的完整 checkpoint。
+- 物理台阶真实按 2、4、6、8、10 cm 改变几何体；
+- 每个物理高度内部，目标再从平地接近推进到第 1、2、…、6 阶；
+- 物理高度只在两组互不重叠的确定性评估都通过后提升；
+- 提高物理高度时会清空逻辑台阶熟练度，不能沿用低台阶的虚高 level；
+- 最终 10 cm 验收若未达到 completion、natural success、摔倒率、路径、交替踏步、
+  横向漂移和偏航门槛，则只保存 `model_rejected.pt`，不会伪造 `model_best.pt`。
 
-周期选模使用固定种子，训练结束还会把排名靠前的三个 checkpoint 用更大的同一组种子
-复测后才写入 `model_best.pt`。这样不会再把“4 回合里偶然成功一次”误当成最佳模型。
+Actor 仍使用可部署的 410 维观测；critic 额外看到目标阶段、剩余距离和当前物理高度。
+前 100 iteration 只适配 Actor 输出头，之后再放开完整网络；左右镜像损失用于抑制固定
+右脚领步。路径偏离必须持续 0.5 秒才终止，避免单个瞬时偏航截断整条轨迹。
 
 拉取代码后先运行真实物理冒烟：
 
@@ -547,7 +545,7 @@ critic、Adam 和课程等级全部重新初始化，避免把 v2 的宽走廊�
 sim2sim/run_mujoco_native_train.sh smoke
 ```
 
-冒烟通过后先启动 400 iteration 的 v3 门槛训练：
+冒烟通过后启动 1000 iteration 的 v4 pilot：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh pilot
@@ -562,23 +560,24 @@ sim2sim/run_mujoco_native_train.sh status
 门槛训练结束后检查：
 
 ```bash
-LOG=$(ls -1t /root/autodl-tmp/n2_train_logs/mujoco_curriculum_v3_pilot_s42_*.log | head -n 1)
-grep -E 'NATIVE_MUJOCO_CURRICULUM|NATIVE_MUJOCO_SELECTION|NATIVE_MUJOCO_TOURNAMENT|NATIVE_MUJOCO_ACCEPTANCE' "$LOG"
+LOG=$(ls -1t /root/autodl-tmp/n2_train_logs/mujoco_curriculum_v4_pilot_s42_*.log | head -n 1)
+grep -E 'NATIVE_MUJOCO_HEIGHT_PROMOTION|NATIVE_MUJOCO_CURRICULUM|NATIVE_MUJOCO_SELECTION|NATIVE_MUJOCO_ACCEPTANCE|NATIVE_MUJOCO_(ACCEPTED|REJECTED|CHECKPOINT)' "$LOG"
 ```
 
-`NATIVE_MUJOCO_CURRICULUM` 中 `max` 至少到 2、`mean` 至少约为 1，并且 selection
-不应再是旧版固定的 `path=100% / distance≈0.70m`，才值得续训。v3 使用持续越界判定，
-所以失败轨迹会在 0.40 rad 以外再运行 0.5 秒，不能把 v3 的 `max_yaw` 与 v2 的
-0.41 rad 截断值直接比较。全楼梯 completion 在这个阶段仍可能为 0；若 `max=0`，
-或仍是 `path=100% / distance≈0.70m`，应停止而不是继续烧算力。门槛通过后，以下命令
-会保留 Actor、critic、Adam、iteration 以及每个环境的课程进度，在同一 run 目录继续
-到总计 1600 iteration：
+重点看 `height=0.02m` 是否出现两次合格 selection，随后是否打印
+`NATIVE_MUJOCO_HEIGHT_PROMOTION 0.02m -> 0.04m`。只有真实确定性爬完当前六阶才会升高。
+最终只有打印 `NATIVE_MUJOCO_ACCEPTED` 和非 `NONE` 的
+`NATIVE_MUJOCO_CHECKPOINT=.../model_best.pt` 才算通过；`model_rejected.pt` 只是保留
+失败结果用于诊断。
+
+pilot 未到 10 cm 但高度仍在稳定推进时，以下命令会保留 Actor、critic、Adam、
+iteration、逻辑课程和物理高度，在同一 run 目录继续到总计 3000 iteration：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh resume
 ```
 
-若明确要跳过门槛直接跑完整 v3，也可以运行 `long`。进程因断线或评估异常退出时仍应
+若明确要跳过 pilot 直接跑完整 v4，也可以运行 `long`。进程因断线或评估异常退出时仍应
 运行 `resume`，不要重新运行 `long`。
 
 若要先判断旧 v2 `model_250.pt` 是否只是被 0.40 rad 路径判据过早截断，可运行一次

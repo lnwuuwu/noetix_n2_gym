@@ -1,4 +1,4 @@
-"""Native MuJoCo PPO fine-tuning for the fixed 10 cm N2 staircase."""
+"""Native MuJoCo PPO with deterministic physical-height stair curriculum."""
 
 import argparse
 import copy
@@ -273,6 +273,7 @@ def run_mujoco_evaluation(
     output,
     episodes,
     seed,
+    step_height=0.10,
 ):
     command = [
         sys.executable,
@@ -284,7 +285,7 @@ def run_mujoco_evaluation(
         "--physics_preset",
         "isaac_aligned",
         "--step_height",
-        "0.10",
+        str(float(step_height)),
         "--stair_start_x",
         "0.60",
         "--command_speed",
@@ -312,6 +313,9 @@ def run_mujoco_evaluation(
 
 def selection_score(summary):
     """Balance physical completion with strict natural-gait quality."""
+    expected_climb = max(
+        float(summary["step_height_m"]) * 6.0, 1.0e-6
+    )
     return (
         20.0 * float(summary["success_rate"])
         + 8.0 * float(summary["completion_rate"])
@@ -326,7 +330,7 @@ def selection_score(summary):
         - 0.5 * float(summary["mean_max_yaw_deviation_rad"])
         + 1.0
         * min(
-            float(summary["mean_climb_height_m"]) / 0.60,
+            float(summary["mean_climb_height_m"]) / expected_climb,
             1.0,
         )
         + 0.5
@@ -334,6 +338,40 @@ def selection_score(summary):
             float(summary["mean_forward_distance_m"]) / 2.60,
             1.0,
         )
+    )
+
+
+def checkpoint_gate_passed(summary, curriculum_cfg):
+    """Require deterministic 10 cm climbing before naming a model best."""
+    heights = curriculum_cfg["physical_step_heights_m"]
+    final_height = float(heights[-1])
+    gate = curriculum_cfg["checkpoint_gate"]
+    expected_climb = final_height * 6.0
+    return (
+        math.isclose(
+            float(summary["step_height_m"]),
+            final_height,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        )
+        and float(summary["completion_rate"])
+        >= float(gate["min_completion_rate"])
+        and float(summary["success_rate"])
+        >= float(gate["min_success_rate"])
+        and float(summary["fall_rate"])
+        <= float(gate["max_fall_rate"])
+        and float(summary["path_failure_rate"])
+        <= float(gate["max_path_failure_rate"])
+        and float(summary["mean_climb_height_m"])
+        >= float(gate["min_climb_fraction"]) * expected_climb
+        and float(summary["mean_alternating_tread_rate"])
+        >= float(gate["min_alternating_tread_rate"])
+        and float(summary["mean_same_tread_join_rate"])
+        <= float(gate["max_same_tread_join_rate"])
+        and float(summary["mean_max_lateral_deviation_m"])
+        <= float(gate["max_lateral_deviation_m"])
+        and float(summary["mean_max_yaw_deviation_rad"])
+        <= float(gate["max_yaw_deviation_rad"])
     )
 
 
@@ -370,7 +408,21 @@ def run_acceptance(args, checkpoint_path, log_dir):
     return summary
 
 
-def robust_checkpoint_tournament(args, log_dir, best):
+def promotion_evaluation_seed(args, env):
+    """Use disjoint deterministic batches for consecutive height gates."""
+    if env.physical_curriculum_complete:
+        return int(args.seed) + 20000
+    return (
+        int(args.seed) + 20000
+        + int(env.physical_height_index) * 1000
+        + int(env.physical_promotion_streak)
+        * int(args.selection_episodes)
+    )
+
+
+def robust_checkpoint_tournament(
+    args, log_dir, best, curriculum_cfg
+):
     """Re-evaluate top periodic candidates on one larger fixed seed set."""
     if args.skip_eval or args.tournament_candidates <= 0:
         return None
@@ -381,7 +433,10 @@ def robust_checkpoint_tournament(args, log_dir, best):
             with report_path.open() as report_file:
                 summary = json.load(report_file)["summary"]
             checkpoint = log_dir / "model_{}.pt".format(iteration)
-            if checkpoint.is_file():
+            if (
+                checkpoint.is_file()
+                and checkpoint_gate_passed(summary, curriculum_cfg)
+            ):
                 candidates.append(
                     (
                         selection_score(summary),
@@ -407,6 +462,18 @@ def robust_checkpoint_tournament(args, log_dir, best):
             args.seed + 30000,
         )
         if summary is None:
+            continue
+        if not checkpoint_gate_passed(summary, curriculum_cfg):
+            print(
+                "NATIVE_MUJOCO_TOURNAMENT_REJECT iter={} "
+                "completion={:.1%} path={:.1%} fall={:.1%}".format(
+                    iteration,
+                    summary["completion_rate"],
+                    summary["path_failure_rate"],
+                    summary["fall_rate"],
+                ),
+                flush=True,
+            )
             continue
         score = selection_score(summary)
         print(
@@ -475,11 +542,17 @@ def train_stage(
             curriculum = env.curriculum_summary()
             print(
                 "NATIVE_MUJOCO_CURRICULUM iter={} mean={:.2f} "
-                "max={} final={:.1%} levels={}".format(
+                "max={} final={:.1%} height={:.2f}m "
+                "height_gate={}/{} levels={}".format(
                     current,
                     curriculum["mean_mastery_level"],
                     curriculum["max_mastery_level"],
                     curriculum["final_level_fraction"],
+                    curriculum["physical_step_height_m"],
+                    curriculum["physical_promotion_streak"],
+                    env.curriculum_cfg["physical_promotion"][
+                        "consecutive_evaluations"
+                    ],
                     curriculum["level_histogram"],
                 ),
                 flush=True,
@@ -494,30 +567,60 @@ def train_stage(
             checkpoint,
             output,
             args.selection_episodes,
-            # A fixed validation set makes checkpoint scores comparable.
-            args.seed + 20000,
+            promotion_evaluation_seed(args, env),
+            step_height=env.physical_step_height,
         )
         if summary is None:
             continue
         score = selection_score(summary)
         print(
             "NATIVE_MUJOCO_SELECTION iter={} score={:.4f} "
-            "completion={:.1%} success={:.1%} path={:.1%} "
+            "height={:.2f}m completion={:.1%} success={:.1%} path={:.1%} "
             "fall={:.1%} yaw={:.3f}rad distance={:.3f}m "
-            "alternate={:.1%} join={:.1%}".format(
+            "climb={:.3f}m alternate={:.1%} join={:.1%}".format(
                 current,
                 score,
+                summary["step_height_m"],
                 summary["completion_rate"],
                 summary["success_rate"],
                 summary["path_failure_rate"],
                 summary["fall_rate"],
                 summary["mean_max_yaw_deviation_rad"],
                 summary["mean_forward_distance_m"],
+                summary["mean_climb_height_m"],
                 summary["mean_alternating_tread_rate"],
                 summary["mean_same_tread_join_rate"],
             ),
             flush=True,
         )
+        promoted = env.update_physical_curriculum(summary)
+        # runner.learn() saved before deterministic evaluation. Persist the
+        # updated gate streak/height in the same numeric checkpoint so resume
+        # cannot silently fall back one physical stage.
+        runner.save(str(checkpoint))
+        if promoted:
+            print(
+                "NATIVE_MUJOCO_CURRICULUM_RESET iter={} height={:.2f}m".format(
+                    current, env.physical_step_height
+                ),
+                flush=True,
+            )
+        if not checkpoint_gate_passed(summary, env.curriculum_cfg):
+            print(
+                "NATIVE_MUJOCO_BEST_REJECT iter={} height={:.2f}m "
+                "completion={:.1%} success={:.1%} path={:.1%} "
+                "fall={:.1%} climb={:.3f}m".format(
+                    current,
+                    summary["step_height_m"],
+                    summary["completion_rate"],
+                    summary["success_rate"],
+                    summary["path_failure_rate"],
+                    summary["fall_rate"],
+                    summary["mean_climb_height_m"],
+                ),
+                flush=True,
+            )
+            continue
         if score > best["score"]:
             best.update(
                 score=score,
@@ -605,13 +708,20 @@ def main(args):
     run_metadata = {
         "engine": "mujoco",
         "config": str(config_path),
-        "step_height_m": 0.10,
+        "physical_step_heights_m": list(
+            map(
+                float,
+                config["mujoco_training"]["curriculum"][
+                    "physical_step_heights_m"
+                ],
+            )
+        ),
         "num_envs": args.num_envs,
         "num_workers": args.num_workers,
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 3,
+        "curriculum_version": 4,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
@@ -699,29 +809,76 @@ def main(args):
     )
     if not final_checkpoint.is_file():
         runner.save(str(final_checkpoint))
-    robust_checkpoint_tournament(args, log_dir, best)
-    selected_checkpoint = final_checkpoint
+    curriculum_cfg = config["mujoco_training"]["curriculum"]
+    robust_checkpoint_tournament(
+        args, log_dir, best, curriculum_cfg
+    )
     best_checkpoint = log_dir / "model_best.pt"
-    if best_checkpoint.is_file():
-        selected_checkpoint = best_checkpoint
+    if args.skip_eval:
+        export_actor(runner, log_dir / "policy.pt")
         print(
-            "Selected best native checkpoint from iteration {} "
-            "(score={:.4f})".format(
-                best["iteration"], best["score"]
+            "NATIVE_MUJOCO_CHECKPOINT=" + str(final_checkpoint),
+            flush=True,
+        )
+        return 0
+
+    candidate = (
+        best_checkpoint if best_checkpoint.is_file() else final_checkpoint
+    )
+    acceptance = run_acceptance(args, candidate, log_dir)
+    accepted = (
+        acceptance is not None
+        and checkpoint_gate_passed(acceptance, curriculum_cfg)
+    )
+    if accepted:
+        if candidate != best_checkpoint:
+            shutil.copy2(candidate, best_checkpoint)
+            best.update(
+                score=selection_score(acceptance),
+                iteration=int(runner.current_learning_iteration),
+                summary=acceptance,
+            )
+            with (log_dir / "model_best.json").open("w") as best_file:
+                json.dump(best, best_file, indent=2)
+        export_checkpoint_actor(
+            best_checkpoint, log_dir / "policy.pt"
+        )
+        print(
+            "NATIVE_MUJOCO_ACCEPTED checkpoint={}".format(
+                best_checkpoint
             ),
             flush=True,
         )
-    if selected_checkpoint == final_checkpoint:
-        export_actor(runner, log_dir / "policy.pt")
-    else:
-        export_checkpoint_actor(
-            selected_checkpoint, log_dir / "policy.pt"
+        print(
+            "NATIVE_MUJOCO_CHECKPOINT=" + str(best_checkpoint),
+            flush=True,
         )
-    run_acceptance(args, selected_checkpoint, log_dir)
+        return 0
+
+    rejected_checkpoint = log_dir / "model_rejected.pt"
+    if best_checkpoint.is_file():
+        os.replace(best_checkpoint, rejected_checkpoint)
+        rejected_source = rejected_checkpoint
+    else:
+        shutil.copy2(candidate, rejected_checkpoint)
+        rejected_source = candidate
+    best_json = log_dir / "model_best.json"
+    if best_json.is_file():
+        os.replace(best_json, log_dir / "model_rejected.json")
+    export_checkpoint_actor(
+        rejected_source, log_dir / "policy_rejected.pt"
+    )
     print(
-        "NATIVE_MUJOCO_CHECKPOINT=" + str(selected_checkpoint),
+        "NATIVE_MUJOCO_REJECTED no checkpoint met the deterministic "
+        "10 cm acceptance gate",
         flush=True,
     )
+    print(
+        "NATIVE_MUJOCO_REJECTED_CHECKPOINT="
+        + str(rejected_checkpoint),
+        flush=True,
+    )
+    print("NATIVE_MUJOCO_CHECKPOINT=NONE", flush=True)
     return 0
 
 
@@ -750,7 +907,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v3_s42"
+        "--run_name", default="mujoco_curriculum_v4_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

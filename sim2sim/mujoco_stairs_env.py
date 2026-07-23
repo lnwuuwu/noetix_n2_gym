@@ -21,7 +21,7 @@ from sim2sim import load_mujoco_model, pd_control, resolve_joint_layout
 
 
 class MujocoStairsVecEnv(VecEnv):
-    """Independent ``MjData`` instances sharing one immutable ``MjModel``."""
+    """Independent data sharing a model resized only between rollout chunks."""
 
     EVENT_REWARD_TERMS = {
         "tread_advance",
@@ -60,7 +60,7 @@ class MujocoStairsVecEnv(VecEnv):
         # The Critic additionally receives the current curriculum target,
         # avoiding a partially observable value function when two otherwise
         # identical initial states terminate at different stair goals.
-        self.num_privileged_obs = self.num_obs + 2
+        self.num_privileged_obs = self.num_obs + 3
         self.device = torch.device("cpu")
         self.control_decimation = int(config["control_decimation"])
         self.simulation_dt = float(config["simulation_dt"])
@@ -105,6 +105,28 @@ class MujocoStairsVecEnv(VecEnv):
         self.final_curriculum_level = (
             len(self.curriculum_target_steps) - 1
         )
+        self.physical_step_heights = np.asarray(
+            self.curriculum_cfg["physical_step_heights_m"],
+            dtype=np.float64,
+        )
+        if (
+            self.physical_step_heights.ndim != 1
+            or len(self.physical_step_heights) < 2
+            or np.any(self.physical_step_heights <= 0.0)
+            or np.any(np.diff(self.physical_step_heights) <= 0.0)
+            or not math.isclose(
+                float(self.physical_step_heights[-1]),
+                float(self.stair_cfg["step_height"]),
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            )
+        ):
+            raise ValueError(
+                "MuJoCo physical_step_heights_m must be positive, strictly "
+                "increasing, and end at stairs.step_height"
+            )
+        self.physical_height_index = 0
+        self.physical_promotion_streak = 0
 
         xml_path = config["_resolved_xml_path"]
         urdf_path = config.get("_resolved_urdf_path")
@@ -120,6 +142,10 @@ class MujocoStairsVecEnv(VecEnv):
         ]
         self.layout = ContactLayout(
             self.model, int(self.stair_cfg["num_steps"])
+        )
+        self._apply_physical_step_height(
+            float(self.physical_step_heights[0]),
+            rebuild_trackers=False,
         )
 
         joint_order = list(config["joint_order"])
@@ -262,6 +288,108 @@ class MujocoStairsVecEnv(VecEnv):
         return GaitTracker(
             self.dt, self.stair_cfg, self.validation_cfg
         )
+
+    @property
+    def physical_step_height(self):
+        return float(
+            self.physical_step_heights[self.physical_height_index]
+        )
+
+    @property
+    def physical_curriculum_complete(self):
+        return self.physical_height_index == (
+            len(self.physical_step_heights) - 1
+        )
+
+    def _apply_physical_step_height(
+        self, step_height, rebuild_trackers=True
+    ):
+        """Resize the shared static staircase between PPO rollout chunks."""
+        step_height = float(step_height)
+        num_steps = int(self.stair_cfg["num_steps"])
+        for index in range(num_steps):
+            geom_id = mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_GEOM,
+                "n2_stair_{:02d}".format(index + 1),
+            )
+            if geom_id < 0:
+                raise ValueError(
+                    "Generated MuJoCo stair geom is missing at index "
+                    + str(index + 1)
+                )
+            total_height = (index + 1) * step_height
+            self.model.geom_size[geom_id, 2] = 0.5 * total_height
+            self.model.geom_pos[geom_id, 2] = 0.5 * total_height
+
+        top_id = mujoco.mj_name2id(
+            self.model,
+            mujoco.mjtObj.mjOBJ_GEOM,
+            "n2_stair_top",
+        )
+        if top_id < 0:
+            raise ValueError("Generated MuJoCo stair top geom is missing")
+        top_height = num_steps * step_height
+        self.model.geom_size[top_id, 2] = 0.5 * top_height
+        self.model.geom_pos[top_id, 2] = 0.5 * top_height
+        self.stair_cfg["step_height"] = step_height
+        mujoco.mj_setConst(self.model, self.datas[0])
+
+        if rebuild_trackers and hasattr(self, "trackers"):
+            self.trackers = [
+                self._new_tracker() for _ in range(self.num_envs)
+            ]
+
+    def _physical_gate_passed(self, summary, gate):
+        expected_climb = (
+            int(self.stair_cfg["num_steps"]) * self.physical_step_height
+        )
+        return (
+            math.isclose(
+                float(summary["step_height_m"]),
+                self.physical_step_height,
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            )
+            and float(summary["completion_rate"])
+            >= float(gate["min_completion_rate"])
+            and float(summary["fall_rate"])
+            <= float(gate["max_fall_rate"])
+            and float(summary["path_failure_rate"])
+            <= float(gate["max_path_failure_rate"])
+            and float(summary["mean_climb_height_m"])
+            >= float(gate["min_climb_fraction"]) * expected_climb
+        )
+
+    def update_physical_curriculum(self, summary):
+        """Promote only after repeatable deterministic full-flight climbs."""
+        if self.physical_curriculum_complete:
+            self.physical_promotion_streak = 0
+            return False
+        gate = self.curriculum_cfg["physical_promotion"]
+        if self._physical_gate_passed(summary, gate):
+            self.physical_promotion_streak += 1
+        else:
+            self.physical_promotion_streak = 0
+        required = int(gate["consecutive_evaluations"])
+        if self.physical_promotion_streak < required:
+            return False
+
+        previous = self.physical_step_height
+        self.physical_height_index += 1
+        self.physical_promotion_streak = 0
+        self.mastery_levels[:] = 0
+        self.episode_levels[:] = 0
+        self.curriculum_success_streak[:] = 0
+        self._apply_physical_step_height(self.physical_step_height)
+        self.reset()
+        print(
+            "NATIVE_MUJOCO_HEIGHT_PROMOTION {:.2f}m -> {:.2f}m".format(
+                previous, self.physical_step_height
+            ),
+            flush=True,
+        )
+        return True
 
     def _build_mirror_layout(self, joint_order):
         """Build an exact left/right reflection for policy regularization."""
@@ -412,6 +540,10 @@ class MujocoStairsVecEnv(VecEnv):
         remaining = target_x - float(self.datas[env_id].qpos[0])
         self.privileged_obs_buf[env_id, self.num_obs + 1] = float(
             np.clip(remaining / 2.60, -1.0, 1.0)
+        )
+        self.privileged_obs_buf[env_id, self.num_obs + 2] = float(
+            self.physical_height_index
+            / max(1, len(self.physical_step_heights) - 1)
         )
 
     def _gait_frequency(self, env_id):
@@ -1490,20 +1622,32 @@ class MujocoStairsVecEnv(VecEnv):
                 self.mastery_levels,
                 minlength=self.final_curriculum_level + 1,
             ).tolist(),
+            "physical_height_index": int(self.physical_height_index),
+            "physical_step_height_m": self.physical_step_height,
+            "physical_promotion_streak": int(
+                self.physical_promotion_streak
+            ),
+            "physical_curriculum_complete": bool(
+                self.physical_curriculum_complete
+            ),
         }
 
     def get_checkpoint_state(self):
         return {
-            "version": 3,
+            "version": 4,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
+            ),
+            "physical_height_index": int(self.physical_height_index),
+            "physical_promotion_streak": int(
+                self.physical_promotion_streak
             ),
             "rng_state": self.rng.bit_generator.state,
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) != 3:
+        if int(state.get("version", -1)) != 4:
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64
@@ -1517,6 +1661,18 @@ class MujocoStairsVecEnv(VecEnv):
             raise ValueError(
                 "MuJoCo curriculum checkpoint environment count differs"
             )
+        physical_height_index = int(state["physical_height_index"])
+        if not 0 <= physical_height_index < len(
+            self.physical_step_heights
+        ):
+            raise ValueError(
+                "MuJoCo checkpoint physical height index is invalid"
+            )
+        self.physical_height_index = physical_height_index
+        self.physical_promotion_streak = max(
+            0, int(state.get("physical_promotion_streak", 0))
+        )
+        self._apply_physical_step_height(self.physical_step_height)
         self.mastery_levels[:] = np.clip(
             mastery, 0, self.final_curriculum_level
         )
