@@ -1747,18 +1747,28 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("TARGET_ITERATIONS=1000", launcher)
         self.assertIn("TARGET_ITERATIONS=3000", launcher)
         self.assertIn("--max_iterations=3000", launcher)
+        self.assertIn('TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"', launcher)
+        self.assertIn('TRAIN_SEED="${N2_SEED:-42}"', launcher)
+        self.assertIn(
+            'INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"', launcher
+        )
         self.assertIn("--selection_interval=50", launcher)
         self.assertIn("--selection_episodes=16", launcher)
         self.assertIn("--tournament_episodes=32", launcher)
         self.assertIn("--symmetry_loss_coeff=0.75", launcher)
         self.assertIn("pilot|long", launcher)
-        self.assertIn("--init_checkpoint=auto", launcher)
+        self.assertIn(
+            '--init_checkpoint="${INIT_CHECKPOINT}"', launcher
+        )
         self.assertNotIn("--init_checkpoint=auto_v2", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertIn('checkpoint_path="${LATEST_BEST}"', launcher)
         self.assertIn("No accepted v4 model_best.pt exists yet.", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
-        self.assertIn("-path '*mujoco_curriculum_v4_*'", launcher)
+        self.assertIn(
+            '-path "*mujoco_curriculum_v4_*_s${TRAIN_SEED}*"',
+            launcher,
+        )
         self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
 

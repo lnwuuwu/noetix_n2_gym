@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-status}"
 PYTHON_BIN="${N2_PYTHON:-}"
+TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"
+TRAIN_SEED="${N2_SEED:-42}"
+INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"
+if [[ ! "${TRAIN_SEED}" =~ ^[0-9]+$ ]]; then
+    echo "N2_SEED must be a non-negative integer." >&2
+    exit 2
+fi
 if [[ -z "${PYTHON_BIN}" ]]; then
     if [[ -x /root/miniconda3/envs/n2/bin/python ]]; then
         PYTHON_BIN=/root/miniconda3/envs/n2/bin/python
@@ -23,10 +30,10 @@ case "${MODE}" in
     smoke)
         exec "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --smoke \
-            --init_checkpoint=auto \
-            --device=cuda:0 \
-            --run_name=mujoco_curriculum_v4_smoke_s42 \
-            --seed=42
+            --init_checkpoint="${INIT_CHECKPOINT}" \
+            --device="${TRAIN_DEVICE}" \
+            --run_name="mujoco_curriculum_v4_smoke_s${TRAIN_SEED}" \
+            --seed="${TRAIN_SEED}"
         ;;
     pilot|long)
         if pgrep -f '[t]rain_stairs_mujoco.py' >/dev/null; then
@@ -37,15 +44,15 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
             TARGET_ITERATIONS=1000
-            RUN_NAME=mujoco_curriculum_v4_pilot_s42
+            RUN_NAME="mujoco_curriculum_v4_pilot_s${TRAIN_SEED}"
         else
             TARGET_ITERATIONS=3000
-            RUN_NAME=mujoco_curriculum_v4_long_s42
+            RUN_NAME="mujoco_curriculum_v4_long_s${TRAIN_SEED}"
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s42.pid"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
-            --init_checkpoint=auto \
+            --init_checkpoint="${INIT_CHECKPOINT}" \
             --num_envs=32 \
             --num_workers=8 \
             --max_iterations="${TARGET_ITERATIONS}" \
@@ -61,9 +68,9 @@ case "${MODE}" in
             --action_noise_std=0.15 \
             --symmetry_loss_coeff=0.75 \
             --critic_symmetry_loss_coeff=0.05 \
-            --device=cuda:0 \
+            --device="${TRAIN_DEVICE}" \
             --run_name="${RUN_NAME}" \
-            --seed=42 \
+            --seed="${TRAIN_SEED}" \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
         printf '%s\n' "${TRAIN_PID}" >"${PID_FILE}"
@@ -80,7 +87,7 @@ case "${MODE}" in
         fi
         LATEST_MODEL="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
             -mindepth 2 -maxdepth 2 -type f \
-            -path '*mujoco_curriculum_v4_*' \
+            -path "*mujoco_curriculum_v4_*_s${TRAIN_SEED}*" \
             ! -path '*smoke*' \
             -name 'model_[0-9]*.pt' -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
@@ -90,8 +97,8 @@ case "${MODE}" in
         fi
         RUN_DIR="$(dirname "${LATEST_MODEL}")"
         STAMP="$(date +%m%d_%H-%M-%S)"
-        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v4_resume_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s42.pid"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v4_resume_s${TRAIN_SEED}_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
             --log_dir="${RUN_DIR}" \
@@ -110,9 +117,9 @@ case "${MODE}" in
             --action_noise_std=0.15 \
             --symmetry_loss_coeff=0.75 \
             --critic_symmetry_loss_coeff=0.05 \
-            --device=cuda:0 \
-            --run_name=mujoco_curriculum_v4_resume_s42 \
-            --seed=42 \
+            --device="${TRAIN_DEVICE}" \
+            --run_name="mujoco_curriculum_v4_resume_s${TRAIN_SEED}" \
+            --seed="${TRAIN_SEED}" \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
         printf '%s\n' "${TRAIN_PID}" >"${PID_FILE}"
@@ -123,7 +130,7 @@ case "${MODE}" in
     status)
         pgrep -af '[t]rain_stairs_mujoco.py' || true
         LATEST_LOG="$(find "${LOG_ROOT}" -maxdepth 1 -type f \
-            -name 'mujoco_curriculum_v4_*.log' \
+            -name "mujoco_curriculum_v4_*s${TRAIN_SEED}*.log" \
             -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
         if [[ -n "${LATEST_LOG}" ]]; then
@@ -134,7 +141,7 @@ case "${MODE}" in
     view)
         LATEST_BEST="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
             -mindepth 2 -maxdepth 2 -type f \
-            -path '*mujoco_curriculum_v4_*' \
+            -path "*mujoco_curriculum_v4_*_s${TRAIN_SEED}*" \
             ! -path '*smoke*' \
             -name 'model_best.pt' -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
@@ -148,7 +155,7 @@ case "${MODE}" in
             --checkpoint_path="${LATEST_BEST}" \
             --stream_port=8080 \
             --command_speed=0.18 \
-            --seed=42
+            --seed="${TRAIN_SEED}"
         ;;
     *)
         echo "Usage: $0 {smoke|pilot|long|resume|status|view}" >&2

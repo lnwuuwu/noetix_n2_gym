@@ -608,6 +608,15 @@ Isaac 里表现最好的 `natural_l4_9000` 作为初始化，并将日志和 PID
 `/root/autodl-tmp/n2_train_logs/`。原始 Isaac checkpoint 不会被修改；原生模型位于
 `logs_mujoco/n2_stairs_walk/`。
 
+在另一台服务器并行训练时，用环境变量指定不同种子、GPU 和初始化模型。例如物理
+GPU 1 通过 `CUDA_VISIBLE_DEVICES=1` 映射成进程内的 `cuda:0`：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 N2_SEED=123 \
+N2_INIT_CHECKPOINT=/absolute/path/model_9000.pt \
+sim2sim/run_mujoco_native_train.sh pilot
+```
+
 ## 8. 低台阶预训练、迁移和 robust 微调
 
 默认课程已经是首选方案：所有环境从 2 cm 开始，以每个环境的真实到顶结果逐级提升，
