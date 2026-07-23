@@ -1752,13 +1752,25 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn(
             'INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"', launcher
         )
+        self.assertIn(
+            'NO_WARM_START="${N2_NO_WARM_START:-0}"', launcher
+        )
+        self.assertIn('WARM_START_ARGS=("--no_warm_start")', launcher)
+        self.assertIn("RUN_VARIANT=\"_scratch\"", launcher)
+        self.assertIn("LEARNING_RATE=3e-4", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.60", launcher)
+        self.assertIn("FREEZE_ACTOR_ITERATIONS=0", launcher)
         self.assertIn("--selection_interval=50", launcher)
         self.assertIn("--selection_episodes=16", launcher)
         self.assertIn("--tournament_episodes=32", launcher)
-        self.assertIn("--symmetry_loss_coeff=0.75", launcher)
+        self.assertIn("SYMMETRY_LOSS_COEFF=0.75", launcher)
+        self.assertIn(
+            '--symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}"',
+            launcher,
+        )
         self.assertIn("pilot|long", launcher)
         self.assertIn(
-            '--init_checkpoint="${INIT_CHECKPOINT}"', launcher
+            '"${WARM_START_ARGS[@]}"', launcher
         )
         self.assertNotIn("--init_checkpoint=auto_v2", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)

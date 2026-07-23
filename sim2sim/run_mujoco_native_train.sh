@@ -7,9 +7,29 @@ PYTHON_BIN="${N2_PYTHON:-}"
 TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"
 TRAIN_SEED="${N2_SEED:-42}"
 INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"
+NO_WARM_START="${N2_NO_WARM_START:-0}"
 if [[ ! "${TRAIN_SEED}" =~ ^[0-9]+$ ]]; then
     echo "N2_SEED must be a non-negative integer." >&2
     exit 2
+fi
+if [[ "${NO_WARM_START}" != "0" && "${NO_WARM_START}" != "1" ]]; then
+    echo "N2_NO_WARM_START must be 0 or 1." >&2
+    exit 2
+fi
+
+WARM_START_ARGS=("--init_checkpoint=${INIT_CHECKPOINT}")
+RUN_VARIANT=""
+FREEZE_ACTOR_ITERATIONS=100
+LEARNING_RATE=2e-5
+ACTION_NOISE_STD=0.15
+SYMMETRY_LOSS_COEFF=0.75
+if [[ "${NO_WARM_START}" == "1" ]]; then
+    WARM_START_ARGS=("--no_warm_start")
+    RUN_VARIANT="_scratch"
+    FREEZE_ACTOR_ITERATIONS=0
+    LEARNING_RATE=3e-4
+    ACTION_NOISE_STD=0.60
+    SYMMETRY_LOSS_COEFF=0.50
 fi
 if [[ -z "${PYTHON_BIN}" ]]; then
     if [[ -x /root/miniconda3/envs/n2/bin/python ]]; then
@@ -30,9 +50,9 @@ case "${MODE}" in
     smoke)
         exec "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --smoke \
-            --init_checkpoint="${INIT_CHECKPOINT}" \
+            "${WARM_START_ARGS[@]}" \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v4_smoke_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v4_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}"
         ;;
     pilot|long)
@@ -44,19 +64,19 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
             TARGET_ITERATIONS=1000
-            RUN_NAME="mujoco_curriculum_v4_pilot_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v4_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
         else
             TARGET_ITERATIONS=3000
-            RUN_NAME="mujoco_curriculum_v4_long_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v4_long${RUN_VARIANT}_s${TRAIN_SEED}"
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
         PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
-            --init_checkpoint="${INIT_CHECKPOINT}" \
+            "${WARM_START_ARGS[@]}" \
             --num_envs=32 \
             --num_workers=8 \
             --max_iterations="${TARGET_ITERATIONS}" \
-            --freeze_actor_iterations=100 \
+            --freeze_actor_iterations="${FREEZE_ACTOR_ITERATIONS}" \
             --rollout_steps=64 \
             --save_interval=50 \
             --selection_interval=50 \
@@ -64,9 +84,9 @@ case "${MODE}" in
             --eval_episodes=32 \
             --tournament_candidates=3 \
             --tournament_episodes=32 \
-            --learning_rate=2e-5 \
-            --action_noise_std=0.15 \
-            --symmetry_loss_coeff=0.75 \
+            --learning_rate="${LEARNING_RATE}" \
+            --action_noise_std="${ACTION_NOISE_STD}" \
+            --symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
             --run_name="${RUN_NAME}" \
@@ -105,7 +125,7 @@ case "${MODE}" in
             --num_envs=32 \
             --num_workers=8 \
             --max_iterations=3000 \
-            --freeze_actor_iterations=100 \
+            --freeze_actor_iterations="${FREEZE_ACTOR_ITERATIONS}" \
             --rollout_steps=64 \
             --save_interval=50 \
             --selection_interval=50 \
@@ -113,9 +133,9 @@ case "${MODE}" in
             --eval_episodes=32 \
             --tournament_candidates=3 \
             --tournament_episodes=32 \
-            --learning_rate=2e-5 \
-            --action_noise_std=0.15 \
-            --symmetry_loss_coeff=0.75 \
+            --learning_rate="${LEARNING_RATE}" \
+            --action_noise_std="${ACTION_NOISE_STD}" \
+            --symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
             --run_name="mujoco_curriculum_v4_resume_s${TRAIN_SEED}" \

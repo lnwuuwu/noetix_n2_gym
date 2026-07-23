@@ -617,6 +617,15 @@ N2_INIT_CHECKPOINT=/absolute/path/model_9000.pt \
 sim2sim/run_mujoco_native_train.sh pilot
 ```
 
+若第二台服务器要从随机网络开始做纯 MuJoCo 对照，不需要复制 checkpoint。scratch
+模式会自动取消 Actor 冻结，并把 warm-start 使用的低学习率/低噪声改为
+`3e-4 / 0.60`：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 N2_SEED=123 N2_NO_WARM_START=1 \
+sim2sim/run_mujoco_native_train.sh pilot
+```
+
 ## 8. 低台阶预训练、迁移和 robust 微调
 
 默认课程已经是首选方案：所有环境从 2 cm 开始，以每个环境的真实到顶结果逐级提升，
