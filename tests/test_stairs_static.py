@@ -1688,7 +1688,15 @@ class SourceCompatibilityTests(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
-            curriculum["gait_promotion_min_target_steps"], 6
+            curriculum["gait_promotion_min_target_steps"], 2
+        )
+        self.assertGreaterEqual(
+            curriculum["gait_promotion_min_alternating_tread_rate"],
+            0.50,
+        )
+        self.assertLessEqual(
+            curriculum["gait_promotion_max_same_tread_join_rate"],
+            0.25,
         )
         self.assertGreater(
             curriculum["checkpoint_gate"]["min_completion_rate"], 0.0
@@ -1733,6 +1741,8 @@ class SourceCompatibilityTests(unittest.TestCase):
             "single_support",
             "swing_knee",
             "swing_knee_deficit",
+            "swing_clearance",
+            "swing_clearance_deficit",
             "swing_trajectory",
             "swing_trajectory_error",
             "next_tread_target",
@@ -1749,6 +1759,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "same_tread_join",
             "completion",
             "unnatural_completion",
+            "gait_completion",
             "natural_completion",
             "fall",
             "path_failure",
@@ -1773,9 +1784,15 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertGreater(
             reward_scales["completion"]
-            + reward_scales["natural_completion"],
+            + reward_scales["gait_completion"],
             reward_scales["completion"]
             + reward_scales["unnatural_completion"],
+        )
+        self.assertGreater(
+            reward_scales["completion"]
+            + reward_scales["natural_completion"],
+            reward_scales["completion"]
+            + reward_scales["gait_completion"],
         )
 
         env_source = (
@@ -1805,8 +1822,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 8', env_source)
-        self.assertIn("not in (4, 5, 6, 7, 8)", env_source)
+        self.assertIn('"version": 9', env_source)
+        self.assertIn("not in (4, 5, 6, 7, 8, 9)", env_source)
+        self.assertIn('"gait_completion"', env_source)
+        self.assertIn('"scheduled_active"', env_source)
+        self.assertIn("scheduled_clearance_base_m", env_source)
+        self.assertIn("actual_contacts[opposite_foot]", env_source)
         self.assertIn('"wrong_foot_swing"', env_source)
         self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
         self.assertTrue(config["gait_phase"]["contact_phase_reset"])
@@ -1859,7 +1880,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
-            'RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.10}"',
+            'RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.12}"',
             launcher,
         )
         self.assertIn(
@@ -1898,12 +1919,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v8_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v9_recover_s${TRAIN_SEED}"',
             launcher,
         )
         self.assertIn("LEARNING_RATE=1e-5", launcher)
-        self.assertIn("ACTION_NOISE_STD=0.10", launcher)
-        self.assertIn("FREEZE_ACTOR_ITERATIONS=100", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.12", launcher)
+        self.assertIn("FREEZE_ACTOR_ITERATIONS=50", launcher)
         self.assertIn('LEARNING_RATE_ARGS=("--fixed_learning_rate")', launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',
@@ -1924,7 +1945,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("Viewing progress-best policy", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
         self.assertIn(
-            '-path "*mujoco_curriculum_v[45678]_*_s${TRAIN_SEED}*"',
+            '-path "*mujoco_curriculum_v[456789]_*_s${TRAIN_SEED}*"',
             launcher,
         )
         self.assertIn("! -path '*smoke*'", launcher)

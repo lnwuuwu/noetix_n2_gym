@@ -1075,7 +1075,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 8,
+        "curriculum_version": 9,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "fixed_learning_rate": bool(args.fixed_learning_rate),
         "selection_episodes": args.selection_episodes,
@@ -1391,7 +1391,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v8_s42"
+        "--run_name", default="mujoco_curriculum_v9_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

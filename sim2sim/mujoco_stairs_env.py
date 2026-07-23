@@ -33,6 +33,7 @@ class MujocoStairsVecEnv(VecEnv):
         "skipped_tread",
         "completion",
         "unnatural_completion",
+        "gait_completion",
         "natural_completion",
         "fall",
         "path_failure",
@@ -939,6 +940,7 @@ class MujocoStairsVecEnv(VecEnv):
         env_id,
         state,
         desired_contacts,
+        raw_tread,
         riser,
         lower_leg,
     ):
@@ -1004,9 +1006,12 @@ class MujocoStairsVecEnv(VecEnv):
             "error": 0.0,
             "next_tread_score": 0.0,
             "lateral_score": 0.0,
+            "clearance_score": 0.0,
+            "clearance_deficit": 0.0,
             "expected_liftoff": 0.0,
             "expected_delay": 0.0,
             "wrong_foot_swing": 0.0,
+            "scheduled_active": 0.0,
             "active": 0.0,
             "progress": 0.0,
             "expected_foot": expected_foot,
@@ -1014,10 +1019,16 @@ class MujocoStairsVecEnv(VecEnv):
         if expected_foot < 0:
             return inactive
 
+        # This clock is observable by the Actor and exists before liftoff.
+        # The former reference used only tracker.pending_swing time, which
+        # meant every lift/knee/trajectory term remained zero until the policy
+        # had already discovered the correct swing by chance.
+        phase = self._phase_fraction(env_id)
+        scheduled_progress = float((2.0 * phase) % 1.0)
         nominal_swing_duration = (
             1.0 - float(self.training_cfg["double_support_ratio"])
         ) / max(2.0 * self._gait_frequency(env_id), 0.10)
-        progress = float(
+        physical_progress = float(
             np.clip(
                 self.swing_elapsed_time[env_id, expected_foot]
                 / max(nominal_swing_duration, self.dt),
@@ -1025,7 +1036,7 @@ class MujocoStairsVecEnv(VecEnv):
                 1.0,
             )
         )
-        inactive["progress"] = progress
+        inactive["progress"] = scheduled_progress
         near_stairs = (
             float(data.qpos[0])
             >= float(self.stair_cfg["start_x"])
@@ -1040,30 +1051,92 @@ class MujocoStairsVecEnv(VecEnv):
             and float(state["velocity"][0]) > 0.03
             and float(state["gravity"][2]) < -0.80
         )
-        expected_airborne = bool(physical_airborne[expected_foot])
         scheduled_expected = bool(scheduled_swing[expected_foot])
+        scheduled_active = bool(behavior_active and scheduled_expected)
+        inactive["scheduled_active"] = float(scheduled_active)
+        actual_contacts = np.asarray(raw_tread, dtype=np.int64) >= 0
+        opposite_foot = 1 - expected_foot
+
+        # A smooth phase target gives a gradient while the foot is still
+        # planted.  Raw contacts are intentional here: using the debounced
+        # pending_swing/airborne flags delayed credit enough that the v8
+        # expected-liftoff reward was almost always exactly zero.
+        lift_profile = math.sin(math.pi * scheduled_progress) ** 2
         inactive["expected_liftoff"] = float(
-            behavior_active
-            and scheduled_expected
-            and expected_airborne
-            and bool(tracker.opposite_valid[expected_foot])
+            scheduled_active
+            and not bool(actual_contacts[expected_foot])
+            and bool(actual_contacts[opposite_foot])
         )
         inactive["expected_delay"] = float(
-            behavior_active
-            and scheduled_expected
-            and not expected_airborne
-        ) * abs(
-            math.sin(2.0 * math.pi * self._phase_fraction(env_id))
-        )
+            scheduled_active and bool(actual_contacts[expected_foot])
+        ) * lift_profile
         inactive["wrong_foot_swing"] = float(
-            behavior_active
-            and scheduled_expected
-            and bool(np.any(physical_airborne))
-            and not expected_airborne
+            scheduled_active and not bool(actual_contacts[opposite_foot])
         )
+
+        accepted_tread = max(
+            0, int(tracker.accepted_tread[expected_foot])
+        )
+        support_surface_z = (
+            accepted_tread * float(self.stair_cfg["step_height"])
+            + self.foot_surface_offset[env_id, expected_foot]
+        )
+        actual_clearance = max(
+            float(foot_positions[expected_foot, 2]) - support_surface_z,
+            0.0,
+        )
+        peak_clearance = min(
+            float(self.training_cfg["scheduled_clearance_max_m"]),
+            float(self.training_cfg["scheduled_clearance_base_m"])
+            + float(
+                self.training_cfg["scheduled_clearance_height_gain"]
+            )
+            * float(self.stair_cfg["step_height"]),
+        )
+        target_clearance = peak_clearance * lift_profile
+        clearance_normalizer = max(
+            float(
+                self.training_cfg["scheduled_clearance_normalizer_m"]
+            ),
+            1.0e-3,
+        )
+        normalized_clearance_error = float(
+            np.clip(
+                (actual_clearance - target_clearance)
+                / clearance_normalizer,
+                -2.0,
+                2.0,
+            )
+        )
+        normalized_clearance_deficit = float(
+            np.clip(
+                (target_clearance - actual_clearance)
+                / clearance_normalizer,
+                0.0,
+                2.0,
+            )
+        )
+        inactive["clearance_score"] = (
+            math.exp(
+                -float(
+                    self.training_cfg[
+                        "scheduled_clearance_sharpness"
+                    ]
+                )
+                * normalized_clearance_error
+                * normalized_clearance_error
+            )
+            * float(scheduled_active)
+        )
+        inactive["clearance_deficit"] = (
+            normalized_clearance_deficit
+            * normalized_clearance_deficit
+            * float(scheduled_active)
+        )
+
+        expected_airborne = bool(physical_airborne[expected_foot])
         active = (
-            behavior_active
-            and scheduled_expected
+            scheduled_active
             and expected_airborne
             and bool(tracker.opposite_valid[expected_foot])
         )
@@ -1095,7 +1168,7 @@ class MujocoStairsVecEnv(VecEnv):
         target = smooth_swing_trajectory(
             start[None, :],
             landing[None, :],
-            np.asarray([progress], dtype=np.float64),
+            np.asarray([physical_progress], dtype=np.float64),
             float(self.training_cfg["swing_trajectory_arc_base_m"])
             + float(
                 self.training_cfg["swing_trajectory_arc_height_gain"]
@@ -1141,7 +1214,7 @@ class MujocoStairsVecEnv(VecEnv):
             self.training_cfg["next_tread_target_full_phase"]
         )
         late_weight = self._smoothstep01(
-            (progress - start_phase)
+            (physical_progress - start_phase)
             / max(full_phase - start_phase, 1.0e-3)
         )
         x_error = (
@@ -1162,11 +1235,14 @@ class MujocoStairsVecEnv(VecEnv):
             "error": squared_error,
             "next_tread_score": next_tread_score,
             "lateral_score": lateral_score,
+            "clearance_score": inactive["clearance_score"],
+            "clearance_deficit": inactive["clearance_deficit"],
             "expected_liftoff": inactive["expected_liftoff"],
             "expected_delay": inactive["expected_delay"],
             "wrong_foot_swing": inactive["wrong_foot_swing"],
+            "scheduled_active": inactive["scheduled_active"],
             "active": 1.0,
-            "progress": progress,
+            "progress": scheduled_progress,
             "expected_foot": expected_foot,
         }
 
@@ -1258,6 +1334,7 @@ class MujocoStairsVecEnv(VecEnv):
             env_id,
             state,
             desired_contacts,
+            raw_tread,
             riser,
             lower_leg,
         )
@@ -1303,12 +1380,12 @@ class MujocoStairsVecEnv(VecEnv):
                 * knee_error
                 * knee_error
             )
-            * float(swing_reference["active"])
+            * float(swing_reference["scheduled_active"])
         )
         knee_deficit = (
             max(target_knee - knee_position, 0.0)
             / max(target_knee, 0.10)
-        ) ** 2 * float(swing_reference["active"])
+        ) ** 2 * float(swing_reference["scheduled_active"])
         arm_amplitude = float(
             self.training_cfg["arm_swing_amplitude_rad"]
         )
@@ -1543,6 +1620,12 @@ class MujocoStairsVecEnv(VecEnv):
             "single_support": single_support * gait_active,
             "swing_knee": knee_match,
             "swing_knee_deficit": knee_deficit,
+            "swing_clearance": float(
+                swing_reference["clearance_score"]
+            ),
+            "swing_clearance_deficit": float(
+                swing_reference["clearance_deficit"]
+            ),
             "swing_trajectory": float(swing_reference["score"])
             * float(swing_reference["active"]),
             "swing_trajectory_error": float(
@@ -1594,6 +1677,7 @@ class MujocoStairsVecEnv(VecEnv):
             "skipped_tread": float(event_delta["skipped"]),
             "completion": 0.0,
             "unnatural_completion": 0.0,
+            "gait_completion": 0.0,
             "natural_completion": 0.0,
             "fall": 0.0,
             "path_failure": 0.0,
@@ -2070,6 +2154,11 @@ class MujocoStairsVecEnv(VecEnv):
                 and gait_gate_active
                 and not gait_gate_passed
             )
+            gait_completion = (
+                curriculum_completed[env_id]
+                and gait_gate_active
+                and gait_gate_passed
+            )
             terminal_terms = {
                 # Reaching the physical goal must always beat deliberate
                 # falling.  The old qualified-only reward made an unnatural
@@ -2077,6 +2166,7 @@ class MujocoStairsVecEnv(VecEnv):
                 # stop or fall instead of converting its gait.
                 "completion": float(curriculum_completed[env_id]),
                 "unnatural_completion": float(unnatural_completion),
+                "gait_completion": float(gait_completion),
                 "natural_completion": float(natural_success[env_id]),
                 "fall": float(fell[env_id]),
                 "path_failure": float(path_failed[env_id]),
@@ -2198,7 +2288,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 8,
+            "version": 9,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -2211,7 +2301,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (4, 5, 6, 7, 8):
+        if int(state.get("version", -1)) not in (4, 5, 6, 7, 8, 9):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64
