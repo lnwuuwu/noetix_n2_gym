@@ -133,6 +133,30 @@ def auto_native_checkpoint():
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def auto_v2_actor_checkpoint():
+    """Reuse only the best v2 Actor; reset its critic, Adam, and curriculum."""
+    candidates = [
+        Path(value)
+        for value in glob.glob(
+            str(
+                ROOT
+                / "logs_mujoco"
+                / "n2_stairs_walk"
+                / "*mujoco_curriculum_v2_*"
+                / "model_best.pt"
+            )
+        )
+        if "smoke" not in Path(value).parent.name
+    ]
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    print(
+        "No v2 pilot Actor found; falling back to the Isaac Actor.",
+        flush=True,
+    )
+    return auto_init_checkpoint()
+
+
 def train_configuration(args, env):
     return {
         "policy": {
@@ -328,11 +352,16 @@ def run_acceptance(args, checkpoint_path, log_dir):
         return None
     print(
         "NATIVE_MUJOCO_ACCEPTANCE completion={:.1%} success={:.1%} "
-        "path={:.1%} fall={:.1%} alternate={:.1%} join={:.1%}".format(
+        "path={:.1%} fall={:.1%} yaw={:.3f}rad "
+        "distance={:.3f}m climb={:.3f}m "
+        "alternate={:.1%} join={:.1%}".format(
             summary["completion_rate"],
             summary["success_rate"],
             summary["path_failure_rate"],
             summary["fall_rate"],
+            summary["mean_max_yaw_deviation_rad"],
+            summary["mean_forward_distance_m"],
+            summary["mean_climb_height_m"],
             summary["mean_alternating_tread_rate"],
             summary["mean_same_tread_join_rate"],
         ),
@@ -383,13 +412,16 @@ def robust_checkpoint_tournament(args, log_dir, best):
         print(
             "NATIVE_MUJOCO_TOURNAMENT iter={} score={:.4f} "
             "completion={:.1%} success={:.1%} path={:.1%} "
-            "fall={:.1%} alternate={:.1%} join={:.1%}".format(
+            "fall={:.1%} yaw={:.3f}rad distance={:.3f}m "
+            "alternate={:.1%} join={:.1%}".format(
                 iteration,
                 score,
                 summary["completion_rate"],
                 summary["success_rate"],
                 summary["path_failure_rate"],
                 summary["fall_rate"],
+                summary["mean_max_yaw_deviation_rad"],
+                summary["mean_forward_distance_m"],
                 summary["mean_alternating_tread_rate"],
                 summary["mean_same_tread_join_rate"],
             ),
@@ -471,13 +503,16 @@ def train_stage(
         print(
             "NATIVE_MUJOCO_SELECTION iter={} score={:.4f} "
             "completion={:.1%} success={:.1%} path={:.1%} "
-            "fall={:.1%} alternate={:.1%} join={:.1%}".format(
+            "fall={:.1%} yaw={:.3f}rad distance={:.3f}m "
+            "alternate={:.1%} join={:.1%}".format(
                 current,
                 score,
                 summary["completion_rate"],
                 summary["success_rate"],
                 summary["path_failure_rate"],
                 summary["fall_rate"],
+                summary["mean_max_yaw_deviation_rad"],
+                summary["mean_forward_distance_m"],
                 summary["mean_alternating_tread_rate"],
                 summary["mean_same_tread_join_rate"],
             ),
@@ -553,15 +588,16 @@ def main(args):
             flush=True,
         )
     elif not args.no_warm_start:
-        source_checkpoint = (
-            auto_init_checkpoint()
-            if args.init_checkpoint == "auto"
-            else (
-                auto_native_checkpoint()
-                if args.init_checkpoint == "auto_native"
-                else Path(args.init_checkpoint).expanduser().resolve()
+        if args.init_checkpoint == "auto":
+            source_checkpoint = auto_init_checkpoint()
+        elif args.init_checkpoint == "auto_native":
+            source_checkpoint = auto_native_checkpoint()
+        elif args.init_checkpoint == "auto_v2":
+            source_checkpoint = auto_v2_actor_checkpoint()
+        else:
+            source_checkpoint = (
+                Path(args.init_checkpoint).expanduser().resolve()
             )
-        )
         initialize_actor(
             runner, source_checkpoint, args.action_noise_std
         )
@@ -575,7 +611,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 2,
+        "curriculum_version": 3,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
@@ -714,7 +750,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v2_s42"
+        "--run_name", default="mujoco_curriculum_v3_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

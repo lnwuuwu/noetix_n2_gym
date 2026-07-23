@@ -822,6 +822,7 @@ def run_episode(config, model, policy, seed, step_callback=None):
     completed = False
     fell = False
     path_failure = False
+    path_violation_time = 0.0
     numerical_failure = False
     max_lateral = 0.0
     max_yaw = 0.0
@@ -923,9 +924,25 @@ def run_episode(config, model, policy, seed, step_callback=None):
             )
             max_lateral = max(max_lateral, abs(float(data.qpos[1])))
             max_yaw = max(max_yaw, abs(yaw))
-            path_failure = path_failure or (
-                max_lateral > float(validation["corridor_half_width"])
-                or max_yaw > float(validation["corridor_yaw_limit"])
+            outside_path = (
+                abs(float(data.qpos[1]))
+                > float(validation["corridor_half_width"])
+                or abs(yaw) > float(validation["corridor_yaw_limit"])
+            )
+            path_violation_time = (
+                path_violation_time + control_dt
+                if outside_path
+                else 0.0
+            )
+            path_failure = (
+                outside_path
+                and path_violation_time
+                >= max(
+                    control_dt,
+                    float(
+                        validation.get("path_violation_dwell_s", 0.0)
+                    ),
+                )
             )
 
             terrain_height = float(
@@ -992,6 +1009,8 @@ def run_episode(config, model, policy, seed, step_callback=None):
         and not fell
         and not path_failure
         and not numerical_failure
+        and max_lateral <= float(validation["corridor_half_width"])
+        and max_yaw <= float(validation["corridor_yaw_limit"])
         and tracker.alternating_count
         >= int(validation["success_min_alternating_tread_count"])
         and gait["alternating_tread_rate"]
@@ -1130,6 +1149,15 @@ def _apply_cli_overrides(config, args):
         config["validation"]["initial_lateral_noise"] = float(
             args.initial_lateral_noise
         )
+    validation = config["validation"]
+    for argument_name, config_name in (
+        ("corridor_half_width", "corridor_half_width"),
+        ("corridor_yaw_limit", "corridor_yaw_limit"),
+        ("path_violation_dwell_s", "path_violation_dwell_s"),
+    ):
+        value = getattr(args, argument_name, None)
+        if value is not None:
+            validation[config_name] = float(value)
     if args.phase_offset is not None:
         phase_offset = float(args.phase_offset)
         if not 0.0 <= phase_offset < 1.0:
@@ -1157,7 +1185,13 @@ def _apply_cli_overrides(config, args):
         raise ValueError("--yaw_observation_gain must be non-negative")
     if float(stabilizer.get("max_hip_yaw_offset", 0.18)) < 0.0:
         raise ValueError("--max_hip_yaw_offset must be non-negative")
-    for name in ("initial_joint_noise", "initial_lateral_noise"):
+    for name in (
+        "initial_joint_noise",
+        "initial_lateral_noise",
+        "corridor_half_width",
+        "corridor_yaw_limit",
+        "path_violation_dwell_s",
+    ):
         if float(config["validation"].get(name, 0.0)) < 0.0:
             raise ValueError("--{} must be non-negative".format(name))
     return config
@@ -1263,6 +1297,11 @@ if __name__ == "__main__":
     parser.add_argument("--command_speed", type=float, default=None)
     parser.add_argument("--initial_joint_noise", type=float, default=None)
     parser.add_argument("--initial_lateral_noise", type=float, default=None)
+    parser.add_argument("--corridor_half_width", type=float, default=None)
+    parser.add_argument("--corridor_yaw_limit", type=float, default=None)
+    parser.add_argument(
+        "--path_violation_dwell_s", type=float, default=None
+    )
     parser.add_argument("--phase_offset", type=float, default=None)
     parser.add_argument("--yaw_observation_gain", type=float, default=None)
     parser.add_argument("--hip_yaw_kp", type=float, default=None)

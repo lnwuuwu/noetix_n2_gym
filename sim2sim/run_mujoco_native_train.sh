@@ -25,7 +25,7 @@ case "${MODE}" in
             --smoke \
             --init_checkpoint=auto \
             --device=cuda:0 \
-            --run_name=mujoco_curriculum_v2_smoke_s42 \
+            --run_name=mujoco_curriculum_v3_smoke_s42 \
             --seed=42
         ;;
     pilot|long)
@@ -36,16 +36,16 @@ case "${MODE}" in
         fi
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
-            TARGET_ITERATIONS=250
-            RUN_NAME=mujoco_curriculum_v2_pilot_s42
+            TARGET_ITERATIONS=400
+            RUN_NAME=mujoco_curriculum_v3_pilot_s42
         else
-            TARGET_ITERATIONS=1200
-            RUN_NAME=mujoco_curriculum_v2_long_s42
+            TARGET_ITERATIONS=1600
+            RUN_NAME=mujoco_curriculum_v3_long_s42
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v2_s42.pid"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v3_s42.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
-            --init_checkpoint=auto \
+            --init_checkpoint=auto_v2 \
             --num_envs=32 \
             --num_workers=8 \
             --max_iterations="${TARGET_ITERATIONS}" \
@@ -80,7 +80,7 @@ case "${MODE}" in
         fi
         LATEST_MODEL="$(find "${ROOT_DIR}/logs_mujoco/n2_stairs_walk" \
             -mindepth 2 -maxdepth 2 -type f \
-            -path '*mujoco_curriculum_v2_*' \
+            -path '*mujoco_curriculum_v3_*' \
             ! -path '*smoke*' \
             -name 'model_[0-9]*.pt' -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
@@ -90,14 +90,14 @@ case "${MODE}" in
         fi
         RUN_DIR="$(dirname "${LATEST_MODEL}")"
         STAMP="$(date +%m%d_%H-%M-%S)"
-        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v2_resume_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v2_s42.pid"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v3_resume_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v3_s42.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
             --log_dir="${RUN_DIR}" \
             --num_envs=32 \
             --num_workers=8 \
-            --max_iterations=1200 \
+            --max_iterations=1600 \
             --freeze_actor_iterations=0 \
             --rollout_steps=96 \
             --save_interval=50 \
@@ -111,7 +111,7 @@ case "${MODE}" in
             --symmetry_loss_coeff=0.50 \
             --critic_symmetry_loss_coeff=0.05 \
             --device=cuda:0 \
-            --run_name=mujoco_curriculum_v2_resume_s42 \
+            --run_name=mujoco_curriculum_v3_resume_s42 \
             --seed=42 \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
@@ -123,7 +123,7 @@ case "${MODE}" in
     status)
         pgrep -af '[t]rain_stairs_mujoco.py' || true
         LATEST_LOG="$(find "${LOG_ROOT}" -maxdepth 1 -type f \
-            -name 'mujoco_curriculum_v2_*.log' \
+            -name 'mujoco_curriculum_v3_*.log' \
             -printf '%T@ %p\n' 2>/dev/null \
             | sort -nr | head -n 1 | cut -d' ' -f2-)"
         if [[ -n "${LATEST_LOG}" ]]; then

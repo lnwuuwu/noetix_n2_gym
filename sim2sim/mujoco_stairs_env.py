@@ -700,9 +700,13 @@ class MujocoStairsVecEnv(VecEnv):
         vertical_progress_velocity = (
             float(data.qpos[2]) - self.previous_base_z[env_id]
         ) / self.dt
+        # Forward motion only counts as useful stair progress while it follows
+        # the route.  The former -4*yaw^2 gate still paid 53% of directed
+        # progress at the 0.40 rad acceptance boundary, which encouraged the
+        # characteristic fast diagonal exit seen in v2.
         route_gate = math.exp(
-            -4.0 * float(state["yaw"] ** 2)
-            - 3.0 * float(data.qpos[1] ** 2)
+            -16.0 * float(state["yaw"] ** 2)
+            - 6.0 * float(data.qpos[1] ** 2)
         )
         desired_contacts, phase_sine = self._desired_contacts(env_id)
         actual_contacts = raw_tread >= 0
@@ -920,6 +924,9 @@ class MujocoStairsVecEnv(VecEnv):
             "upright_error": float(
                 state["gravity"][0] ** 2
                 + state["gravity"][1] ** 2
+            ),
+            "heading_alignment": math.exp(
+                -20.0 * float(state["yaw"] ** 2)
             ),
             "heading_error": float(state["yaw"] ** 2),
             "lateral_error": float(data.qpos[1] ** 2),
@@ -1487,7 +1494,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 2,
+            "version": 3,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -1496,7 +1503,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) != 2:
+        if int(state.get("version", -1)) != 3:
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64

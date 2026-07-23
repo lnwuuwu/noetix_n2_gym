@@ -526,6 +526,30 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertEqual(updated["validation"]["initial_joint_noise"], 0.0)
         self.assertEqual(updated["validation"]["initial_lateral_noise"], 0.0)
 
+    def test_mujoco_route_diagnostic_overrides_are_explicit(self):
+        config = yaml.safe_load(
+            (ROOT / "sim2sim/configs/n2_stairs_walk.yaml").read_text()
+        )
+        args = types.SimpleNamespace(
+            policy_path=None,
+            step_height=None,
+            duration=None,
+            command_speed=None,
+            stair_start_x=None,
+            initial_joint_noise=None,
+            initial_lateral_noise=None,
+            corridor_half_width=0.70,
+            corridor_yaw_limit=0.80,
+            path_violation_dwell_s=1.25,
+            phase_offset=None,
+            physics_preset=None,
+        )
+        updated = self.evaluator._apply_cli_overrides(config, args)
+        validation = updated["validation"]
+        self.assertEqual(validation["corridor_half_width"], 0.70)
+        self.assertEqual(validation["corridor_yaw_limit"], 0.80)
+        self.assertEqual(validation["path_violation_dwell_s"], 1.25)
+
     def test_aggregation_does_not_double_prefix_mean_metrics(self):
         config = {
             "stairs": {"start_x": 0.60, "step_height": 0.10},
@@ -1631,6 +1655,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "forward_progress",
             "directed_progress",
             "vertical_progress",
+            "heading_alignment",
             "heading_error",
             "lateral_error",
             "lateral_velocity",
@@ -1667,7 +1692,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("self.path_violation_steps", env_source)
         self.assertIn("def _advance_curriculum", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 2', env_source)
+        self.assertIn('"version": 3', env_source)
+        self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
 
     def test_native_mujoco_trainer_has_curriculum_and_robust_selection(self):
         source = (
@@ -1692,18 +1718,18 @@ class SourceCompatibilityTests(unittest.TestCase):
         launcher = (
             ROOT / "sim2sim" / "run_mujoco_native_train.sh"
         ).read_text()
-        self.assertIn("TARGET_ITERATIONS=250", launcher)
-        self.assertIn("TARGET_ITERATIONS=1200", launcher)
-        self.assertIn("--max_iterations=1200", launcher)
+        self.assertIn("TARGET_ITERATIONS=400", launcher)
+        self.assertIn("TARGET_ITERATIONS=1600", launcher)
+        self.assertIn("--max_iterations=1600", launcher)
         self.assertIn("--selection_interval=100", launcher)
         self.assertIn("--selection_episodes=16", launcher)
         self.assertIn("--tournament_episodes=32", launcher)
         self.assertIn("--symmetry_loss_coeff=0.50", launcher)
         self.assertIn("pilot|long", launcher)
-        self.assertIn("--init_checkpoint=auto", launcher)
+        self.assertIn("--init_checkpoint=auto_v2", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
-        self.assertIn("-path '*mujoco_curriculum_v2_*'", launcher)
+        self.assertIn("-path '*mujoco_curriculum_v3_*'", launcher)
         self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
 

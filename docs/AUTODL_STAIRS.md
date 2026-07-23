@@ -522,15 +522,21 @@ python sim2sim/compare_isaac_checkpoints_mujoco.py
 ```
 
 四个 Isaac checkpoint 若都在到达楼梯前出现相同的 MuJoCo 偏航/路径失败，不再继续
-挑 checkpoint 或调外环。改用原生 MuJoCo PPO v2：只迁移 410 维 Actor，critic、
+挑 checkpoint 或调外环。改用原生 MuJoCo PPO v3：只迁移 410 维 Actor，critic、
 Adam 和探索噪声重新初始化。物理环境始终是 10 cm、6 阶楼梯，但训练目标从平地接近
 依次推进到第 1、2、…、6 阶。Actor 仍使用可部署的 410 维观测，critic 额外看到课程
 阶段和剩余距离；左右镜像损失用于抑制固定右脚领步。路径偏离必须持续 0.5 秒才终止，
 避免一次瞬时偏航把整条轨迹截断。
 
-v2 首次训练明确从 Isaac 的自然步态 Actor 重新迁移，不从失败的 MuJoCo v1
-`model_best.pt` 启动；v1 的 16 回合验收为 0%，而且交替率已经明显退化。只有
-`resume` 才会加载 v2 自己的完整原生 checkpoint。
+v2 pilot 暴露出训练/验收门槛不一致：level 2 训练仍允许约 0.87 rad 偏航，而验证在
+0.40 rad 的第一个采样点立即结束，所以日志总在约 0.7 m 显示 `path=100%`。v3 将
+初始/最终课程走廊收紧到 0.60/0.40 rad，完成门槛收紧到 0.30/0.20 rad，提高航向损失，
+并把有效前进奖励用更尖锐的航向门控。验证也采用与训练相同的 0.5 秒持续越界判定，
+但 natural success 仍要求整个回合最大偏航不超过严格的 0.40 rad。
+
+v3 优先只复用现有 v2 pilot 的最佳 Actor（若不存在则回退到 Isaac `model_9000.pt`），
+critic、Adam 和课程等级全部重新初始化，避免把 v2 的宽走廊课程状态带进来。只有
+`resume` 才会加载 v3 自己的完整 checkpoint。
 
 周期选模使用固定种子，训练结束还会把排名靠前的三个 checkpoint 用更大的同一组种子
 复测后才写入 `model_best.pt`。这样不会再把“4 回合里偶然成功一次”误当成最佳模型。
@@ -541,7 +547,7 @@ v2 首次训练明确从 Isaac 的自然步态 Actor 重新迁移，不从失败
 sim2sim/run_mujoco_native_train.sh smoke
 ```
 
-冒烟通过后先启动 250 iteration 的门槛训练，不直接再盲跑两小时：
+冒烟通过后先启动 400 iteration 的 v3 门槛训练：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh pilot
@@ -556,21 +562,34 @@ sim2sim/run_mujoco_native_train.sh status
 门槛训练结束后检查：
 
 ```bash
-LOG=$(ls -1t /root/autodl-tmp/n2_train_logs/mujoco_curriculum_v2_pilot_s42_*.log | head -n 1)
+LOG=$(ls -1t /root/autodl-tmp/n2_train_logs/mujoco_curriculum_v3_pilot_s42_*.log | head -n 1)
 grep -E 'NATIVE_MUJOCO_CURRICULUM|NATIVE_MUJOCO_SELECTION|NATIVE_MUJOCO_TOURNAMENT|NATIVE_MUJOCO_ACCEPTANCE' "$LOG"
 ```
 
-`NATIVE_MUJOCO_CURRICULUM` 中 `max` 至少到 2 且 `mean` 至少约为 1，才值得续训。
-全楼梯 `selection` 在这个阶段仍可能为 0；如果 `max=0`，说明连平地接近目标都没学会，
-应先修配置而不是继续烧算力。门槛通过后，以下命令会保留 Actor、critic、Adam、
-iteration 以及每个环境的课程进度，在同一 run 目录继续到总计 1200 iteration：
+`NATIVE_MUJOCO_CURRICULUM` 中 `max` 至少到 2、`mean` 至少约为 1，并且 selection
+的平均最大偏航应明显低于旧版约 0.41 rad，才值得续训。全楼梯 completion 在这个阶段
+仍可能为 0；若 `max=0` 或偏航完全没有下降，应停止而不是继续烧算力。门槛通过后，
+以下命令会保留 Actor、critic、Adam、iteration 以及每个环境的课程进度，在同一 run
+目录继续到总计 1600 iteration：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh resume
 ```
 
-若明确要跳过门槛从头跑完整 v2，也可以运行 `long`。进程因断线或评估异常退出时仍应
+若明确要跳过门槛直接跑完整 v3，也可以运行 `long`。进程因断线或评估异常退出时仍应
 运行 `resume`，不要重新运行 `long`。
+
+若要先判断旧 v2 `model_250.pt` 是否只是被 0.40 rad 路径判据过早截断，可运行一次
+仅用于诊断的宽走廊评估（不能把这组结果当验收成绩）：
+
+```bash
+V2=$(find logs_mujoco/n2_stairs_walk -path '*mujoco_curriculum_v2_pilot_s42/model_250.pt' | head -n 1)
+python sim2sim/eval_stairs_mujoco.py \
+  --checkpoint_path="$V2" --episodes=16 \
+  --corridor_half_width=0.70 --corridor_yaw_limit=0.80 \
+  --path_violation_dwell_s=1.0 \
+  --output=/root/autodl-tmp/n2_eval/v2_250_relaxed_diagnostic.csv
+```
 
 训练结束后，用原生 MuJoCo（不是 Isaac Gym）循环播放稳健复测选出的
 `model_best.pt`，并在本机浏览器实时查看：

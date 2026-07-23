@@ -108,6 +108,10 @@ validation:
   fall_upright_z: -0.60
   corridor_half_width: 0.30
   corridor_yaw_limit: 0.40
+  # Match native training: a single noisy control sample outside the route is
+  # not a failure, but a sustained excursion is. Natural success still checks
+  # the recorded maximum excursion against the strict limits below.
+  path_violation_dwell_s: 0.50
   support_normal_z: 0.65
   contact_force_threshold: 2.0
   riser_force_threshold: 10.0
@@ -134,11 +138,11 @@ mujoco_training:
   progress_epsilon_m: 0.05
   completion_dwell_s: 0.20
   completion_lateral_tolerance_m: 0.20
-  completion_yaw_tolerance_rad: 0.30
+  completion_yaw_tolerance_rad: 0.20
   adaptation_corridor_half_width_m: 0.60
-  adaptation_corridor_yaw_limit_rad: 0.90
+  adaptation_corridor_yaw_limit_rad: 0.70
   training_corridor_half_width_m: 0.40
-  training_corridor_yaw_limit_rad: 0.55
+  training_corridor_yaw_limit_rad: 0.45
   double_support_ratio: 0.16
   target_sagittal_separation_m: 0.22
   target_swing_knee_rad: 0.65
@@ -161,11 +165,14 @@ mujoco_training:
     intermediate_dwell_s: 0.08
     height_tolerance_m: 0.06
     initial_completion_lateral_tolerance_m: 0.35
-    initial_completion_yaw_tolerance_rad: 0.55
+    # v3 deliberately makes heading a prerequisite from the flat approach.
+    # v2 allowed ~0.47 rad at level 2 while acceptance stopped at 0.40 rad,
+    # so PPO could promote without ever learning a usable heading controller.
+    initial_completion_yaw_tolerance_rad: 0.30
     initial_corridor_half_width_m: 0.80
-    initial_corridor_yaw_limit_rad: 1.00
+    initial_corridor_yaw_limit_rad: 0.60
     final_corridor_half_width_m: 0.45
-    final_corridor_yaw_limit_rad: 0.60
+    final_corridor_yaw_limit_rad: 0.40
     path_violation_dwell_s: 0.50
     natural_min_alternating_tread_rate: 0.65
     natural_max_same_tread_join_rate: 0.30
@@ -176,10 +183,11 @@ mujoco_training:
     vertical_progress: 2.0
     alive: 0.10
     upright_error: -3.0
-    heading_error: -10.0
+    heading_alignment: 2.0
+    heading_error: -20.0
     lateral_error: -12.0
     lateral_velocity: -2.0
-    yaw_rate: -1.5
+    yaw_rate: -2.0
     base_height_error: -4.0
     forward_pitch: 0.50
     base_behind_support: -2.0
