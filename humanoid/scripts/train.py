@@ -6,9 +6,8 @@ import signal
 from humanoid.envs import *
 # Isaac Gym Preview 4 must load its bindings before importing torch.
 import torch
-# Keep the defining module qualified.  Isaac Gym's wildcard imports expose a
-# different zero-argument ``get_args`` on Python 3.8; a bare global can
-# therefore be rebound even when it was initially imported from helpers.
+# Use the repository-specific name.  Isaac Gym exposes a different
+# zero-argument ``get_args`` in some Python 3.8 import orders.
 import humanoid.utils.helpers as humanoid_helpers
 from humanoid.utils import task_registry
 
@@ -168,7 +167,7 @@ def train(args):
 # 程序入口点
 if __name__ == '__main__':
     # 解析命令行参数
-    args = humanoid_helpers.get_args(
+    args = humanoid_helpers.parse_humanoid_args(
         [
             {
                 "name": "--fixed_terrain_level",

@@ -195,4 +195,4 @@ if __name__ == "__main__":
             "help": "Move the viewer camera slowly along +X.",
         },
     ]
-    play(humanoid_helpers.get_args(extra_parameters))
+    play(humanoid_helpers.parse_humanoid_args(extra_parameters))

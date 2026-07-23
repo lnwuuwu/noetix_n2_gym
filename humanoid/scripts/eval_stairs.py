@@ -463,4 +463,4 @@ if __name__ == "__main__":
             "help": "CSV output path; a JSON summary is written beside it.",
         },
     ]
-    evaluate(humanoid_helpers.get_args(extra_parameters))
+    evaluate(humanoid_helpers.parse_humanoid_args(extra_parameters))

@@ -347,4 +347,4 @@ if __name__ == "__main__":
             "help": "JPEG quality from 1 to 100.",
         },
     ]
-    stream(humanoid_helpers.get_args(extra_parameters))
+    stream(humanoid_helpers.parse_humanoid_args(extra_parameters))

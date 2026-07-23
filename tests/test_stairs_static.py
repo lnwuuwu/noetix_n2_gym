@@ -1747,7 +1747,7 @@ class SourceCompatibilityTests(unittest.TestCase):
                 script_source,
             )
             self.assertIn(
-                "humanoid_helpers.get_args(", script_source
+                "humanoid_helpers.parse_humanoid_args(", script_source
             )
 
         ppo_source = (

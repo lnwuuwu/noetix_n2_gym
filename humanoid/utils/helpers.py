@@ -146,7 +146,7 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
     return env_cfg, cfg_train
 
-def get_args(additional_parameters=None):
+def parse_humanoid_args(additional_parameters=None):
     custom_parameters = [
         {"name": "--task", "type": str, "default": "n2", "help": "Registered task name."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
@@ -179,6 +179,13 @@ def get_args(additional_parameters=None):
     if args.sim_device=='cuda':
         args.sim_device += f":{args.sim_device_id}"
     return args
+
+
+# Historical API retained for internal callers.  Isaac Gym exposes a
+# zero-argument symbol with this generic name in some Python 3.8 import
+# orders, so executable entrypoints use ``parse_humanoid_args`` directly.
+get_args = parse_humanoid_args
+
 
 def export_policy_as_jit(actor_critic: object, path: str, normalizer: Union[object, None], filename="policy.pt"):
     """Export policy into a Torch JIT file.
