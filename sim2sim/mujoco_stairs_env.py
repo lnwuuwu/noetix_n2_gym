@@ -359,6 +359,17 @@ class MujocoStairsVecEnv(VecEnv):
             <= float(gate["max_path_failure_rate"])
             and float(summary["mean_climb_height_m"])
             >= float(gate["min_climb_fraction"]) * expected_climb
+            and float(summary["mean_alternating_tread_rate"])
+            >= float(gate["min_alternating_tread_rate"])
+            and float(summary["mean_same_tread_join_rate"])
+            <= float(gate["max_same_tread_join_rate"])
+            and abs(
+                float(summary["mean_forward_speed_m_s"])
+                - float(summary["command_speed_m_s"])
+            )
+            <= float(gate["max_speed_error_m_s"])
+            and float(summary["mean_max_yaw_deviation_rad"])
+            <= float(gate["max_yaw_deviation_rad"])
         )
 
     def update_physical_curriculum(self, summary):
@@ -1038,9 +1049,32 @@ class MujocoStairsVecEnv(VecEnv):
             / np.maximum(self.torque_limits, 1.0)
         )
         tracker = self.trackers[env_id]
+        overspeed = max(
+            velocity_x
+            - command_x
+            - float(self.training_cfg["overspeed_tolerance_m_s"]),
+            0.0,
+        )
         terms = {
             "tracking_speed": math.exp(
                 -((velocity_x - command_x) / 0.08) ** 2
+            ),
+            "overspeed": float(
+                min(
+                    (
+                        overspeed
+                        / max(
+                            float(
+                                self.training_cfg[
+                                    "overspeed_normalizer_m_s"
+                                ]
+                            ),
+                            1.0e-3,
+                        )
+                    )
+                    ** 2,
+                    4.0,
+                )
             ),
             "forward_progress": float(
                 np.clip(progress_velocity, -0.20, 0.35)
@@ -1244,6 +1278,36 @@ class MujocoStairsVecEnv(VecEnv):
         )
         return goal_reached, natural_success
 
+    def _curriculum_gait_gate_passed(self, env_id, ended_level):
+        target_steps = int(
+            self.curriculum_target_steps[int(ended_level)]
+        )
+        if target_steps < int(
+            self.curriculum_cfg["gait_promotion_min_target_steps"]
+        ):
+            return True
+        gait = self.trackers[int(env_id)].summary()
+        return (
+            gait["alternating_tread_rate"]
+            >= float(
+                self.curriculum_cfg[
+                    "gait_promotion_min_alternating_tread_rate"
+                ]
+            )
+            and gait["same_tread_join_rate"]
+            <= float(
+                self.curriculum_cfg[
+                    "gait_promotion_max_same_tread_join_rate"
+                ]
+            )
+            and gait["skipped_tread_rate"]
+            <= float(
+                self.curriculum_cfg[
+                    "gait_promotion_max_skipped_tread_rate"
+                ]
+            )
+        )
+
     def _advance_curriculum(
         self, env_ids, curriculum_completed, ended_levels
     ):
@@ -1254,6 +1318,9 @@ class MujocoStairsVecEnv(VecEnv):
             if (
                 curriculum_completed[env_id]
                 and ended_level == self.mastery_levels[env_id]
+                and self._curriculum_gait_gate_passed(
+                    env_id, ended_level
+                )
             ):
                 self.curriculum_success_streak[env_id] += 1
                 if (
@@ -1287,6 +1354,14 @@ class MujocoStairsVecEnv(VecEnv):
             "mujoco_completion_rate": final_completed[env_ids],
             "mujoco_curriculum_completion_rate": (
                 curriculum_completed[env_ids]
+            ),
+            "mujoco_curriculum_gait_pass_rate": np.asarray(
+                [
+                    bool(curriculum_completed[index])
+                    and self._curriculum_gait_gate_passed(index, level)
+                    for index, level in zip(env_ids, ended_levels)
+                ],
+                dtype=np.float64,
             ),
             "mujoco_natural_success_rate": natural_success[env_ids],
             "mujoco_fall_rate": fell[env_ids],
@@ -1634,7 +1709,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 4,
+            "version": 5,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -1647,7 +1722,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) != 4:
+        if int(state.get("version", -1)) not in (4, 5):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64

@@ -173,7 +173,7 @@ def train_configuration(args, env):
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
             "value_loss_coef": 1.0,
-            "entropy_coef": 0.003,
+            "entropy_coef": 0.001,
             "learning_rate": float(args.learning_rate),
             "max_grad_norm": 1.0,
             "use_clipped_value_loss": True,
@@ -244,6 +244,17 @@ def initialize_actor(runner, checkpoint_path, action_noise_std):
         "{}".format(metadata["iteration"], checkpoint_path),
         flush=True,
     )
+
+
+def set_policy_noise_std(policy, action_noise_std):
+    """Set exploration after resume without changing Actor weights."""
+    with torch.no_grad():
+        if hasattr(policy, "std"):
+            policy.std.fill_(float(action_noise_std))
+        else:
+            policy.log_std.fill_(
+                float(torch.log(torch.tensor(action_noise_std)))
+            )
 
 
 def export_actor(runner, output_path):
@@ -328,6 +339,15 @@ def selection_score(summary):
         * float(summary["mean_foot_riser_collision_fraction"])
         - 0.5 * float(summary["mean_max_lateral_deviation_m"])
         - 0.5 * float(summary["mean_max_yaw_deviation_rad"])
+        - 2.0
+        * min(
+            abs(
+                float(summary["mean_forward_speed_m_s"])
+                - float(summary["command_speed_m_s"])
+            )
+            / 0.10,
+            2.0,
+        )
         + 1.0
         * min(
             float(summary["mean_climb_height_m"]) / expected_climb,
@@ -368,6 +388,11 @@ def checkpoint_gate_passed(summary, curriculum_cfg):
         >= float(gate["min_alternating_tread_rate"])
         and float(summary["mean_same_tread_join_rate"])
         <= float(gate["max_same_tread_join_rate"])
+        and abs(
+            float(summary["mean_forward_speed_m_s"])
+            - float(summary["command_speed_m_s"])
+        )
+        <= float(gate["max_speed_error_m_s"])
         and float(summary["mean_max_lateral_deviation_m"])
         <= float(gate["max_lateral_deviation_m"])
         and float(summary["mean_max_yaw_deviation_rad"])
@@ -576,7 +601,8 @@ def train_stage(
         print(
             "NATIVE_MUJOCO_SELECTION iter={} score={:.4f} "
             "height={:.2f}m completion={:.1%} success={:.1%} path={:.1%} "
-            "fall={:.1%} yaw={:.3f}rad distance={:.3f}m "
+            "fall={:.1%} speed={:.3f}m/s speederr={:.3f}m/s "
+            "yaw={:.3f}rad distance={:.3f}m "
             "climb={:.3f}m alternate={:.1%} join={:.1%}".format(
                 current,
                 score,
@@ -585,6 +611,11 @@ def train_stage(
                 summary["success_rate"],
                 summary["path_failure_rate"],
                 summary["fall_rate"],
+                summary["mean_forward_speed_m_s"],
+                abs(
+                    summary["mean_forward_speed_m_s"]
+                    - summary["command_speed_m_s"]
+                ),
                 summary["mean_max_yaw_deviation_rad"],
                 summary["mean_forward_distance_m"],
                 summary["mean_climb_height_m"],
@@ -593,11 +624,40 @@ def train_stage(
             ),
             flush=True,
         )
+        promotion_gate = env.curriculum_cfg["physical_promotion"]
+        height_gate_passed = (
+            env.physical_curriculum_complete
+            or env._physical_gate_passed(summary, promotion_gate)
+        )
         promoted = env.update_physical_curriculum(summary)
+        reported_gate_streak = (
+            int(promotion_gate["consecutive_evaluations"])
+            if promoted
+            else int(env.physical_promotion_streak)
+        )
         # runner.learn() saved before deterministic evaluation. Persist the
         # updated gate streak/height in the same numeric checkpoint so resume
         # cannot silently fall back one physical stage.
         runner.save(str(checkpoint))
+        print(
+            "NATIVE_MUJOCO_HEIGHT_GATE iter={} passed={} streak={}/{} "
+            "height={:.2f}m alternate={:.1%} join={:.1%} "
+            "speederr={:.3f}m/s yaw={:.3f}rad".format(
+                current,
+                height_gate_passed,
+                reported_gate_streak,
+                promotion_gate["consecutive_evaluations"],
+                summary["step_height_m"],
+                summary["mean_alternating_tread_rate"],
+                summary["mean_same_tread_join_rate"],
+                abs(
+                    summary["mean_forward_speed_m_s"]
+                    - summary["command_speed_m_s"]
+                ),
+                summary["mean_max_yaw_deviation_rad"],
+            ),
+            flush=True,
+        )
         if promoted:
             print(
                 "NATIVE_MUJOCO_CURRICULUM_RESET iter={} height={:.2f}m".format(
@@ -609,7 +669,8 @@ def train_stage(
             print(
                 "NATIVE_MUJOCO_BEST_REJECT iter={} height={:.2f}m "
                 "completion={:.1%} success={:.1%} path={:.1%} "
-                "fall={:.1%} climb={:.3f}m".format(
+                "fall={:.1%} climb={:.3f}m speederr={:.3f}m/s "
+                "alternate={:.1%} join={:.1%}".format(
                     current,
                     summary["step_height_m"],
                     summary["completion_rate"],
@@ -617,6 +678,12 @@ def train_stage(
                     summary["path_failure_rate"],
                     summary["fall_rate"],
                     summary["mean_climb_height_m"],
+                    abs(
+                        summary["mean_forward_speed_m_s"]
+                        - summary["command_speed_m_s"]
+                    ),
+                    summary["mean_alternating_tread_rate"],
+                    summary["mean_same_tread_join_rate"],
                 ),
                 flush=True,
             )
@@ -684,12 +751,23 @@ def main(args):
     if args.resume:
         resume_path = Path(args.resume).expanduser().resolve()
         runner.load(str(resume_path), load_optimizer=True)
+        if args.resume_action_noise_std is not None:
+            set_policy_noise_std(
+                runner.alg.policy, args.resume_action_noise_std
+            )
         print(
             "Resumed native MuJoCo checkpoint at iteration {}: {}".format(
                 runner.current_learning_iteration, resume_path
             ),
             flush=True,
         )
+        if args.resume_action_noise_std is not None:
+            print(
+                "Reset resumed exploration std to {:.3f}".format(
+                    args.resume_action_noise_std
+                ),
+                flush=True,
+            )
     elif not args.no_warm_start:
         if args.init_checkpoint == "auto":
             source_checkpoint = auto_init_checkpoint()
@@ -721,7 +799,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 4,
+        "curriculum_version": 5,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
@@ -898,6 +976,9 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=5.0e-5)
     parser.add_argument("--action_noise_std", type=float, default=0.20)
     parser.add_argument(
+        "--resume_action_noise_std", type=float, default=None
+    )
+    parser.add_argument(
         "--symmetry_loss_coeff", type=float, default=0.50
     )
     parser.add_argument(
@@ -907,7 +988,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v4_s42"
+        "--run_name", default="mujoco_curriculum_v5_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(
@@ -931,6 +1012,11 @@ if __name__ == "__main__":
         raise ValueError("--rollout_steps must be positive")
     if arguments.action_noise_std <= 0.0:
         raise ValueError("--action_noise_std must be positive")
+    if (
+        arguments.resume_action_noise_std is not None
+        and arguments.resume_action_noise_std <= 0.0
+    ):
+        raise ValueError("--resume_action_noise_std must be positive")
     if arguments.selection_interval < 0:
         raise ValueError("--selection_interval must be non-negative")
     if arguments.selection_episodes < 1:
