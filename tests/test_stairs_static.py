@@ -1711,6 +1711,9 @@ class SourceCompatibilityTests(unittest.TestCase):
             "swing_trajectory_error",
             "next_tread_target",
             "foothold_lateral",
+            "expected_swing_liftoff",
+            "expected_swing_delay",
+            "wrong_foot_swing",
             "arm_swing",
             "foot_riser_collision",
             "lower_leg_collision",
@@ -1748,8 +1751,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("qualified_completion", env_source)
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 6', env_source)
-        self.assertIn("not in (4, 5, 6)", env_source)
+        self.assertIn('"version": 7', env_source)
+        self.assertIn("not in (4, 5, 6, 7)", env_source)
+        self.assertIn('"wrong_foot_swing"', env_source)
         self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
 
     def test_native_mujoco_trainer_has_curriculum_and_robust_selection(self):
@@ -1760,6 +1764,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("freeze_actor_iterations", source)
         self.assertIn("critic and Adam reset", source)
         self.assertIn("selection_score", source)
+        self.assertIn("physical_promotion_readiness", source)
         self.assertIn("checkpoint_gate_passed", source)
         self.assertIn("promotion_evaluation_seed", source)
         self.assertIn("robust_checkpoint_tournament", source)
@@ -1830,7 +1835,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v6_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v7_recover_s${TRAIN_SEED}"',
             launcher,
         )
         self.assertIn("LEARNING_RATE=3e-5", launcher)
@@ -1850,11 +1855,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertIn('checkpoint_path="${LATEST_BEST}"', launcher)
         self.assertIn(
-            "No accepted v4/v5/v6 model_best.pt exists yet.", launcher
+            "No accepted v4/v5/v6/v7 model_best.pt exists yet.", launcher
         )
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
         self.assertIn(
-            '-path "*mujoco_curriculum_v[456]_*_s${TRAIN_SEED}*"',
+            '-path "*mujoco_curriculum_v[4567]_*_s${TRAIN_SEED}*"',
             launcher,
         )
         self.assertIn("! -path '*smoke*'", launcher)

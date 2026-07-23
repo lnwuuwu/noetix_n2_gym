@@ -373,6 +373,52 @@ def selection_score(summary):
     )
 
 
+def physical_promotion_readiness(env, summary):
+    """Rank intermediate policies by how many height-gate clauses they meet."""
+    gate = env.curriculum_cfg["physical_promotion"]
+    expected_climb = (
+        int(env.stair_cfg["num_steps"]) * env.physical_step_height
+    )
+    speed_error = abs(
+        float(summary["mean_forward_speed_m_s"])
+        - float(summary["command_speed_m_s"])
+    )
+    checks = (
+        math.isclose(
+            float(summary["step_height_m"]),
+            env.physical_step_height,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ),
+        float(summary["completion_rate"])
+        >= float(gate["min_completion_rate"]),
+        float(summary["fall_rate"]) <= float(gate["max_fall_rate"]),
+        float(summary["path_failure_rate"])
+        <= float(gate["max_path_failure_rate"]),
+        float(summary["mean_climb_height_m"])
+        >= env._physical_gate_value(gate, "min_climb_fraction")
+        * expected_climb,
+        float(summary["mean_alternating_tread_rate"])
+        >= env._physical_gate_value(
+            gate, "min_alternating_tread_rate"
+        ),
+        float(summary["mean_same_tread_join_rate"])
+        <= env._physical_gate_value(
+            gate, "max_same_tread_join_rate"
+        ),
+        speed_error
+        <= env._physical_gate_value(gate, "max_speed_error_m_s"),
+        float(summary["mean_max_yaw_deviation_rad"])
+        <= env._physical_gate_value(gate, "max_yaw_deviation_rad"),
+    )
+    # A policy satisfying one more hard gate must outrank any cosmetic score
+    # gain. This preserves the speed-controlled model_300-like candidate over
+    # a faster model with slightly higher completion but two failed gates.
+    return 100.0 * sum(bool(value) for value in checks) + selection_score(
+        summary
+    )
+
+
 def checkpoint_gate_passed(summary, curriculum_cfg):
     """Require deterministic 10 cm climbing before naming a model best."""
     heights = curriculum_cfg["physical_step_heights_m"]
@@ -463,6 +509,7 @@ def restore_progress_best(log_dir):
         "height_index": -1,
         "height_m": 0.0,
         "score": float("-inf"),
+        "readiness_score": float("-inf"),
         "iteration": None,
         "summary": None,
     }
@@ -493,6 +540,7 @@ def update_progress_best(
     height_index,
     summary,
     score,
+    readiness_score,
     progress_best,
 ):
     """Never lose an earlier stable policy to later PPO regression."""
@@ -500,7 +548,8 @@ def update_progress_best(
         int(height_index) > int(progress_best["height_index"])
         or (
             int(height_index) == int(progress_best["height_index"])
-            and float(score) > float(progress_best["score"])
+            and float(readiness_score)
+            > float(progress_best["readiness_score"])
         )
     )
     if not improved:
@@ -509,6 +558,7 @@ def update_progress_best(
         height_index=int(height_index),
         height_m=float(summary["step_height_m"]),
         score=float(score),
+        readiness_score=float(readiness_score),
         iteration=int(iteration),
         summary=summary,
     )
@@ -517,11 +567,12 @@ def update_progress_best(
         json.dump(progress_best, state_file, indent=2)
     print(
         "NATIVE_MUJOCO_PROGRESS_BEST iter={} height={:.2f}m "
-        "score={:.4f} completion={:.1%} fall={:.1%} "
+        "score={:.4f} readiness={:.1f} completion={:.1%} fall={:.1%} "
         "alternate={:.1%} join={:.1%}".format(
             iteration,
             summary["step_height_m"],
             score,
+            readiness_score,
             summary["completion_rate"],
             summary["fall_rate"],
             summary["mean_alternating_tread_rate"],
@@ -686,6 +737,7 @@ def train_stage(
         if summary is None:
             continue
         score = selection_score(summary)
+        readiness_score = physical_promotion_readiness(env, summary)
         print(
             "NATIVE_MUJOCO_SELECTION iter={} score={:.4f} "
             "height={:.2f}m completion={:.1%} success={:.1%} path={:.1%} "
@@ -735,6 +787,7 @@ def train_stage(
             evaluated_height_index,
             summary,
             score,
+            readiness_score,
             progress_best,
         )
         print(
@@ -897,7 +950,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 6,
+        "curriculum_version": 7,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
@@ -1112,7 +1165,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v6_s42"
+        "--run_name", default="mujoco_curriculum_v7_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

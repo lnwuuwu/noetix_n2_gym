@@ -380,7 +380,14 @@ class MujocoStairsVecEnv(VecEnv):
         scheduled = gate.get(key + "_by_height")
         if scheduled is None:
             return float(gate[key])
-        return float(scheduled[self.physical_height_index])
+        # Once every configured height has been promoted, the index points
+        # one element past the schedule.  Keep using the strictest (last)
+        # gate for checkpoint ranking and post-curriculum evaluation.
+        schedule_index = min(
+            self.physical_height_index,
+            len(scheduled) - 1,
+        )
+        return float(scheduled[schedule_index])
 
     def _physical_gate_passed(self, summary, gate):
         expected_climb = (
@@ -969,6 +976,9 @@ class MujocoStairsVecEnv(VecEnv):
             "error": 0.0,
             "next_tread_score": 0.0,
             "lateral_score": 0.0,
+            "expected_liftoff": 0.0,
+            "expected_delay": 0.0,
+            "wrong_foot_swing": 0.0,
             "active": 0.0,
             "progress": 0.0,
             "expected_foot": expected_foot,
@@ -997,16 +1007,38 @@ class MujocoStairsVecEnv(VecEnv):
                 ]
             )
         )
-        active = (
+        behavior_active = (
             near_stairs
-            and (
-                bool(scheduled_swing[expected_foot])
-                or bool(physical_swing[expected_foot])
-            )
-            and bool(physical_airborne[expected_foot])
-            and bool(tracker.opposite_valid[expected_foot])
             and float(state["velocity"][0]) > 0.03
             and float(state["gravity"][2]) < -0.80
+        )
+        expected_airborne = bool(physical_airborne[expected_foot])
+        scheduled_expected = bool(scheduled_swing[expected_foot])
+        inactive["expected_liftoff"] = float(
+            behavior_active
+            and expected_airborne
+            and bool(tracker.opposite_valid[expected_foot])
+        )
+        inactive["expected_delay"] = float(
+            behavior_active
+            and scheduled_expected
+            and not expected_airborne
+        ) * abs(
+            math.sin(2.0 * math.pi * self._phase_fraction(env_id))
+        )
+        inactive["wrong_foot_swing"] = float(
+            behavior_active
+            and bool(np.any(physical_airborne))
+            and not expected_airborne
+        )
+        active = (
+            behavior_active
+            and (
+                scheduled_expected
+                or bool(physical_swing[expected_foot])
+            )
+            and expected_airborne
+            and bool(tracker.opposite_valid[expected_foot])
         )
         if not active:
             return inactive
@@ -1103,6 +1135,9 @@ class MujocoStairsVecEnv(VecEnv):
             "error": squared_error,
             "next_tread_score": next_tread_score,
             "lateral_score": lateral_score,
+            "expected_liftoff": inactive["expected_liftoff"],
+            "expected_delay": inactive["expected_delay"],
+            "wrong_foot_swing": inactive["wrong_foot_swing"],
             "active": 1.0,
             "progress": progress,
             "expected_foot": expected_foot,
@@ -1495,6 +1530,15 @@ class MujocoStairsVecEnv(VecEnv):
                 swing_reference["lateral_score"]
             )
             * float(swing_reference["active"]),
+            "expected_swing_liftoff": float(
+                swing_reference["expected_liftoff"]
+            ),
+            "expected_swing_delay": float(
+                swing_reference["expected_delay"]
+            ),
+            "wrong_foot_swing": float(
+                swing_reference["wrong_foot_swing"]
+            ),
             "arm_swing": arm_match * gait_active,
             "no_progress": float(progress_velocity < 0.03),
             "double_flight": float(np.all(raw_tread < 0)),
@@ -2125,7 +2169,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 6,
+            "version": 7,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -2138,7 +2182,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (4, 5, 6):
+        if int(state.get("version", -1)) not in (4, 5, 6, 7):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64
