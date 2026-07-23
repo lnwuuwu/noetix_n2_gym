@@ -667,11 +667,13 @@ def aggregate_results(results, config, policy_path):
         "engine": "mujoco",
         "policy_path": policy_path,
         "episodes": len(results),
+        "stair_start_x_m": float(config["stairs"]["start_x"]),
         "step_height_m": float(config["stairs"]["step_height"]),
         "command_speed_m_s": float(config["cmd_init"][0]),
     }
     for key in keys:
-        summary["mean_" + key] = float(
+        aggregate_key = key if key.startswith("mean_") else "mean_" + key
+        summary[aggregate_key] = float(
             np.mean([episode[key] for episode in results])
         )
     for binary in (
@@ -707,10 +709,7 @@ def write_report(output_path, summary, episodes):
     print("Saved MuJoCo JSON: " + json_path)
 
 
-def evaluate(args):
-    config_path = _resolve_config_path(args.config_file)
-    with open(config_path, "r") as config_file:
-        config = yaml.load(config_file, Loader=yaml.FullLoader)
+def _apply_cli_overrides(config, args):
     if args.policy_path:
         config["policy_path"] = args.policy_path
     if args.step_height is not None:
@@ -719,6 +718,34 @@ def evaluate(args):
         config["validation"]["episode_duration"] = float(args.duration)
     if args.command_speed is not None:
         config["cmd_init"][0] = float(args.command_speed)
+    if args.stair_start_x is not None:
+        stair_start_x = float(args.stair_start_x)
+        config["stairs"]["start_x"] = stair_start_x
+        config["validation"]["success_x"] = (
+            stair_start_x
+            + float(config["stairs"]["step_width"])
+            * int(config["stairs"]["num_steps"])
+            + 0.20
+        )
+    if args.initial_joint_noise is not None:
+        config["validation"]["initial_joint_noise"] = float(
+            args.initial_joint_noise
+        )
+    if args.initial_lateral_noise is not None:
+        config["validation"]["initial_lateral_noise"] = float(
+            args.initial_lateral_noise
+        )
+    for name in ("initial_joint_noise", "initial_lateral_noise"):
+        if float(config["validation"].get(name, 0.0)) < 0.0:
+            raise ValueError("--{} must be non-negative".format(name))
+    return config
+
+
+def evaluate(args):
+    config_path = _resolve_config_path(args.config_file)
+    with open(config_path, "r") as config_file:
+        config = yaml.load(config_file, Loader=yaml.FullLoader)
+    config = _apply_cli_overrides(config, args)
 
     policy_path = _expanded_path(config["policy_path"])
     xml_path = _expanded_path(config["xml_path"])
@@ -727,7 +754,9 @@ def evaluate(args):
     if not os.path.isfile(xml_path):
         raise ValueError("MJCF does not exist: " + xml_path)
 
-    model = load_mujoco_model(xml_path, config["stairs"])
+    model = load_mujoco_model(
+        xml_path, config["stairs"], config.get("mujoco_physics")
+    )
     _configure_solver(model, config)
     policy = torch.jit.load(policy_path, map_location="cpu")
     policy.eval()
@@ -757,7 +786,8 @@ def evaluate(args):
         )
     summary = aggregate_results(results, config, policy_path)
     print(
-        "MuJoCo step={step_height_m:.2f}m success={success_rate:.1%} "
+        "MuJoCo start={stair_start_x_m:.2f}m step={step_height_m:.2f}m "
+        "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
         "numeric={numerical_failure_rate:.1%} "
         "alternate={mean_alternating_tread_rate:.1%} "
@@ -780,7 +810,10 @@ if __name__ == "__main__":
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--duration", type=float, default=None)
     parser.add_argument("--step_height", type=float, default=None)
+    parser.add_argument("--stair_start_x", type=float, default=None)
     parser.add_argument("--command_speed", type=float, default=None)
+    parser.add_argument("--initial_joint_noise", type=float, default=None)
+    parser.add_argument("--initial_lateral_noise", type=float, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--seed", type=int, default=42)
     arguments = parser.parse_args()

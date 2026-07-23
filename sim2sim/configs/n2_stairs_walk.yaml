@@ -11,6 +11,15 @@ integrator: implicitfast
 solver_iterations: 100
 solver_noslip_iterations: 10
 
+# Match the Isaac Gym URDF import before measuring sim-to-sim transfer. The
+# legacy MJCF added joint-side physics that is absent from the training plant.
+mujoco_physics:
+  joint_damping: 0.0
+  joint_armature: 0.0
+  joint_frictionloss: 0.0
+  contact_dim: 3
+  contact_priority: 1
+
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20,
       30, 30, 30, 30, 80, 80, 120, 120, 20]
 kds: [1, 1, 1, 1, 5, 5, 5, 5, 2,

@@ -19,21 +19,43 @@ if _UTILS_DIR not in sys.path:
     sys.path.insert(0, _UTILS_DIR)
 from stairs_terrain import terrain_height_at_x  # noqa: E402
 
-def load_mujoco_model(xml_path, stair_cfg=None):
-    """Load MJCF, optionally replacing its direct-child boxes with training stairs."""
+def load_mujoco_model(xml_path, stair_cfg=None, physics_cfg=None):
+    """Load MJCF and optionally align its contacts/joints with training."""
     if stair_cfg is None:
         return mujoco.MjModel.from_xml_path(xml_path)
 
+    physics_cfg = physics_cfg or {}
     tree = ET.parse(xml_path)
     root = tree.getroot()
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("MJCF has no worldbody: {}".format(xml_path))
 
+    # Isaac Gym imports this URDF with zero armature and no URDF joint
+    # friction/damping.  The historical hand-written MJCF added all three,
+    # which changes the closed-loop plant before the policy reaches a stair.
+    joint_default = root.find("./default/joint")
+    if joint_default is not None:
+        for attribute, default in (
+            ("damping", 0.0),
+            ("armature", 0.0),
+            ("frictionloss", 0.0),
+        ):
+            joint_default.set(
+                attribute,
+                str(float(physics_cfg.get("joint_" + attribute, default))),
+            )
+
     # The repository's 18-DoF MJCF already contains a historical staircase.
     # Remove only world-level boxes; robot collision geoms are nested in bodies.
     # It also contains two coincident planes, which would duplicate contacts.
     friction = str(stair_cfg.get("friction", "0.8 0.005 0.0001"))
+    contact_attributes = {
+        "friction": friction,
+        "condim": str(int(physics_cfg.get("contact_dim", 3))),
+        # Give terrain parameters priority over the collision-mesh defaults.
+        "priority": str(int(physics_cfg.get("contact_priority", 1))),
+    }
     seen_ground_plane = False
     for geom in list(worldbody.findall("geom")):
         if geom.attrib.get("type") == "box":
@@ -42,7 +64,8 @@ def load_mujoco_model(xml_path, stair_cfg=None):
             if seen_ground_plane:
                 worldbody.remove(geom)
             else:
-                geom.set("friction", friction)
+                for attribute, value in contact_attributes.items():
+                    geom.set(attribute, value)
                 seen_ground_plane = True
     if not seen_ground_plane:
         ET.SubElement(
@@ -52,7 +75,7 @@ def load_mujoco_model(xml_path, stair_cfg=None):
                 "name": "n2_stair_ground",
                 "type": "plane",
                 "size": "0 0 1",
-                "friction": friction,
+                **contact_attributes,
             },
         )
 
@@ -75,8 +98,8 @@ def load_mujoco_model(xml_path, stair_cfg=None):
                     0.5 * step_width, half_width, 0.5 * height
                 ),
                 "pos": "{} 0 {}".format(center_x, 0.5 * height),
-                "friction": friction,
                 "rgba": "0.55 0.58 0.62 1",
+                **contact_attributes,
             },
         )
 
@@ -95,8 +118,8 @@ def load_mujoco_model(xml_path, stair_cfg=None):
             "pos": "{} 0 {}".format(
                 top_start + 0.5 * top_length, 0.5 * top_height
             ),
-            "friction": friction,
             "rgba": "0.55 0.58 0.62 1",
+            **contact_attributes,
         },
     )
 
@@ -266,7 +289,9 @@ def run_mujoco(cfg):
         navigation_cfg = config.get("navigation_state")
         include_base_lin_vel = bool(config.get("include_base_lin_vel", False))
     
-    model = load_mujoco_model(xml_path, stair_cfg)
+    model = load_mujoco_model(
+        xml_path, stair_cfg, config.get("mujoco_physics")
+    )
     model.opt.timestep = simulation_dt
     integrator = str(config.get("integrator", "")).strip().upper()
     if integrator:

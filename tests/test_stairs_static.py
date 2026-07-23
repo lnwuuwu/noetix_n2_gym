@@ -446,9 +446,50 @@ class MujocoSim2SimTests(unittest.TestCase):
         self.assertEqual(config["stairs"]["num_steps"], 6)
         self.assertEqual(config["cmd_init"], [0.18, 0.0, 0.0])
         self.assertEqual(config["integrator"], "implicitfast")
+        self.assertEqual(config["mujoco_physics"]["joint_armature"], 0.0)
+        self.assertEqual(config["mujoco_physics"]["joint_frictionloss"], 0.0)
+        self.assertEqual(config["mujoco_physics"]["contact_dim"], 3)
         self.assertIn("numerical_failure", (
             ROOT / "sim2sim/eval_stairs_mujoco.py"
         ).read_text())
+
+    def test_flat_diagnostic_moves_stairs_and_disables_initial_noise(self):
+        config = yaml.safe_load(
+            (ROOT / "sim2sim/configs/n2_stairs_walk.yaml").read_text()
+        )
+        args = types.SimpleNamespace(
+            policy_path=None,
+            step_height=None,
+            duration=None,
+            command_speed=None,
+            stair_start_x=100.0,
+            initial_joint_noise=0.0,
+            initial_lateral_noise=0.0,
+        )
+        updated = self.evaluator._apply_cli_overrides(config, args)
+        self.assertEqual(updated["stairs"]["start_x"], 100.0)
+        self.assertAlmostEqual(updated["validation"]["success_x"], 102.0)
+        self.assertEqual(updated["validation"]["initial_joint_noise"], 0.0)
+        self.assertEqual(updated["validation"]["initial_lateral_noise"], 0.0)
+
+    def test_aggregation_does_not_double_prefix_mean_metrics(self):
+        config = {
+            "stairs": {"start_x": 0.60, "step_height": 0.10},
+            "cmd_init": [0.18, 0.0, 0.0],
+        }
+        result = {
+            "success": 0.0,
+            "completion": 0.0,
+            "fall": 0.0,
+            "path_failure": 1.0,
+            "numerical_failure": 0.0,
+            "mean_forward_speed_m_s": 0.17,
+        }
+        summary = self.evaluator.aggregate_results(
+            [result], config, "policy.pt"
+        )
+        self.assertEqual(summary["mean_forward_speed_m_s"], 0.17)
+        self.assertNotIn("mean_mean_forward_speed_m_s", summary)
 
     def test_contact_tracker_accepts_true_alternating_stairs(self):
         tracker = self.evaluator.GaitTracker(
