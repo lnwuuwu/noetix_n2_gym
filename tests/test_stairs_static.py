@@ -465,6 +465,7 @@ class MujocoSim2SimTests(unittest.TestCase):
             stair_start_x=100.0,
             initial_joint_noise=0.0,
             initial_lateral_noise=0.0,
+            phase_offset=None,
             physics_preset=None,
         )
         updated = self.evaluator._apply_cli_overrides(config, args)
@@ -504,6 +505,10 @@ class MujocoSim2SimTests(unittest.TestCase):
         )
         self.assertEqual(presets["hybrid"]["contact_priority"], 1)
         self.assertEqual(presets["isaac_aligned"]["joint_armature"], 0.0)
+        self.assertEqual(
+            self.evaluator.PHASE_SWEEP_OFFSETS,
+            (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875),
+        )
 
     def test_contact_tracker_accepts_true_alternating_stairs(self):
         tracker = self.evaluator.GaitTracker(

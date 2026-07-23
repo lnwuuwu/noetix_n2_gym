@@ -86,6 +86,8 @@ PHYSICS_PRESETS = {
     },
 }
 
+PHASE_SWEEP_OFFSETS = tuple(index / 8.0 for index in range(8))
+
 
 def _resolve_config_path(value):
     if os.path.isabs(value):
@@ -696,6 +698,8 @@ def run_episode(config, model, policy, seed):
         "mean_forward_speed_m_s": speed_sum / max(1, control_steps),
         "max_lateral_deviation_m": max_lateral,
         "max_yaw_deviation_rad": max_yaw,
+        "final_lateral_position_m": float(data.qpos[1]),
+        "final_yaw_rad": float(yaw),
     }
     result.update({key: float(value) for key, value in gait.items()})
     return result
@@ -713,6 +717,9 @@ def aggregate_results(results, config, policy_path):
         "stair_start_x_m": float(config["stairs"]["start_x"]),
         "step_height_m": float(config["stairs"]["step_height"]),
         "command_speed_m_s": float(config["cmd_init"][0]),
+        "gait_phase_offset": float(
+            config.get("gait_phase", {}).get("phase_offset", 0.0)
+        ),
     }
     for key in keys:
         aggregate_key = key if key.startswith("mean_") else "mean_" + key
@@ -778,6 +785,11 @@ def _apply_cli_overrides(config, args):
         config["validation"]["initial_lateral_noise"] = float(
             args.initial_lateral_noise
         )
+    if args.phase_offset is not None:
+        phase_offset = float(args.phase_offset)
+        if not 0.0 <= phase_offset < 1.0:
+            raise ValueError("--phase_offset must be in [0, 1)")
+        config.setdefault("gait_phase", {})["phase_offset"] = phase_offset
     if args.physics_preset is not None:
         if args.physics_preset not in PHYSICS_PRESETS:
             raise ValueError(
@@ -838,7 +850,7 @@ def evaluate(args):
     summary = aggregate_results(results, config, policy_path)
     print(
         "MuJoCo physics={physics_preset} start={stair_start_x_m:.2f}m "
-        "step={step_height_m:.2f}m "
+        "step={step_height_m:.2f}m phase={gait_phase_offset:.3f} "
         "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
         "path={path_failure_rate:.1%} "
@@ -847,6 +859,7 @@ def evaluate(args):
         "speed={mean_forward_speed_m_s:.3f}m/s "
         "lateral={mean_max_lateral_deviation_m:.3f}m "
         "yaw={mean_max_yaw_deviation_rad:.3f}rad "
+        "final_yaw={mean_final_yaw_rad:+.3f}rad "
         "alternate={mean_alternating_tread_rate:.1%} "
         "join={mean_same_tread_join_rate:.1%} "
         "riser={mean_foot_riser_collision_fraction:.1%} "
@@ -871,15 +884,19 @@ if __name__ == "__main__":
     parser.add_argument("--command_speed", type=float, default=None)
     parser.add_argument("--initial_joint_noise", type=float, default=None)
     parser.add_argument("--initial_lateral_noise", type=float, default=None)
+    parser.add_argument("--phase_offset", type=float, default=None)
     parser.add_argument(
         "--physics_preset", choices=tuple(PHYSICS_PRESETS), default=None
     )
     parser.add_argument("--physics_sweep", action="store_true")
+    parser.add_argument("--phase_sweep", action="store_true")
     parser.add_argument("--output", default=None)
     parser.add_argument("--seed", type=int, default=42)
     arguments = parser.parse_args()
     if arguments.episodes < 1:
         raise ValueError("--episodes must be positive")
+    if arguments.physics_sweep and arguments.phase_sweep:
+        raise ValueError("Choose only one of --physics_sweep/--phase_sweep")
     if arguments.physics_sweep:
         output_path = arguments.output
         for preset_name in PHYSICS_PRESETS:
@@ -894,6 +911,26 @@ if __name__ == "__main__":
                     output_root + "_" + preset_name + ".csv"
                 )
             print("\n=== MuJoCo physics preset: {} ===".format(preset_name))
+            evaluate(sweep_arguments)
+    elif arguments.phase_sweep:
+        output_path = arguments.output
+        for phase_offset in PHASE_SWEEP_OFFSETS:
+            sweep_arguments = copy.copy(arguments)
+            sweep_arguments.phase_sweep = False
+            sweep_arguments.phase_offset = phase_offset
+            if output_path:
+                output_root, output_extension = os.path.splitext(output_path)
+                if output_extension.lower() != ".csv":
+                    output_root = output_path
+                phase_label = "{:03d}".format(round(phase_offset * 1000))
+                sweep_arguments.output = (
+                    output_root + "_phase_" + phase_label + ".csv"
+                )
+            print(
+                "\n=== MuJoCo gait phase offset: {:.3f} ===".format(
+                    phase_offset
+                )
+            )
             evaluate(sweep_arguments)
     else:
         evaluate(arguments)
