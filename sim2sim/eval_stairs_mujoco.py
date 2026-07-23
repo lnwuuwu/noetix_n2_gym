@@ -310,7 +310,7 @@ def load_policy(config, policy_path=None, checkpoint_path=None):
                 )
             )
         print(
-            "Loaded Isaac checkpoint iter={iteration} actor={input_dim}"
+            "Loaded policy checkpoint iter={iteration} actor={input_dim}"
             "->{hidden}->{output_dim}: {path}".format(
                 hidden="->".join(
                     str(value) for value in metadata["hidden_dims"]

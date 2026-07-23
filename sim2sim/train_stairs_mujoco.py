@@ -93,8 +93,8 @@ def auto_init_checkpoint():
                 return checkpoint
 
     patterns = (
-        "logs/n2_stairs_walk/*natural_l4_tiered_8600_s42/model_8600.pt",
         "logs/n2_stairs_walk/*natural_l4_polish_9000_s42/model_9000.pt",
+        "logs/n2_stairs_walk/*natural_l4_tiered_8600_s42/model_8600.pt",
     )
     for pattern in patterns:
         matches = [
@@ -111,7 +111,29 @@ def auto_init_checkpoint():
     )
 
 
-def train_configuration(args):
+def auto_native_checkpoint():
+    candidates = [
+        Path(value)
+        for value in glob.glob(
+            str(
+                ROOT
+                / "logs_mujoco"
+                / "n2_stairs_walk"
+                / "*"
+                / "model_best.pt"
+            )
+        )
+        if "smoke" not in Path(value).parent.name
+    ]
+    if not candidates:
+        raise ValueError(
+            "No native MuJoCo model_best.pt exists; use "
+            "--init_checkpoint=auto for the Isaac initialization"
+        )
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def train_configuration(args, env):
     return {
         "policy": {
             "class_name": "ActorCritic",
@@ -127,15 +149,24 @@ def train_configuration(args):
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
             "value_loss_coef": 1.0,
-            "entropy_coef": 0.002,
+            "entropy_coef": 0.003,
             "learning_rate": float(args.learning_rate),
             "max_grad_norm": 1.0,
             "use_clipped_value_loss": True,
-            "gamma": 0.99,
+            "gamma": 0.997,
             "lam": 0.95,
-            "desired_kl": 0.01,
+            "desired_kl": 0.008,
             "schedule": "adaptive",
             "normalize_advantage_per_mini_batch": False,
+            "symmetry_cfg": {
+                "_env": env,
+                "actor_loss_coeff": float(
+                    args.symmetry_loss_coeff
+                ),
+                "critic_loss_coeff": float(
+                    args.critic_symmetry_loss_coeff
+                ),
+            },
         },
         "runner": {
             "num_steps_per_env": int(args.rollout_steps),
@@ -185,7 +216,7 @@ def initialize_actor(runner, checkpoint_path, action_noise_std):
                 float(torch.log(torch.tensor(action_noise_std)))
             )
     print(
-        "Initialized MuJoCo Actor from Isaac iter={} (critic and Adam reset): "
+        "Initialized MuJoCo Actor iter={} (critic and Adam reset): "
         "{}".format(metadata["iteration"], checkpoint_path),
         flush=True,
     )
@@ -258,16 +289,23 @@ def run_mujoco_evaluation(
 def selection_score(summary):
     """Balance physical completion with strict natural-gait quality."""
     return (
-        5.0 * float(summary["completion_rate"])
-        + 2.0 * float(summary["success_rate"])
-        - 2.0 * float(summary["path_failure_rate"])
-        - 2.0 * float(summary["fall_rate"])
-        + 0.75 * float(summary["mean_alternating_tread_rate"])
-        - 0.75 * float(summary["mean_same_tread_join_rate"])
+        20.0 * float(summary["success_rate"])
+        + 8.0 * float(summary["completion_rate"])
+        - 3.0 * float(summary["path_failure_rate"])
+        - 3.0 * float(summary["fall_rate"])
+        + 2.0 * float(summary["mean_alternating_tread_rate"])
+        - 1.5 * float(summary["mean_same_tread_join_rate"])
         + 0.25 * float(summary.get("mean_arm_swing_match", 0.0))
-        - 0.50
+        - 1.0
         * float(summary["mean_foot_riser_collision_fraction"])
-        + 0.25
+        - 0.5 * float(summary["mean_max_lateral_deviation_m"])
+        - 0.5 * float(summary["mean_max_yaw_deviation_rad"])
+        + 1.0
+        * min(
+            float(summary["mean_climb_height_m"]) / 0.60,
+            1.0,
+        )
+        + 0.5
         * min(
             float(summary["mean_forward_distance_m"]) / 2.60,
             1.0,
@@ -303,6 +341,86 @@ def run_acceptance(args, checkpoint_path, log_dir):
     return summary
 
 
+def robust_checkpoint_tournament(args, log_dir, best):
+    """Re-evaluate top periodic candidates on one larger fixed seed set."""
+    if args.skip_eval or args.tournament_candidates <= 0:
+        return None
+    candidates = []
+    for report_path in sorted(log_dir.glob("selection_*.json")):
+        try:
+            iteration = int(report_path.stem.split("_")[-1])
+            with report_path.open() as report_file:
+                summary = json.load(report_file)["summary"]
+            checkpoint = log_dir / "model_{}.pt".format(iteration)
+            if checkpoint.is_file():
+                candidates.append(
+                    (
+                        selection_score(summary),
+                        iteration,
+                        checkpoint,
+                    )
+                )
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    candidates.sort(reverse=True)
+    candidates = candidates[:int(args.tournament_candidates)]
+    if not candidates:
+        return None
+
+    winner = None
+    for _, iteration, checkpoint in candidates:
+        output = log_dir / "tournament_{:05d}.csv".format(iteration)
+        summary = run_mujoco_evaluation(
+            args,
+            checkpoint,
+            output,
+            args.tournament_episodes,
+            args.seed + 30000,
+        )
+        if summary is None:
+            continue
+        score = selection_score(summary)
+        print(
+            "NATIVE_MUJOCO_TOURNAMENT iter={} score={:.4f} "
+            "completion={:.1%} success={:.1%} path={:.1%} "
+            "fall={:.1%} alternate={:.1%} join={:.1%}".format(
+                iteration,
+                score,
+                summary["completion_rate"],
+                summary["success_rate"],
+                summary["path_failure_rate"],
+                summary["fall_rate"],
+                summary["mean_alternating_tread_rate"],
+                summary["mean_same_tread_join_rate"],
+            ),
+            flush=True,
+        )
+        if winner is None or score > winner["score"]:
+            winner = {
+                "score": score,
+                "iteration": iteration,
+                "summary": summary,
+                "checkpoint": checkpoint,
+            }
+    if winner is None:
+        return None
+    shutil.copy2(winner["checkpoint"], log_dir / "model_best.pt")
+    best.update(
+        score=winner["score"],
+        iteration=winner["iteration"],
+        summary=winner["summary"],
+    )
+    with (log_dir / "model_best.json").open("w") as best_file:
+        json.dump(best, best_file, indent=2)
+    print(
+        "NATIVE_MUJOCO_ROBUST_BEST iter={} score={:.4f}".format(
+            best["iteration"], float(best["score"])
+        ),
+        flush=True,
+    )
+    return winner
+
+
 def train_stage(
     runner,
     env,
@@ -321,6 +439,19 @@ def train_stage(
             chunk = min(chunk, int(args.selection_interval))
         runner.learn(chunk)
         current = int(runner.current_learning_iteration)
+        if hasattr(env, "curriculum_summary"):
+            curriculum = env.curriculum_summary()
+            print(
+                "NATIVE_MUJOCO_CURRICULUM iter={} mean={:.2f} "
+                "max={} final={:.1%} levels={}".format(
+                    current,
+                    curriculum["mean_mastery_level"],
+                    curriculum["max_mastery_level"],
+                    curriculum["final_level_fraction"],
+                    curriculum["level_histogram"],
+                ),
+                flush=True,
+            )
         if args.skip_eval or args.selection_interval <= 0:
             continue
 
@@ -331,7 +462,8 @@ def train_stage(
             checkpoint,
             output,
             args.selection_episodes,
-            args.seed + 20000 + current,
+            # A fixed validation set makes checkpoint scores comparable.
+            args.seed + 20000,
         )
         if summary is None:
             continue
@@ -406,7 +538,7 @@ def main(args):
     )
     runner = OnPolicyRunner(
         env,
-        train_configuration(args),
+        train_configuration(args, env),
         log_dir=str(log_dir),
         device=device,
     )
@@ -424,7 +556,11 @@ def main(args):
         source_checkpoint = (
             auto_init_checkpoint()
             if args.init_checkpoint == "auto"
-            else Path(args.init_checkpoint).expanduser().resolve()
+            else (
+                auto_native_checkpoint()
+                if args.init_checkpoint == "auto_native"
+                else Path(args.init_checkpoint).expanduser().resolve()
+            )
         )
         initialize_actor(
             runner, source_checkpoint, args.action_noise_std
@@ -439,6 +575,10 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
+        "curriculum_version": 2,
+        "symmetry_loss_coeff": args.symmetry_loss_coeff,
+        "selection_episodes": args.selection_episodes,
+        "tournament_episodes": args.tournament_episodes,
         "source_checkpoint": (
             str(source_checkpoint) if source_checkpoint else None
         ),
@@ -523,6 +663,7 @@ def main(args):
     )
     if not final_checkpoint.is_file():
         runner.save(str(final_checkpoint))
+    robust_checkpoint_tournament(args, log_dir, best)
     selected_checkpoint = final_checkpoint
     best_checkpoint = log_dir / "model_best.pt"
     if best_checkpoint.is_file():
@@ -555,26 +696,36 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_envs", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--max_iterations", type=int, default=2000)
-    parser.add_argument("--rollout_steps", type=int, default=48)
+    parser.add_argument("--max_iterations", type=int, default=1200)
+    parser.add_argument("--rollout_steps", type=int, default=96)
     parser.add_argument("--save_interval", type=int, default=50)
     parser.add_argument(
-        "--freeze_actor_iterations", type=int, default=100
+        "--freeze_actor_iterations", type=int, default=0
     )
-    parser.add_argument("--learning_rate", type=float, default=1.0e-4)
-    parser.add_argument("--action_noise_std", type=float, default=0.25)
+    parser.add_argument("--learning_rate", type=float, default=5.0e-5)
+    parser.add_argument("--action_noise_std", type=float, default=0.20)
+    parser.add_argument(
+        "--symmetry_loss_coeff", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--critic_symmetry_loss_coeff", type=float, default=0.05
+    )
     parser.add_argument("--init_checkpoint", default="auto")
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
-    parser.add_argument("--run_name", default="native_l4_v1_s42")
+    parser.add_argument(
+        "--run_name", default="mujoco_curriculum_v2_s42"
+    )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(
         "--device",
         default=("cuda:0" if torch.cuda.is_available() else "cpu"),
     )
-    parser.add_argument("--eval_episodes", type=int, default=16)
+    parser.add_argument("--eval_episodes", type=int, default=32)
     parser.add_argument("--selection_interval", type=int, default=100)
-    parser.add_argument("--selection_episodes", type=int, default=4)
+    parser.add_argument("--selection_episodes", type=int, default=16)
+    parser.add_argument("--tournament_candidates", type=int, default=3)
+    parser.add_argument("--tournament_episodes", type=int, default=32)
     parser.add_argument("--skip_eval", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -591,4 +742,13 @@ if __name__ == "__main__":
         raise ValueError("--selection_interval must be non-negative")
     if arguments.selection_episodes < 1:
         raise ValueError("--selection_episodes must be positive")
+    if arguments.tournament_episodes < 1:
+        raise ValueError("--tournament_episodes must be positive")
+    if arguments.tournament_candidates < 0:
+        raise ValueError("--tournament_candidates must be non-negative")
+    if (
+        arguments.symmetry_loss_coeff < 0.0
+        or arguments.critic_symmetry_loss_coeff < 0.0
+    ):
+        raise ValueError("Symmetry loss coefficients must be non-negative")
     raise SystemExit(main(arguments))

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from itertools import chain
 from typing import Optional
@@ -39,6 +40,7 @@ class PPO:
         desired_kl=0.01,                 # 期望的KL散度
         device="cpu",                    # 计算设备
         normalize_advantage_per_mini_batch=False,  # 是否按小批次归一化优势函数
+        symmetry_cfg: Optional[dict] = None,
         multi_gpu_cfg: Optional[dict] = None,      # 多GPU配置
     ):
         """
@@ -96,6 +98,18 @@ class PPO:
         self.schedule = schedule                        # 学习率调度策略
         self.learning_rate = learning_rate              # 学习率
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch  # 优势函数归一化标志
+        self.symmetry = symmetry_cfg
+        if self.symmetry is not None:
+            symmetry_env = self.symmetry.get("_env")
+            if symmetry_env is None:
+                raise ValueError("symmetry_cfg requires _env")
+            if not (
+                hasattr(symmetry_env, "mirror_observations")
+                and hasattr(symmetry_env, "mirror_actions")
+            ):
+                raise ValueError(
+                    "Symmetry environment must mirror observations/actions"
+                )
 
     def init_storage(
         self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, actions_shape
@@ -198,6 +212,7 @@ class PPO:
         mean_value_loss = 0      # 平均价值损失
         mean_surrogate_loss = 0  # 平均替代损失
         mean_entropy = 0         # 平均熵
+        mean_symmetry_loss = 0
 
         # 小批次生成器
         if self.policy.is_recurrent:
@@ -279,6 +294,37 @@ class PPO:
             mu_batch = self.policy.action_mean[:original_batch_size]
             sigma_batch = self.policy.action_std[:original_batch_size]
             entropy_batch = self.policy.entropy[:original_batch_size]
+            symmetry_loss = torch.zeros((), device=self.device)
+            if self.symmetry is not None:
+                symmetry_env = self.symmetry["_env"]
+                mirrored_obs = symmetry_env.mirror_observations(
+                    obs_batch
+                )
+                mirrored_mean = self.policy.actor(mirrored_obs)
+                expected_mirrored_mean = symmetry_env.mirror_actions(
+                    self.policy.action_mean
+                )
+                symmetry_loss = float(
+                    self.symmetry.get("actor_loss_coeff", 0.0)
+                ) * F.mse_loss(
+                    mirrored_mean, expected_mirrored_mean
+                )
+                critic_coefficient = float(
+                    self.symmetry.get("critic_loss_coeff", 0.0)
+                )
+                if critic_coefficient:
+                    mirrored_critic_obs = (
+                        symmetry_env.mirror_observations(
+                            critic_obs_batch
+                        )
+                    )
+                    mirrored_value = self.policy.critic(
+                        mirrored_critic_obs
+                    )
+                    symmetry_loss = symmetry_loss + (
+                        critic_coefficient
+                        * F.mse_loss(mirrored_value, value_batch)
+                    )
 
             # KL散度计算
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -338,8 +384,13 @@ class PPO:
                 # 使用普通的价值损失
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            # 总损失 = 替代损失 + 价值损失系数*价值损失 - 熵系数*熵
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            # PPO objective plus exact N2 sagittal-reflection consistency.
+            loss = (
+                surrogate_loss
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy_batch.mean()
+                + symmetry_loss
+            )
 
             # 计算梯度
             # -- 对于PPO
@@ -359,12 +410,14 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
+            mean_symmetry_loss += symmetry_loss.item()
 
         # -- 对于PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches  # 更新次数
         mean_value_loss /= num_updates      # 平均价值损失
         mean_surrogate_loss /= num_updates  # 平均替代损失
         mean_entropy /= num_updates         # 平均熵
+        mean_symmetry_loss /= num_updates
        
         # -- 清除存储
         self.storage.clear()
@@ -374,6 +427,7 @@ class PPO:
             "value_function": mean_value_loss,    # 价值函数损失
             "surrogate": mean_surrogate_loss,     # 替代损失
             "entropy": mean_entropy,              # 熵
+            "symmetry": mean_symmetry_loss,
         }
 
         return loss_dict

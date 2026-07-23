@@ -119,9 +119,9 @@ validation:
   success_max_same_tread_join_rate: 0.20
   success_max_double_flight_fraction: 0.08
 
-# Native MuJoCo PPO fine-tuning.  This deliberately stays on the requested
-# fixed 10 cm flight: the first stage adapts the PhysX Actor to MuJoCo while
-# its feature trunk is frozen, then the full policy learns natural contacts.
+# Native MuJoCo PPO fine-tuning. This deliberately stays on the requested
+# fixed 10 cm risers while a goal curriculum advances from the flat approach
+# through one, two, ..., six completed steps.
 mujoco_training:
   episode_duration: 20.0
   command_speed_range: [0.16, 0.20]
@@ -144,40 +144,73 @@ mujoco_training:
   target_swing_knee_rad: 0.65
   arm_swing_amplitude_rad: 0.22
   arm_swing_sharpness: 12.0
+  forward_pitch_base_target_rad: 0.04
+  forward_pitch_height_gain: 0.35
+  forward_pitch_sharpness: 35.0
+  posture_activation_distance_m: 0.35
+  base_support_backward_allowance_m: 0.08
+  base_support_backward_scale_m: 0.10
+  foot_pitch_normalizer_rad: 0.25
+  # All stages retain the physical 10 cm risers. Only the episode goal moves
+  # from straight flat approach to one, two, ..., six completed risers.
+  curriculum:
+    target_steps: [0, 1, 2, 3, 4, 5, 6]
+    target_x_m: [0.45, 0.78, 1.08, 1.38, 1.68, 1.98, 2.60]
+    successes_before_promotion: 2
+    replay_probability: 0.15
+    intermediate_dwell_s: 0.08
+    height_tolerance_m: 0.06
+    initial_completion_lateral_tolerance_m: 0.35
+    initial_completion_yaw_tolerance_rad: 0.55
+    initial_corridor_half_width_m: 0.80
+    initial_corridor_yaw_limit_rad: 1.00
+    final_corridor_half_width_m: 0.45
+    final_corridor_yaw_limit_rad: 0.60
+    path_violation_dwell_s: 0.50
+    natural_min_alternating_tread_rate: 0.65
+    natural_max_same_tread_join_rate: 0.30
   reward_scales:
-    tracking_speed: 2.0
-    forward_progress: 1.5
-    alive: 0.05
-    upright_error: -1.5
-    heading_error: -5.0
-    lateral_error: -6.0
-    base_height_error: -2.0
-    phase_contact: 0.55
-    sagittal_foot_phase: 0.45
-    single_support: 0.20
-    swing_knee: 0.12
-    arm_swing: 0.35
-    no_progress: -0.12
-    double_flight: -1.5
-    same_tread_support: -0.35
-    foot_riser_collision: -1.0
-    lower_leg_collision: -3.0
-    hip_yaw: -0.12
-    action_rate: -0.025
-    action_smoothness: -0.015
-    torque: -0.025
-    energy: -0.010
-    angular_velocity_xy: -0.025
-    vertical_velocity: -0.08
-    tread_advance: 2.0
-    alternating_tread: 8.0
-    repeated_lead: -5.0
-    same_tread_join: -6.0
-    skipped_tread: -4.0
-    completion: 120.0
-    fall: -35.0
-    path_failure: -25.0
-    stall: -15.0
+    tracking_speed: 2.5
+    forward_progress: 1.0
+    directed_progress: 4.0
+    vertical_progress: 2.0
+    alive: 0.10
+    upright_error: -3.0
+    heading_error: -10.0
+    lateral_error: -12.0
+    lateral_velocity: -2.0
+    yaw_rate: -1.5
+    base_height_error: -4.0
+    forward_pitch: 0.50
+    base_behind_support: -2.0
+    foot_pitch: -0.75
+    phase_contact: 1.0
+    sagittal_foot_phase: 1.0
+    single_support: 0.30
+    swing_knee: 0.20
+    arm_swing: 0.20
+    no_progress: -0.50
+    double_flight: -3.0
+    same_tread_support: -1.0
+    foot_riser_collision: -3.0
+    lower_leg_collision: -6.0
+    hip_yaw: -0.20
+    action_rate: -0.50
+    action_smoothness: -0.25
+    torque: -0.04
+    energy: -0.02
+    angular_velocity_xy: -0.08
+    vertical_velocity: -0.15
+    tread_advance: 4.0
+    alternating_tread: 10.0
+    repeated_lead: -6.0
+    same_tread_join: -8.0
+    skipped_tread: -5.0
+    completion: 40.0
+    natural_completion: 120.0
+    fall: -20.0
+    path_failure: -10.0
+    stall: -8.0
 
 height_measurements:
   points_x: [0.25, 0.45, 0.65, 0.85]

@@ -1605,9 +1605,19 @@ class SourceCompatibilityTests(unittest.TestCase):
         with path.open() as stream:
             config = yaml.safe_load(stream)
         training = config["mujoco_training"]
+        curriculum = training["curriculum"]
         self.assertEqual(config["stairs"]["step_height"], 0.10)
         self.assertEqual(config["stairs"]["num_steps"], 6)
         self.assertEqual(config["num_obs"], 410)
+        self.assertEqual(curriculum["target_steps"], list(range(7)))
+        self.assertEqual(len(curriculum["target_x_m"]), 7)
+        self.assertEqual(curriculum["target_steps"][-1], 6)
+        self.assertEqual(curriculum["successes_before_promotion"], 2)
+        self.assertGreater(curriculum["path_violation_dwell_s"], 0.0)
+        self.assertGreater(
+            curriculum["natural_min_alternating_tread_rate"],
+            curriculum["natural_max_same_tread_join_rate"],
+        )
         self.assertLess(
             training["training_corridor_half_width_m"],
             training["adaptation_corridor_half_width_m"],
@@ -1619,8 +1629,15 @@ class SourceCompatibilityTests(unittest.TestCase):
         required_rewards = {
             "tracking_speed",
             "forward_progress",
+            "directed_progress",
+            "vertical_progress",
             "heading_error",
             "lateral_error",
+            "lateral_velocity",
+            "yaw_rate",
+            "forward_pitch",
+            "base_behind_support",
+            "foot_pitch",
             "phase_contact",
             "sagittal_foot_phase",
             "single_support",
@@ -1633,15 +1650,26 @@ class SourceCompatibilityTests(unittest.TestCase):
             "repeated_lead",
             "same_tread_join",
             "completion",
+            "natural_completion",
             "fall",
             "path_failure",
             "stall",
         }
-        self.assertTrue(
-            required_rewards.issubset(training["reward_scales"])
-        )
+        self.assertTrue(required_rewards.issubset(training["reward_scales"]))
 
-    def test_native_mujoco_trainer_has_two_stages_and_best_selection(self):
+        env_source = (
+            ROOT / "sim2sim" / "mujoco_stairs_env.py"
+        ).read_text()
+        self.assertIn("self.num_privileged_obs = self.num_obs + 2", env_source)
+        self.assertIn("def mirror_observations", env_source)
+        self.assertIn("def mirror_actions", env_source)
+        self.assertIn("scaled *= self.dt", env_source)
+        self.assertIn("self.path_violation_steps", env_source)
+        self.assertIn("def _advance_curriculum", env_source)
+        self.assertIn("target_contact_reached", env_source)
+        self.assertIn('"version": 2', env_source)
+
+    def test_native_mujoco_trainer_has_curriculum_and_robust_selection(self):
         source = (
             ROOT / "sim2sim" / "train_stairs_mujoco.py"
         ).read_text()
@@ -1649,6 +1677,14 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("freeze_actor_iterations", source)
         self.assertIn("critic and Adam reset", source)
         self.assertIn("selection_score", source)
+        self.assertIn("robust_checkpoint_tournament", source)
+        self.assertIn("NATIVE_MUJOCO_CURRICULUM", source)
+        self.assertIn("NATIVE_MUJOCO_TOURNAMENT", source)
+        self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
+        self.assertIn("args.seed + 20000", source)
+        self.assertIn("args.seed + 30000", source)
+        self.assertIn('"gamma": 0.997', source)
+        self.assertIn('"symmetry_cfg"', source)
         self.assertIn(
             'summary.get("mean_arm_swing_match", 0.0)', source
         )
@@ -1656,12 +1692,28 @@ class SourceCompatibilityTests(unittest.TestCase):
         launcher = (
             ROOT / "sim2sim" / "run_mujoco_native_train.sh"
         ).read_text()
-        self.assertIn("--max_iterations=2000", launcher)
+        self.assertIn("TARGET_ITERATIONS=250", launcher)
+        self.assertIn("TARGET_ITERATIONS=1200", launcher)
+        self.assertIn("--max_iterations=1200", launcher)
         self.assertIn("--selection_interval=100", launcher)
+        self.assertIn("--selection_episodes=16", launcher)
+        self.assertIn("--tournament_episodes=32", launcher)
+        self.assertIn("--symmetry_loss_coeff=0.50", launcher)
+        self.assertIn("pilot|long", launcher)
+        self.assertIn("--init_checkpoint=auto", launcher)
         self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
+        self.assertIn("-path '*mujoco_curriculum_v2_*'", launcher)
         self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
+
+        ppo_source = (
+            ROOT / "humanoid" / "algo" / "ppo" / "ppo.py"
+        ).read_text()
+        self.assertIn("symmetry_cfg: Optional[dict] = None", ppo_source)
+        self.assertIn("mirror_observations", ppo_source)
+        self.assertIn("mirror_actions", ppo_source)
+        self.assertIn('"symmetry": mean_symmetry_loss', ppo_source)
 
         stream_source = (
             ROOT / "sim2sim" / "stream_stairs_mujoco.py"

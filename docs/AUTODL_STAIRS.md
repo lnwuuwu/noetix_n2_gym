@@ -522,10 +522,18 @@ python sim2sim/compare_isaac_checkpoints_mujoco.py
 ```
 
 四个 Isaac checkpoint 若都在到达楼梯前出现相同的 MuJoCo 偏航/路径失败，不再继续
-挑 checkpoint 或调外环。改用原生 MuJoCo PPO：只迁移最佳 410 维 Actor 的走路能力，
-critic、Adam 和探索噪声全部重新初始化；前 100 次只适配 Actor 输出层，之后解冻全网，
-并固定训练 10 cm、6 阶楼梯。每 100 次会自动做独立 MuJoCo 验收并保留
-`model_best.pt`，所以后续回退不会覆盖最佳版本。
+挑 checkpoint 或调外环。改用原生 MuJoCo PPO v2：只迁移 410 维 Actor，critic、
+Adam 和探索噪声重新初始化。物理环境始终是 10 cm、6 阶楼梯，但训练目标从平地接近
+依次推进到第 1、2、…、6 阶。Actor 仍使用可部署的 410 维观测，critic 额外看到课程
+阶段和剩余距离；左右镜像损失用于抑制固定右脚领步。路径偏离必须持续 0.5 秒才终止，
+避免一次瞬时偏航把整条轨迹截断。
+
+v2 首次训练明确从 Isaac 的自然步态 Actor 重新迁移，不从失败的 MuJoCo v1
+`model_best.pt` 启动；v1 的 16 回合验收为 0%，而且交替率已经明显退化。只有
+`resume` 才会加载 v2 自己的完整原生 checkpoint。
+
+周期选模使用固定种子，训练结束还会把排名靠前的三个 checkpoint 用更大的同一组种子
+复测后才写入 `model_best.pt`。这样不会再把“4 回合里偶然成功一次”误当成最佳模型。
 
 拉取代码后先运行真实物理冒烟：
 
@@ -533,10 +541,10 @@ critic、Adam 和探索噪声全部重新初始化；前 100 次只适配 Actor 
 sim2sim/run_mujoco_native_train.sh smoke
 ```
 
-看到 `NATIVE_MUJOCO_CHECKPOINT=...model_5.pt` 后启动约两小时的后台长训：
+冒烟通过后先启动 250 iteration 的门槛训练，不直接再盲跑两小时：
 
 ```bash
-sim2sim/run_mujoco_native_train.sh long
+sim2sim/run_mujoco_native_train.sh pilot
 ```
 
 查看进度无需拼接日志路径：
@@ -545,15 +553,26 @@ sim2sim/run_mujoco_native_train.sh long
 sim2sim/run_mujoco_native_train.sh status
 ```
 
-若进程因断线或自动测评异常退出，不要重新运行 `long`。以下命令会自动寻找最新的
-数字 checkpoint（包括 Adam、critic 和 iteration），在原 run 目录继续到总计
-2000 iteration：
+门槛训练结束后检查：
+
+```bash
+LOG=$(ls -1t /root/autodl-tmp/n2_train_logs/mujoco_curriculum_v2_pilot_s42_*.log | head -n 1)
+grep -E 'NATIVE_MUJOCO_CURRICULUM|NATIVE_MUJOCO_SELECTION|NATIVE_MUJOCO_TOURNAMENT|NATIVE_MUJOCO_ACCEPTANCE' "$LOG"
+```
+
+`NATIVE_MUJOCO_CURRICULUM` 中 `max` 至少到 2 且 `mean` 至少约为 1，才值得续训。
+全楼梯 `selection` 在这个阶段仍可能为 0；如果 `max=0`，说明连平地接近目标都没学会，
+应先修配置而不是继续烧算力。门槛通过后，以下命令会保留 Actor、critic、Adam、
+iteration 以及每个环境的课程进度，在同一 run 目录继续到总计 1200 iteration：
 
 ```bash
 sim2sim/run_mujoco_native_train.sh resume
 ```
 
-长训结束后，用原生 MuJoCo（不是 Isaac Gym）循环播放自动选出的
+若明确要跳过门槛从头跑完整 v2，也可以运行 `long`。进程因断线或评估异常退出时仍应
+运行 `resume`，不要重新运行 `long`。
+
+训练结束后，用原生 MuJoCo（不是 Isaac Gym）循环播放稳健复测选出的
 `model_best.pt`，并在本机浏览器实时查看：
 
 ```bash
