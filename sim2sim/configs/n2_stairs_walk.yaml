@@ -137,8 +137,8 @@ mujoco_training:
   progress_grace_s: 2.0
   progress_timeout_s: 5.0
   progress_epsilon_m: 0.05
-  overspeed_tolerance_m_s: 0.025
-  overspeed_normalizer_m_s: 0.08
+  overspeed_tolerance_m_s: 0.04
+  overspeed_normalizer_m_s: 0.10
   completion_dwell_s: 0.20
   completion_lateral_tolerance_m: 0.20
   completion_yaw_tolerance_rad: 0.20
@@ -146,9 +146,32 @@ mujoco_training:
   adaptation_corridor_yaw_limit_rad: 0.70
   training_corridor_half_width_m: 0.40
   training_corridor_yaw_limit_rad: 0.45
-  double_support_ratio: 0.16
-  target_sagittal_separation_m: 0.22
-  target_swing_knee_rad: 0.65
+  gait_reward_grace_s: 0.50
+  double_support_ratio: 0.22
+  target_sagittal_separation_m: 0.26
+  sagittal_foot_phase_error_clip: 2.0
+  swing_knee_landing_target_rad: 0.40
+  swing_knee_landing_height_gain: 0.80
+  swing_knee_peak_target_rad: 0.58
+  swing_knee_peak_height_gain: 1.70
+  swing_knee_max_target_rad: 0.80
+  swing_knee_tracking_sharpness: 10.0
+  gait_reward_activation_distance_m: 0.30
+  foothold_lateral_offset_m: 0.09
+  swing_trajectory_arc_base_m: 0.04
+  swing_trajectory_arc_height_gain: 0.50
+  swing_trajectory_forward_delay: 0.15
+  swing_trajectory_lift_end: 0.35
+  swing_trajectory_descent_start: 0.72
+  swing_trajectory_x_normalizer_m: 0.20
+  swing_trajectory_y_normalizer_m: 0.12
+  swing_trajectory_z_normalizer_m: 0.10
+  swing_trajectory_sharpness: 2.5
+  swing_trajectory_error_clip: 2.0
+  next_tread_target_start_phase: 0.50
+  next_tread_target_full_phase: 0.85
+  nominal_foot_surface_offset_m: 0.045
+  foot_surface_offset_update_rate: 0.10
   arm_swing_amplitude_rad: 0.22
   arm_swing_sharpness: 12.0
   forward_pitch_base_target_rad: 0.04
@@ -161,29 +184,38 @@ mujoco_training:
   # The episode goal moves from straight flat approach to one, two, ...,
   # six completed risers at each physical-height stage.
   curriculum:
-    # v5 also raises the *physical* riser height. v3 started directly at
+    # v6 also raises the *physical* riser height. v3 started directly at
     # 10 cm, so noisy training rollouts occasionally advanced the logical
     # target while the deterministic Actor still fell at the first riser.
-    # Every height promotion requires two independent deterministic,
-    # speed-controlled natural-gait evaluations; logical tread mastery is
-    # reset afterwards.
+    # Full-flight deterministic evaluations gate physical height.  The gait
+    # thresholds rise with the riser height so a useful 2 cm climbing policy
+    # can keep learning instead of being permanently trapped by the final
+    # 10 cm natural-gait criterion.
     physical_step_heights_m: [0.02, 0.04, 0.06, 0.08, 0.10]
     physical_promotion:
       consecutive_evaluations: 2
-      min_completion_rate: 0.25
-      max_fall_rate: 0.50
+      min_completion_rate: 0.70
+      max_fall_rate: 0.30
       max_path_failure_rate: 0.50
-      min_climb_fraction: 0.80
-      min_alternating_tread_rate: 0.45
-      max_same_tread_join_rate: 0.30
-      max_speed_error_m_s: 0.05
+      # Completion already requires reaching and dwelling on the top platform.
+      # Mean base-height gain is not a valid low-riser gate because N2 crouches
+      # by roughly 5 cm while climbing a 12 cm-tall 2 cm staircase.
+      min_climb_fraction: 0.0
+      min_alternating_tread_rate: 0.15
+      min_alternating_tread_rate_by_height: [0.15, 0.25, 0.35, 0.45]
+      max_same_tread_join_rate: 0.40
+      max_same_tread_join_rate_by_height: [0.40, 0.35, 0.30, 0.25]
+      max_speed_error_m_s: 0.06
       max_yaw_deviation_rad: 0.35
     checkpoint_gate:
       min_completion_rate: 0.50
       min_success_rate: 0.10
       max_fall_rate: 0.20
       max_path_failure_rate: 0.35
-      min_climb_fraction: 0.85
+      # The evaluator's completion condition already requires sustained
+      # support on the 10 cm top platform.  Mean base-height gain is biased by
+      # crouch and by incomplete episodes, so it must not reject that evidence.
+      min_climb_fraction: 0.0
       min_alternating_tread_rate: 0.55
       max_same_tread_join_rate: 0.35
       max_speed_error_m_s: 0.05
@@ -191,11 +223,15 @@ mujoco_training:
       max_yaw_deviation_rad: 0.30
     target_steps: [0, 1, 2, 3, 4, 5, 6]
     target_x_m: [0.45, 0.78, 1.08, 1.38, 1.68, 1.98, 2.60]
-    successes_before_promotion: 4
-    replay_probability: 0.25
-    gait_promotion_min_target_steps: 3
-    gait_promotion_min_alternating_tread_rate: 0.40
-    gait_promotion_max_same_tread_join_rate: 0.35
+    successes_before_promotion: 2
+    replay_probability: 0.20
+    # Do not trap every environment on the three-step task.  Physical
+    # completion teaches the approach and climb through level 5; the complete
+    # six-step episode is where gait quality controls terminal reward and the
+    # deterministic physical-height promotion.
+    gait_promotion_min_target_steps: 6
+    gait_promotion_min_alternating_tread_rate: 0.35
+    gait_promotion_max_same_tread_join_rate: 0.40
     gait_promotion_max_skipped_tread_rate: 0.10
     intermediate_dwell_s: 0.08
     height_tolerance_m: 0.06
@@ -212,47 +248,55 @@ mujoco_training:
     natural_min_alternating_tread_rate: 0.65
     natural_max_same_tread_join_rate: 0.30
   reward_scales:
-    tracking_speed: 3.0
-    overspeed: -2.0
+    tracking_speed: 2.5
+    overspeed: -0.75
     forward_progress: 1.0
     directed_progress: 4.0
     vertical_progress: 2.0
     alive: 0.10
     upright_error: -3.0
     heading_alignment: 2.0
-    heading_error: -20.0
+    heading_error: -16.0
     lateral_error: -12.0
     lateral_velocity: -2.0
     yaw_rate: -2.0
     base_height_error: -4.0
     forward_pitch: 0.50
     base_behind_support: -2.0
-    foot_pitch: -0.75
-    phase_contact: 1.25
-    sagittal_foot_phase: 1.50
+    foot_pitch: -0.50
+    phase_contact: 1.50
+    phase_contact_mismatch: -2.0
+    sagittal_foot_phase: 0.75
+    sagittal_foot_phase_error: -1.50
     single_support: 0.50
-    swing_knee: 0.35
+    swing_knee: 0.50
+    swing_knee_deficit: -1.00
+    swing_trajectory: 4.0
+    swing_trajectory_error: -5.0
+    next_tread_target: 2.0
+    foothold_lateral: 1.0
     arm_swing: 0.20
     no_progress: -0.50
     double_flight: -4.0
-    same_tread_support: -1.0
+    same_tread_support: -3.0
     foot_riser_collision: -4.0
     lower_leg_collision: -6.0
     hip_yaw: -0.20
-    action_rate: -0.60
-    action_smoothness: -0.35
+    action_rate: -0.40
+    action_smoothness: -0.25
     torque: -0.04
     energy: -0.02
     angular_velocity_xy: -0.08
     vertical_velocity: -0.15
-    tread_advance: 3.0
-    alternating_tread: 20.0
-    repeated_lead: -12.0
-    same_tread_join: -16.0
+    tread_advance: 4.0
+    alternating_tread: 12.0
+    repeated_lead: -8.0
+    same_tread_join: -10.0
     skipped_tread: -5.0
-    completion: 25.0
-    natural_completion: 180.0
-    fall: -20.0
+    completion: 30.0
+    unnatural_completion: -20.0
+    natural_completion: 100.0
+    fall: -25.0
     path_failure: -10.0
     stall: -8.0
 

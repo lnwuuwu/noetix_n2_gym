@@ -1640,25 +1640,29 @@ class SourceCompatibilityTests(unittest.TestCase):
             curriculum["physical_step_heights_m"],
             [0.02, 0.04, 0.06, 0.08, 0.10],
         )
-        self.assertEqual(curriculum["successes_before_promotion"], 4)
+        self.assertEqual(curriculum["successes_before_promotion"], 2)
         self.assertEqual(
             curriculum["physical_promotion"]["consecutive_evaluations"],
             2,
         )
-        self.assertGreater(
+        self.assertEqual(
             curriculum["physical_promotion"][
-                "min_alternating_tread_rate"
+                "min_alternating_tread_rate_by_height"
             ],
+            [0.15, 0.25, 0.35, 0.45],
+        )
+        self.assertEqual(
             curriculum["physical_promotion"][
-                "max_same_tread_join_rate"
+                "max_same_tread_join_rate_by_height"
             ],
+            [0.40, 0.35, 0.30, 0.25],
         )
         self.assertGreater(
             curriculum["physical_promotion"]["max_speed_error_m_s"],
             0.0,
         )
-        self.assertGreaterEqual(
-            curriculum["gait_promotion_min_target_steps"], 2
+        self.assertEqual(
+            curriculum["gait_promotion_min_target_steps"], 6
         )
         self.assertGreater(
             curriculum["checkpoint_gate"]["min_completion_rate"], 0.0
@@ -1697,9 +1701,16 @@ class SourceCompatibilityTests(unittest.TestCase):
             "base_behind_support",
             "foot_pitch",
             "phase_contact",
+            "phase_contact_mismatch",
             "sagittal_foot_phase",
+            "sagittal_foot_phase_error",
             "single_support",
             "swing_knee",
+            "swing_knee_deficit",
+            "swing_trajectory",
+            "swing_trajectory_error",
+            "next_tread_target",
+            "foothold_lateral",
             "arm_swing",
             "foot_riser_collision",
             "lower_leg_collision",
@@ -1708,6 +1719,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "repeated_lead",
             "same_tread_join",
             "completion",
+            "unnatural_completion",
             "natural_completion",
             "fall",
             "path_failure",
@@ -1731,10 +1743,13 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn(
             "def _curriculum_gait_gate_passed", env_source
         )
+        self.assertIn("def _swing_reference_state", env_source)
+        self.assertIn("smooth_swing_trajectory", env_source)
+        self.assertIn("qualified_completion", env_source)
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 5', env_source)
-        self.assertIn("not in (4, 5)", env_source)
+        self.assertIn('"version": 6', env_source)
+        self.assertIn("not in (4, 5, 6)", env_source)
         self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
 
     def test_native_mujoco_trainer_has_curriculum_and_robust_selection(self):
@@ -1753,6 +1768,10 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("NATIVE_MUJOCO_BEST_REJECT", source)
         self.assertIn("NATIVE_MUJOCO_TOURNAMENT", source)
         self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
+        self.assertIn("NATIVE_MUJOCO_PROGRESS_BEST", source)
+        self.assertIn('"model_progress_best.pt"', source)
+        self.assertIn("signal.SIGTERM", source)
+        self.assertIn("model_interrupted.pt", source)
         self.assertIn("NATIVE_MUJOCO_CHECKPOINT=NONE", source)
         self.assertIn("int(args.seed) + 20000", source)
         self.assertIn("args.seed + 30000", source)
@@ -1765,14 +1784,14 @@ class SourceCompatibilityTests(unittest.TestCase):
         launcher = (
             ROOT / "sim2sim" / "run_mujoco_native_train.sh"
         ).read_text()
-        self.assertIn("TARGET_ITERATIONS=1000", launcher)
+        self.assertIn("TARGET_ITERATIONS=800", launcher)
         self.assertIn("TARGET_ITERATIONS=3000", launcher)
         self.assertIn(
             'MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"',
             launcher,
         )
         self.assertIn(
-            'RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.35}"',
+            'RESUME_ACTION_NOISE_STD="${N2_RESUME_NOISE_STD:-0.18}"',
             launcher,
         )
         self.assertIn(
@@ -1792,24 +1811,26 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertIn('WARM_START_ARGS=("--no_warm_start")', launcher)
         self.assertIn("RUN_VARIANT=\"_scratch\"", launcher)
-        self.assertIn("LEARNING_RATE=3e-4", launcher)
-        self.assertIn("ACTION_NOISE_STD=0.60", launcher)
+        self.assertIn("LEARNING_RATE=2e-4", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.45", launcher)
         self.assertIn("FREEZE_ACTOR_ITERATIONS=0", launcher)
         self.assertIn("--selection_interval=50", launcher)
-        self.assertIn("--selection_episodes=16", launcher)
+        self.assertIn("--selection_episodes=32", launcher)
         self.assertIn("--tournament_episodes=32", launcher)
         self.assertIn("SYMMETRY_LOSS_COEFF=0.75", launcher)
         self.assertIn(
             '--symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}"',
             launcher,
         )
-        self.assertIn("pilot|long|retune", launcher)
+        self.assertIn("pilot|long|recover|retune", launcher)
+        self.assertIn("stop)", launcher)
+        self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v5_retune_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v6_recover_s${TRAIN_SEED}"',
             launcher,
         )
-        self.assertIn("LEARNING_RATE=1e-4", launcher)
-        self.assertIn("ACTION_NOISE_STD=0.30", launcher)
+        self.assertIn("LEARNING_RATE=3e-5", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.18", launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',
             launcher,
@@ -1821,11 +1842,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertIn('checkpoint_path="${LATEST_BEST}"', launcher)
         self.assertIn(
-            "No accepted v4/v5 model_best.pt exists yet.", launcher
+            "No accepted v4/v5/v6 model_best.pt exists yet.", launcher
         )
         self.assertIn('resume="${LATEST_MODEL}"', launcher)
         self.assertIn(
-            '-path "*mujoco_curriculum_v[45]_*_s${TRAIN_SEED}*"',
+            '-path "*mujoco_curriculum_v[456]_*_s${TRAIN_SEED}*"',
             launcher,
         )
         self.assertIn("! -path '*smoke*'", launcher)

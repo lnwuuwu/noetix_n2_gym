@@ -6,6 +6,7 @@ import glob
 import json
 import math
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,17 @@ from humanoid.algo.ppo.on_policy_runner import OnPolicyRunner
 
 from eval_stairs_mujoco import load_checkpoint_actor
 from mujoco_stairs_env import MujocoStairsVecEnv
+
+
+def request_safe_stop(signum, _frame):
+    """Turn SIGTERM from the launcher into the normal checkpoint path."""
+    print(
+        "Received signal {}; saving an interrupted checkpoint...".format(
+            signum
+        ),
+        flush=True,
+    )
+    raise KeyboardInterrupt
 
 
 class ActorExporter(torch.nn.Module):
@@ -445,6 +457,81 @@ def promotion_evaluation_seed(args, env):
     )
 
 
+def restore_progress_best(log_dir):
+    """Restore the best deterministic candidate at the furthest height."""
+    state = {
+        "height_index": -1,
+        "height_m": 0.0,
+        "score": float("-inf"),
+        "iteration": None,
+        "summary": None,
+    }
+    path = log_dir / "model_progress_best.json"
+    if not path.is_file():
+        return state
+    try:
+        with path.open() as state_file:
+            saved = json.load(state_file)
+        if (
+            int(saved["height_index"]) >= 0
+            and math.isfinite(float(saved["score"]))
+            and (log_dir / "model_progress_best.pt").is_file()
+        ):
+            state.update(saved)
+    except (OSError, ValueError, KeyError, TypeError):
+        print(
+            "Previous model_progress_best.json is invalid; selecting again.",
+            flush=True,
+        )
+    return state
+
+
+def update_progress_best(
+    log_dir,
+    checkpoint,
+    iteration,
+    height_index,
+    summary,
+    score,
+    progress_best,
+):
+    """Never lose an earlier stable policy to later PPO regression."""
+    improved = (
+        int(height_index) > int(progress_best["height_index"])
+        or (
+            int(height_index) == int(progress_best["height_index"])
+            and float(score) > float(progress_best["score"])
+        )
+    )
+    if not improved:
+        return False
+    progress_best.update(
+        height_index=int(height_index),
+        height_m=float(summary["step_height_m"]),
+        score=float(score),
+        iteration=int(iteration),
+        summary=summary,
+    )
+    shutil.copy2(checkpoint, log_dir / "model_progress_best.pt")
+    with (log_dir / "model_progress_best.json").open("w") as state_file:
+        json.dump(progress_best, state_file, indent=2)
+    print(
+        "NATIVE_MUJOCO_PROGRESS_BEST iter={} height={:.2f}m "
+        "score={:.4f} completion={:.1%} fall={:.1%} "
+        "alternate={:.1%} join={:.1%}".format(
+            iteration,
+            summary["step_height_m"],
+            score,
+            summary["completion_rate"],
+            summary["fall_rate"],
+            summary["mean_alternating_tread_rate"],
+            summary["mean_same_tread_join_rate"],
+        ),
+        flush=True,
+    )
+    return True
+
+
 def robust_checkpoint_tournament(
     args, log_dir, best, curriculum_cfg
 ):
@@ -553,6 +640,7 @@ def train_stage(
     target_iteration,
     trunk_trainable,
     best,
+    progress_best,
 ):
     set_actor_trunk_trainable(runner.alg.policy, trunk_trainable)
     env.set_adaptation_stage(not trunk_trainable)
@@ -625,6 +713,7 @@ def train_stage(
             flush=True,
         )
         promotion_gate = env.curriculum_cfg["physical_promotion"]
+        evaluated_height_index = int(env.physical_height_index)
         height_gate_passed = (
             env.physical_curriculum_complete
             or env._physical_gate_passed(summary, promotion_gate)
@@ -639,6 +728,15 @@ def train_stage(
         # updated gate streak/height in the same numeric checkpoint so resume
         # cannot silently fall back one physical stage.
         runner.save(str(checkpoint))
+        update_progress_best(
+            log_dir,
+            checkpoint,
+            current,
+            evaluated_height_index,
+            summary,
+            score,
+            progress_best,
+        )
         print(
             "NATIVE_MUJOCO_HEIGHT_GATE iter={} passed={} streak={}/{} "
             "height={:.2f}m alternate={:.1%} join={:.1%} "
@@ -799,7 +897,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 5,
+        "curriculum_version": 6,
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "selection_episodes": args.selection_episodes,
         "tournament_episodes": args.tournament_episodes,
@@ -817,6 +915,17 @@ def main(args):
         "iteration": None,
         "summary": None,
     }
+    progress_best = restore_progress_best(log_dir)
+    if progress_best["iteration"] is not None:
+        print(
+            "Restored progress-best selection: iter={} height={:.2f}m "
+            "score={:.4f}".format(
+                progress_best["iteration"],
+                progress_best["height_m"],
+                progress_best["score"],
+            ),
+            flush=True,
+        )
     previous_best_path = log_dir / "model_best.json"
     if args.resume and previous_best_path.is_file():
         try:
@@ -837,6 +946,7 @@ def main(args):
                 flush=True,
             )
 
+    signal.signal(signal.SIGTERM, request_safe_stop)
     try:
         current = int(runner.current_learning_iteration)
         target = int(args.max_iterations)
@@ -858,6 +968,7 @@ def main(args):
                 adaptation_target,
                 False,
                 best,
+                progress_best,
             )
             current = int(runner.current_learning_iteration)
         if current < target:
@@ -869,6 +980,7 @@ def main(args):
                 target,
                 True,
                 best,
+                progress_best,
             )
     except KeyboardInterrupt:
         interrupted_path = log_dir / "model_interrupted.pt"
@@ -892,6 +1004,7 @@ def main(args):
         args, log_dir, best, curriculum_cfg
     )
     best_checkpoint = log_dir / "model_best.pt"
+    progress_checkpoint = log_dir / "model_progress_best.pt"
     if args.skip_eval:
         export_actor(runner, log_dir / "policy.pt")
         print(
@@ -901,7 +1014,13 @@ def main(args):
         return 0
 
     candidate = (
-        best_checkpoint if best_checkpoint.is_file() else final_checkpoint
+        best_checkpoint
+        if best_checkpoint.is_file()
+        else (
+            progress_checkpoint
+            if progress_checkpoint.is_file()
+            else final_checkpoint
+        )
     )
     acceptance = run_acceptance(args, candidate, log_dir)
     accepted = (
@@ -943,6 +1062,11 @@ def main(args):
     best_json = log_dir / "model_best.json"
     if best_json.is_file():
         os.replace(best_json, log_dir / "model_rejected.json")
+    elif (log_dir / "model_progress_best.json").is_file():
+        shutil.copy2(
+            log_dir / "model_progress_best.json",
+            log_dir / "model_rejected.json",
+        )
     export_checkpoint_actor(
         rejected_source, log_dir / "policy_rejected.pt"
     )
@@ -988,7 +1112,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v5_s42"
+        "--run_name", default="mujoco_curriculum_v6_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

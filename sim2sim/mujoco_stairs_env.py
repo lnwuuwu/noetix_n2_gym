@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from humanoid.algo import VecEnv
+from humanoid.utils.stairs_terrain import smooth_swing_trajectory
 
 from eval_stairs_mujoco import (
     ContactLayout,
@@ -30,6 +31,7 @@ class MujocoStairsVecEnv(VecEnv):
         "same_tread_join",
         "skipped_tread",
         "completion",
+        "unnatural_completion",
         "natural_completion",
         "fall",
         "path_failure",
@@ -127,6 +129,21 @@ class MujocoStairsVecEnv(VecEnv):
             )
         self.physical_height_index = 0
         self.physical_promotion_streak = 0
+        for key in (
+            "min_alternating_tread_rate",
+            "max_same_tread_join_rate",
+        ):
+            values = self.curriculum_cfg["physical_promotion"].get(
+                key + "_by_height"
+            )
+            if values is not None and len(values) != (
+                len(self.physical_step_heights) - 1
+            ):
+                raise ValueError(
+                    "{}_by_height must have one value per promotion".format(
+                        key
+                    )
+                )
 
         xml_path = config["_resolved_xml_path"]
         urdf_path = config.get("_resolved_urdf_path")
@@ -224,6 +241,25 @@ class MujocoStairsVecEnv(VecEnv):
         self.trackers = [
             self._new_tracker() for _ in range(self.num_envs)
         ]
+        self.swing_start_pos = np.zeros(
+            (self.num_envs, 2, 3), dtype=np.float64
+        )
+        self.last_physical_swing = np.zeros(
+            (self.num_envs, 2), dtype=bool
+        )
+        self.swing_elapsed_time = np.zeros(
+            (self.num_envs, 2), dtype=np.float64
+        )
+        self.expected_swing_foot = np.full(
+            self.num_envs, -1, dtype=np.int64
+        )
+        self.foot_surface_offset = np.full(
+            (self.num_envs, 2),
+            float(
+                self.training_cfg["nominal_foot_surface_offset_m"]
+            ),
+            dtype=np.float64,
+        )
         self.episode_steps = np.zeros(self.num_envs, dtype=np.int64)
         self.episode_length_buf = torch.zeros(
             self.num_envs, dtype=torch.long
@@ -340,6 +376,12 @@ class MujocoStairsVecEnv(VecEnv):
                 self._new_tracker() for _ in range(self.num_envs)
             ]
 
+    def _physical_gate_value(self, gate, key):
+        scheduled = gate.get(key + "_by_height")
+        if scheduled is None:
+            return float(gate[key])
+        return float(scheduled[self.physical_height_index])
+
     def _physical_gate_passed(self, summary, gate):
         expected_climb = (
             int(self.stair_cfg["num_steps"]) * self.physical_step_height
@@ -358,18 +400,29 @@ class MujocoStairsVecEnv(VecEnv):
             and float(summary["path_failure_rate"])
             <= float(gate["max_path_failure_rate"])
             and float(summary["mean_climb_height_m"])
-            >= float(gate["min_climb_fraction"]) * expected_climb
+            >= self._physical_gate_value(
+                gate, "min_climb_fraction"
+            )
+            * expected_climb
             and float(summary["mean_alternating_tread_rate"])
-            >= float(gate["min_alternating_tread_rate"])
+            >= self._physical_gate_value(
+                gate, "min_alternating_tread_rate"
+            )
             and float(summary["mean_same_tread_join_rate"])
-            <= float(gate["max_same_tread_join_rate"])
+            <= self._physical_gate_value(
+                gate, "max_same_tread_join_rate"
+            )
             and abs(
                 float(summary["mean_forward_speed_m_s"])
                 - float(summary["command_speed_m_s"])
             )
-            <= float(gate["max_speed_error_m_s"])
+            <= self._physical_gate_value(
+                gate, "max_speed_error_m_s"
+            )
             and float(summary["mean_max_yaw_deviation_rad"])
-            <= float(gate["max_yaw_deviation_rad"])
+            <= self._physical_gate_value(
+                gate, "max_yaw_deviation_rad"
+            )
         )
 
     def update_physical_curriculum(self, summary):
@@ -731,6 +784,20 @@ class MujocoStairsVecEnv(VecEnv):
         self.last_torques[env_id] = 0.0
         self.history[env_id] = 0.0
         self.trackers[env_id] = self._new_tracker()
+        foot_positions = np.asarray(
+            [
+                data.site_xpos[site_id]
+                for site_id in self.layout.foot_sites
+            ],
+            dtype=np.float64,
+        )
+        self.swing_start_pos[env_id] = foot_positions
+        self.last_physical_swing[env_id] = False
+        self.swing_elapsed_time[env_id] = 0.0
+        self.expected_swing_foot[env_id] = -1
+        self.foot_surface_offset[env_id] = float(
+            self.training_cfg["nominal_foot_surface_offset_m"]
+        )
         self.episode_steps[env_id] = 0
         self.episode_length_buf[env_id] = 0
         self.previous_x[env_id] = float(data.qpos[0])
@@ -824,6 +891,223 @@ class MujocoStairsVecEnv(VecEnv):
             sine,
         )
 
+    @staticmethod
+    def _smoothstep01(value):
+        value = float(np.clip(value, 0.0, 1.0))
+        return value * value * (3.0 - 2.0 * value)
+
+    def _swing_reference_state(
+        self,
+        env_id,
+        state,
+        desired_contacts,
+        riser,
+        lower_leg,
+    ):
+        """Return dense next-tread targets for the scheduled opposite foot.
+
+        Sparse touchdown events are too delayed to reliably turn an inherited
+        step-to policy into stair-over-stair walking.  This reference supplies
+        a bounded correction throughout the expected swing while retaining the
+        contact tracker as the source of truth for actual gait success.
+        """
+        data = self.datas[env_id]
+        tracker = self.trackers[env_id]
+        foot_positions = np.asarray(
+            [
+                data.site_xpos[site_id]
+                for site_id in self.layout.foot_sites
+            ],
+            dtype=np.float64,
+        )
+
+        for foot in range(2):
+            tread = int(tracker.stable_tread[foot])
+            if tread < 0:
+                continue
+            observed = (
+                foot_positions[foot, 2]
+                - tread * float(self.stair_cfg["step_height"])
+            )
+            observed = float(np.clip(observed, 0.02, 0.14))
+            rate = float(
+                self.training_cfg["foot_surface_offset_update_rate"]
+            )
+            self.foot_surface_offset[env_id, foot] = (
+                (1.0 - rate) * self.foot_surface_offset[env_id, foot]
+                + rate * observed
+            )
+
+        scheduled_swing = ~np.asarray(desired_contacts, dtype=bool)
+        physical_swing = np.asarray(tracker.pending_swing, dtype=bool)
+        physical_airborne = physical_swing & np.asarray(
+            tracker.airborne_seen, dtype=bool
+        )
+        new_swing = physical_swing & ~self.last_physical_swing[env_id]
+        self.swing_start_pos[env_id, new_swing] = foot_positions[new_swing]
+        self.swing_elapsed_time[env_id, physical_swing] += self.dt
+        self.swing_elapsed_time[env_id, ~physical_swing] = 0.0
+        self.last_physical_swing[env_id] = physical_swing
+
+        if np.any(scheduled_swing):
+            scheduled_foot = int(np.argmax(scheduled_swing))
+        else:
+            scheduled_foot = -1
+        if np.any(physical_airborne):
+            initial_foot = int(np.argmax(physical_airborne))
+        else:
+            initial_foot = scheduled_foot
+        expected_foot = (
+            1 - int(tracker.last_advanced_foot)
+            if int(tracker.last_advanced_foot) >= 0
+            else initial_foot
+        )
+        self.expected_swing_foot[env_id] = expected_foot
+
+        inactive = {
+            "score": 0.0,
+            "error": 0.0,
+            "next_tread_score": 0.0,
+            "lateral_score": 0.0,
+            "active": 0.0,
+            "progress": 0.0,
+            "expected_foot": expected_foot,
+        }
+        if expected_foot < 0:
+            return inactive
+
+        nominal_swing_duration = (
+            1.0 - float(self.training_cfg["double_support_ratio"])
+        ) / max(2.0 * self._gait_frequency(env_id), 0.10)
+        progress = float(
+            np.clip(
+                self.swing_elapsed_time[env_id, expected_foot]
+                / max(nominal_swing_duration, self.dt),
+                0.0,
+                1.0,
+            )
+        )
+        inactive["progress"] = progress
+        near_stairs = (
+            float(data.qpos[0])
+            >= float(self.stair_cfg["start_x"])
+            - float(
+                self.training_cfg[
+                    "gait_reward_activation_distance_m"
+                ]
+            )
+        )
+        active = (
+            near_stairs
+            and (
+                bool(scheduled_swing[expected_foot])
+                or bool(physical_swing[expected_foot])
+            )
+            and bool(physical_airborne[expected_foot])
+            and bool(tracker.opposite_valid[expected_foot])
+            and float(state["velocity"][0]) > 0.03
+            and float(state["gravity"][2]) < -0.80
+        )
+        if not active:
+            return inactive
+
+        next_tread = int(
+            np.clip(
+                tracker.last_advanced_tread + 1,
+                1,
+                int(self.stair_cfg["num_steps"]),
+            )
+        )
+        lateral_offset = float(
+            self.training_cfg["foothold_lateral_offset_m"]
+        )
+        landing = np.asarray(
+            [
+                float(self.stair_cfg["start_x"])
+                + (next_tread - 0.5)
+                * float(self.stair_cfg["step_width"]),
+                lateral_offset if expected_foot == 0 else -lateral_offset,
+                next_tread * float(self.stair_cfg["step_height"])
+                + self.foot_surface_offset[env_id, expected_foot],
+            ],
+            dtype=np.float64,
+        )
+        start = self.swing_start_pos[env_id, expected_foot]
+        target = smooth_swing_trajectory(
+            start[None, :],
+            landing[None, :],
+            np.asarray([progress], dtype=np.float64),
+            float(self.training_cfg["swing_trajectory_arc_base_m"])
+            + float(
+                self.training_cfg["swing_trajectory_arc_height_gain"]
+            )
+            * float(self.stair_cfg["step_height"]),
+            float(self.training_cfg["swing_trajectory_forward_delay"]),
+            float(self.training_cfg["swing_trajectory_lift_end"]),
+            float(self.training_cfg["swing_trajectory_descent_start"]),
+        )[0]
+        normalizers = np.asarray(
+            [
+                self.training_cfg["swing_trajectory_x_normalizer_m"],
+                self.training_cfg["swing_trajectory_y_normalizer_m"],
+                self.training_cfg["swing_trajectory_z_normalizer_m"],
+            ],
+            dtype=np.float64,
+        )
+        error_clip = float(
+            self.training_cfg["swing_trajectory_error_clip"]
+        )
+        normalized_error = np.clip(
+            (foot_positions[expected_foot] - target) / normalizers,
+            -error_clip,
+            error_clip,
+        )
+        squared_error = float(np.mean(np.square(normalized_error)))
+        collision_free = not (
+            bool(riser[expected_foot]) or bool(lower_leg[expected_foot])
+        )
+        score = (
+            math.exp(
+                -float(self.training_cfg["swing_trajectory_sharpness"])
+                * squared_error
+            )
+            if collision_free
+            else 0.0
+        )
+
+        start_phase = float(
+            self.training_cfg["next_tread_target_start_phase"]
+        )
+        full_phase = float(
+            self.training_cfg["next_tread_target_full_phase"]
+        )
+        late_weight = self._smoothstep01(
+            (progress - start_phase)
+            / max(full_phase - start_phase, 1.0e-3)
+        )
+        x_error = (
+            foot_positions[expected_foot, 0] - landing[0]
+        ) / max(float(self.stair_cfg["step_width"]), 1.0e-3)
+        next_tread_score = (
+            math.exp(-2.0 * float(np.clip(x_error, -2.0, 2.0) ** 2))
+            * late_weight
+        )
+        y_error = (
+            foot_positions[expected_foot, 1] - landing[1]
+        ) / max(lateral_offset, 1.0e-3)
+        lateral_score = math.exp(
+            -2.0 * float(np.clip(y_error, -2.0, 2.0) ** 2)
+        )
+        return {
+            "score": score,
+            "error": squared_error,
+            "next_tread_score": next_tread_score,
+            "lateral_score": lateral_score,
+            "active": 1.0,
+            "progress": progress,
+            "expected_foot": expected_foot,
+        }
+
     def _reward_one(
         self,
         env_id,
@@ -870,27 +1154,99 @@ class MujocoStairsVecEnv(VecEnv):
             ],
             dtype=np.float64,
         )
-        sagittal_separation = float(foot_x[0] - foot_x[1])
+        # Right-minus-left follows -cos(phase): the scheduled swing foot starts
+        # behind, crosses at mid-swing, and lands one tread ahead.
+        phase = self._phase_fraction(env_id)
+        sagittal_separation = float(foot_x[1] - foot_x[0])
         target_separation = (
             -float(
                 self.training_cfg["target_sagittal_separation_m"]
             )
-            * phase_sine
+            * math.cos(2.0 * math.pi * phase)
         )
+        sagittal_error = sagittal_separation - target_separation
         sagittal_match = math.exp(
-            -22.0 * (sagittal_separation - target_separation) ** 2
+            -12.0 * sagittal_error * sagittal_error
+        )
+        normalized_sagittal_error = float(
+            np.clip(
+                sagittal_error
+                / max(
+                    float(
+                        self.training_cfg[
+                            "target_sagittal_separation_m"
+                        ]
+                    ),
+                    1.0e-3,
+                ),
+                -float(
+                    self.training_cfg[
+                        "sagittal_foot_phase_error_clip"
+                    ]
+                ),
+                float(
+                    self.training_cfg[
+                        "sagittal_foot_phase_error_clip"
+                    ]
+                ),
+            )
         )
 
-        swing_knee_index = (
-            self.right_knee_index
-            if phase_sine >= 0.0
-            else self.left_knee_index
+        swing_reference = self._swing_reference_state(
+            env_id,
+            state,
+            desired_contacts,
+            riser,
+            lower_leg,
         )
-        knee_error = (
-            float(state["q"][swing_knee_index])
-            - float(self.training_cfg["target_swing_knee_rad"])
+        expected_foot = int(swing_reference["expected_foot"])
+        if expected_foot == 0:
+            swing_knee_index = self.left_knee_index
+        elif expected_foot == 1:
+            swing_knee_index = self.right_knee_index
+        else:
+            swing_knee_index = (
+                self.right_knee_index
+                if phase_sine >= 0.0
+                else self.left_knee_index
+            )
+        landing_knee = (
+            float(self.training_cfg["swing_knee_landing_target_rad"])
+            + float(
+                self.training_cfg["swing_knee_landing_height_gain"]
+            )
+            * float(self.stair_cfg["step_height"])
         )
-        knee_match = math.exp(-4.0 * knee_error * knee_error)
+        peak_knee = min(
+            float(self.training_cfg["swing_knee_max_target_rad"]),
+            float(self.training_cfg["swing_knee_peak_target_rad"])
+            + float(self.training_cfg["swing_knee_peak_height_gain"])
+            * float(self.stair_cfg["step_height"]),
+        )
+        flexion_arc = (
+            4.0
+            * float(swing_reference["progress"])
+            * (1.0 - float(swing_reference["progress"]))
+        )
+        target_knee = landing_knee + (
+            peak_knee - landing_knee
+        ) * flexion_arc
+        knee_position = float(state["q"][swing_knee_index])
+        knee_error = knee_position - target_knee
+        knee_match = (
+            math.exp(
+                -float(
+                    self.training_cfg["swing_knee_tracking_sharpness"]
+                )
+                * knee_error
+                * knee_error
+            )
+            * float(swing_reference["active"])
+        )
+        knee_deficit = (
+            max(target_knee - knee_position, 0.0)
+            / max(target_knee, 0.10)
+        ) ** 2 * float(swing_reference["active"])
         arm_amplitude = float(
             self.training_cfg["arm_swing_amplitude_rad"]
         )
@@ -1049,11 +1405,23 @@ class MujocoStairsVecEnv(VecEnv):
             / np.maximum(self.torque_limits, 1.0)
         )
         tracker = self.trackers[env_id]
-        overspeed = max(
-            velocity_x
-            - command_x
-            - float(self.training_cfg["overspeed_tolerance_m_s"]),
-            0.0,
+        gait_active = float(
+            self.episode_steps[env_id] * self.dt
+            >= float(self.training_cfg["gait_reward_grace_s"])
+            and velocity_x > 0.03
+            and float(state["gravity"][2]) < -0.80
+        )
+        overspeed = (
+            max(
+                velocity_x
+                - command_x
+                - float(
+                    self.training_cfg["overspeed_tolerance_m_s"]
+                ),
+                0.0,
+            )
+            if state["gravity"][2] < -0.80
+            else 0.0
         )
         terms = {
             "tracking_speed": math.exp(
@@ -1073,7 +1441,7 @@ class MujocoStairsVecEnv(VecEnv):
                         )
                     )
                     ** 2,
-                    4.0,
+                    2.0,
                 )
             ),
             "forward_progress": float(
@@ -1102,11 +1470,32 @@ class MujocoStairsVecEnv(VecEnv):
             "forward_pitch": forward_pitch_score,
             "base_behind_support": base_behind_penalty,
             "foot_pitch": foot_pitch_penalty,
-            "phase_contact": phase_match,
-            "sagittal_foot_phase": sagittal_match,
-            "single_support": single_support,
+            "phase_contact": phase_match * gait_active,
+            "phase_contact_mismatch": (1.0 - phase_match) * gait_active,
+            "sagittal_foot_phase": sagittal_match * gait_active,
+            "sagittal_foot_phase_error": (
+                normalized_sagittal_error
+                * normalized_sagittal_error
+                * gait_active
+            ),
+            "single_support": single_support * gait_active,
             "swing_knee": knee_match,
-            "arm_swing": arm_match,
+            "swing_knee_deficit": knee_deficit,
+            "swing_trajectory": float(swing_reference["score"])
+            * float(swing_reference["active"]),
+            "swing_trajectory_error": float(
+                swing_reference["error"]
+            )
+            * float(swing_reference["active"]),
+            "next_tread_target": float(
+                swing_reference["next_tread_score"]
+            )
+            * float(swing_reference["active"]),
+            "foothold_lateral": float(
+                swing_reference["lateral_score"]
+            )
+            * float(swing_reference["active"]),
+            "arm_swing": arm_match * gait_active,
             "no_progress": float(progress_velocity < 0.03),
             "double_flight": float(np.all(raw_tread < 0)),
             "same_tread_support": float(
@@ -1133,6 +1522,7 @@ class MujocoStairsVecEnv(VecEnv):
             "same_tread_join": float(event_delta["joined"]),
             "skipped_tread": float(event_delta["skipped"]),
             "completion": 0.0,
+            "unnatural_completion": 0.0,
             "natural_completion": 0.0,
             "fall": 0.0,
             "path_failure": 0.0,
@@ -1278,13 +1668,16 @@ class MujocoStairsVecEnv(VecEnv):
         )
         return goal_reached, natural_success
 
-    def _curriculum_gait_gate_passed(self, env_id, ended_level):
+    def _curriculum_gait_gate_active(self, ended_level):
         target_steps = int(
             self.curriculum_target_steps[int(ended_level)]
         )
-        if target_steps < int(
+        return target_steps >= int(
             self.curriculum_cfg["gait_promotion_min_target_steps"]
-        ):
+        )
+
+    def _curriculum_gait_gate_passed(self, env_id, ended_level):
+        if not self._curriculum_gait_gate_active(ended_level):
             return True
         gait = self.trackers[int(env_id)].summary()
         return (
@@ -1354,6 +1747,13 @@ class MujocoStairsVecEnv(VecEnv):
             "mujoco_completion_rate": final_completed[env_ids],
             "mujoco_curriculum_completion_rate": (
                 curriculum_completed[env_ids]
+            ),
+            "mujoco_curriculum_gait_gate_active_rate": np.asarray(
+                [
+                    self._curriculum_gait_gate_active(level)
+                    for level in ended_levels
+                ],
+                dtype=np.float64,
             ),
             "mujoco_curriculum_gait_pass_rate": np.asarray(
                 [
@@ -1586,8 +1986,24 @@ class MujocoStairsVecEnv(VecEnv):
                 timed_out[env_id] = False
 
             scales = self.training_cfg["reward_scales"]
+            gait_gate_active = self._curriculum_gait_gate_active(
+                self.episode_levels[env_id]
+            )
+            gait_gate_passed = self._curriculum_gait_gate_passed(
+                env_id, self.episode_levels[env_id]
+            )
+            qualified_completion = (
+                curriculum_completed[env_id]
+                and (not gait_gate_active or gait_gate_passed)
+            )
+            unnatural_completion = (
+                curriculum_completed[env_id]
+                and gait_gate_active
+                and not gait_gate_passed
+            )
             terminal_terms = {
-                "completion": float(curriculum_completed[env_id]),
+                "completion": float(qualified_completion),
+                "unnatural_completion": float(unnatural_completion),
                 "natural_completion": float(natural_success[env_id]),
                 "fall": float(fell[env_id]),
                 "path_failure": float(path_failed[env_id]),
@@ -1709,7 +2125,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 5,
+            "version": 6,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -1722,7 +2138,7 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (4, 5):
+        if int(state.get("version", -1)) not in (4, 5, 6):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
             state["mastery_levels"], dtype=np.int64
