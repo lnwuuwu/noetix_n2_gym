@@ -1655,7 +1655,16 @@ class SourceCompatibilityTests(unittest.TestCase):
         ).read_text()
         self.assertIn("--max_iterations=2000", launcher)
         self.assertIn("--selection_interval=100", launcher)
+        self.assertIn("stream_stairs_mujoco.py", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
+
+        stream_source = (
+            ROOT / "sim2sim" / "stream_stairs_mujoco.py"
+        ).read_text()
+        self.assertIn('os.environ.setdefault("MUJOCO_GL", "egl")', stream_source)
+        self.assertIn("mujoco.Renderer", stream_source)
+        self.assertIn("latest_native_checkpoint", stream_source)
+        self.assertIn("step_callback=callback", stream_source)
 
     def test_algorithm_utilities_do_not_eagerly_import_isaacgym(self):
         init_source = (

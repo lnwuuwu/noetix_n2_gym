@@ -545,6 +545,17 @@ sim2sim/run_mujoco_native_train.sh long
 sim2sim/run_mujoco_native_train.sh status
 ```
 
+长训结束后，用原生 MuJoCo（不是 Isaac Gym）循环播放自动选出的
+`model_best.pt`，并在本机浏览器实时查看：
+
+```bash
+sim2sim/run_mujoco_native_train.sh view
+```
+
+服务器会输出 `http://127.0.0.1:8080/`。按原来相同的方法转发 8080
+端口后在本机打开；`Ctrl-C` 只停止可视化。网页采用 EGL 离屏渲染，
+显示固定 10 cm 楼梯、当前 episode、位置和偏航，不需要 X/GLFW。
+
 启动器优先使用 `/root/miniconda3/envs/n2/bin/python`，自动从既有比较报告中选择
 Isaac 里表现最好的 `natural_l4_9000` 作为初始化，并将日志和 PID 写到
 `/root/autodl-tmp/n2_train_logs/`。原始 Isaac checkpoint 不会被修改；原生模型位于

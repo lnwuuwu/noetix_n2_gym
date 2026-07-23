@@ -69,8 +69,16 @@ case "${MODE}" in
             tail -n 50 "${LATEST_LOG}"
         fi
         ;;
+    view)
+        export MUJOCO_GL="${MUJOCO_GL:-egl}"
+        exec "${PYTHON_BIN}" -u sim2sim/stream_stairs_mujoco.py \
+            --checkpoint_path=auto \
+            --stream_port=8080 \
+            --command_speed=0.18 \
+            --seed=42
+        ;;
     *)
-        echo "Usage: $0 {smoke|long|status}" >&2
+        echo "Usage: $0 {smoke|long|status|view}" >&2
         exit 2
         ;;
 esac

@@ -767,7 +767,7 @@ def heading_stabilizer_offset(yaw, yaw_rate, config):
     return float(np.clip(offset, -limit, limit))
 
 
-def run_episode(config, model, policy, seed):
+def run_episode(config, model, policy, seed, step_callback=None):
     validation = config["validation"]
     stair_cfg = config["stairs"]
     control_decimation = int(config["control_decimation"])
@@ -929,6 +929,21 @@ def run_episode(config, model, policy, seed):
             or np.max(np.abs(data.qacc)) > 1.0e8
         ):
             numerical_failure = True
+        if (
+            step_callback is not None
+            and lowlevel_step % control_decimation == 0
+        ):
+            step_callback(
+                data,
+                elapsed,
+                {
+                    "completed": completed,
+                    "fell": fell,
+                    "path_failure": path_failure,
+                    "numerical_failure": numerical_failure,
+                    "yaw": yaw,
+                },
+            )
         if fell or path_failure or completed or numerical_failure:
             break
 
