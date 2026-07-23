@@ -624,7 +624,7 @@ def evaluate_initial_policy(
 ):
     """Save and validate the untouched warm-start Actor before PPO updates."""
     if args.skip_eval or int(runner.current_learning_iteration) != 0:
-        return
+        return None
     checkpoint = log_dir / "model_0.pt"
     runner.save(str(checkpoint))
     output = log_dir / "baseline_00000.csv"
@@ -637,7 +637,7 @@ def evaluate_initial_policy(
         step_height=env.physical_step_height,
     )
     if summary is None:
-        return
+        return None
     score = selection_score(summary)
     readiness_score = physical_promotion_readiness(env, summary)
     update_progress_best(
@@ -668,6 +668,7 @@ def evaluate_initial_policy(
         ),
         flush=True,
     )
+    return summary
 
 
 def robust_checkpoint_tournament(
@@ -1124,13 +1125,49 @@ def main(args):
                 flush=True,
             )
 
-    evaluate_initial_policy(
+    baseline_required = (
+        not args.skip_eval
+        and int(runner.current_learning_iteration) == 0
+    )
+    baseline_summary = evaluate_initial_policy(
         runner,
         env,
         args,
         log_dir,
         progress_best,
     )
+    if baseline_required and baseline_summary is None:
+        env.close()
+        print(
+            "NATIVE_MUJOCO_BASELINE_REJECTED reason=evaluation_failed",
+            flush=True,
+        )
+        return 2
+    if baseline_summary is not None:
+        regression_guard = env.training_cfg["regression_guard"]
+        baseline_unusable = (
+            float(baseline_summary["completion_rate"])
+            <= float(
+                regression_guard[
+                    "absolute_max_completion_rate"
+                ]
+            )
+            and float(baseline_summary["fall_rate"])
+            >= float(
+                regression_guard["absolute_min_fall_rate"]
+            )
+        )
+        if baseline_unusable:
+            env.close()
+            print(
+                "NATIVE_MUJOCO_BASELINE_REJECTED "
+                "reason=unsafe_source completion={:.1%} fall={:.1%}".format(
+                    baseline_summary["completion_rate"],
+                    baseline_summary["fall_rate"],
+                ),
+                flush=True,
+            )
+            return 2
     signal.signal(signal.SIGTERM, request_safe_stop)
     stopped_early = False
     curriculum_finished = False

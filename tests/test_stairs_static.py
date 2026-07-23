@@ -1830,6 +1830,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
         self.assertIn("NATIVE_MUJOCO_PROGRESS_BEST", source)
         self.assertIn("NATIVE_MUJOCO_BASELINE", source)
+        self.assertIn("NATIVE_MUJOCO_BASELINE_REJECTED", source)
+        self.assertIn("baseline_unusable", source)
         self.assertIn("absolute_regression", source)
         self.assertIn("NATIVE_MUJOCO_EARLY_STOP", source)
         self.assertIn("NATIVE_MUJOCO_STAGE_BEST", source)
