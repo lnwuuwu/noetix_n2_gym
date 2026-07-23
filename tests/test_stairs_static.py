@@ -1733,6 +1733,19 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("! -path '*smoke*'", launcher)
         self.assertNotIn("humanoid/scripts/train.py", launcher)
 
+        for script_name in (
+            "train.py",
+            "play.py",
+            "eval_stairs.py",
+            "stream_stairs.py",
+        ):
+            script_source = (
+                ROOT / "humanoid" / "scripts" / script_name
+            ).read_text()
+            self.assertIn(
+                "from humanoid.utils.helpers import", script_source
+            )
+
         ppo_source = (
             ROOT / "humanoid" / "algo" / "ppo" / "ppo.py"
         ).read_text()

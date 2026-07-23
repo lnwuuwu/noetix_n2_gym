@@ -17,7 +17,8 @@ import numpy as np
 import torch
 
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-from humanoid.utils import get_args, task_registry
+from humanoid.utils.helpers import get_args
+from humanoid.utils import task_registry
 
 
 STAIR_TASKS = ("n2_stairs", "n2_stairs_robust", "n2_stairs_walk")

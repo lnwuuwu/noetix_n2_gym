@@ -8,7 +8,12 @@ import torch
 
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
-from humanoid.utils import export_policy_as_jit, export_policy_as_onnx, get_args, task_registry
+from humanoid.utils.helpers import (
+    export_policy_as_jit,
+    export_policy_as_onnx,
+    get_args,
+)
+from humanoid.utils import task_registry
 
 
 def _disable_randomization(env_cfg):

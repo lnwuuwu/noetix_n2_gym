@@ -6,8 +6,11 @@ import signal
 from humanoid.envs import *
 # Isaac Gym Preview 4 must load its bindings before importing torch.
 import torch
-# 导入参数解析和任务注册工具
-from humanoid.utils import get_args, task_registry
+# Import the parser from its defining module.  Python 3.8 can otherwise bind a
+# same-named symbol exposed while the lazy ``humanoid.utils`` package imports
+# task-registration side effects, yielding a zero-argument ``get_args`` here.
+from humanoid.utils.helpers import get_args
+from humanoid.utils import task_registry
 
 def train(args):
     """
