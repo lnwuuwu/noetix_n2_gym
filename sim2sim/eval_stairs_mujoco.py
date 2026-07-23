@@ -22,6 +22,15 @@ import numpy as np
 import torch
 import yaml
 
+# Direct execution sets ``sys.path[0]`` to ``sim2sim/`` rather than the
+# repository root.  Keep that entry first so ``from sim2sim import ...``
+# continues to resolve the sibling ``sim2sim.py``, then expose ``humanoid``.
+_REPOSITORY_ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(1, _REPOSITORY_ROOT)
+
 from humanoid import LEGGED_GYM_ROOT_DIR
 
 _UTILS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, "humanoid", "utils")

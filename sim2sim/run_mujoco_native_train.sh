@@ -8,12 +8,17 @@ TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"
 TRAIN_SEED="${N2_SEED:-42}"
 INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-auto}"
 NO_WARM_START="${N2_NO_WARM_START:-0}"
+MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"
 if [[ ! "${TRAIN_SEED}" =~ ^[0-9]+$ ]]; then
     echo "N2_SEED must be a non-negative integer." >&2
     exit 2
 fi
 if [[ "${NO_WARM_START}" != "0" && "${NO_WARM_START}" != "1" ]]; then
     echo "N2_NO_WARM_START must be 0 or 1." >&2
+    exit 2
+fi
+if [[ -n "${MAX_ITERATIONS_OVERRIDE}" && ! "${MAX_ITERATIONS_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "N2_MAX_ITERATIONS must be a positive integer." >&2
     exit 2
 fi
 
@@ -69,6 +74,9 @@ case "${MODE}" in
             TARGET_ITERATIONS=3000
             RUN_NAME="mujoco_curriculum_v4_long${RUN_VARIANT}_s${TRAIN_SEED}"
         fi
+        if [[ -n "${MAX_ITERATIONS_OVERRIDE}" ]]; then
+            TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE}"
+        fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
         PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
@@ -119,12 +127,13 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v4_resume_s${TRAIN_SEED}_${STAMP}.log"
         PID_FILE="${LOG_ROOT}/mujoco_curriculum_v4_s${TRAIN_SEED}.pid"
+        TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
             --log_dir="${RUN_DIR}" \
             --num_envs=32 \
             --num_workers=8 \
-            --max_iterations=3000 \
+            --max_iterations="${TARGET_ITERATIONS}" \
             --freeze_actor_iterations="${FREEZE_ACTOR_ITERATIONS}" \
             --rollout_steps=64 \
             --save_interval=50 \
@@ -144,6 +153,7 @@ case "${MODE}" in
         TRAIN_PID=$!
         printf '%s\n' "${TRAIN_PID}" >"${PID_FILE}"
         echo "Resumed from: ${LATEST_MODEL}"
+        echo "Target iteration: ${TARGET_ITERATIONS}"
         echo "PID=${TRAIN_PID}"
         echo "Log: ${TRAIN_LOG}"
         ;;

@@ -1746,7 +1746,17 @@ class SourceCompatibilityTests(unittest.TestCase):
         ).read_text()
         self.assertIn("TARGET_ITERATIONS=1000", launcher)
         self.assertIn("TARGET_ITERATIONS=3000", launcher)
-        self.assertIn("--max_iterations=3000", launcher)
+        self.assertIn(
+            'MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"',
+            launcher,
+        )
+        self.assertIn(
+            'TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"',
+            launcher,
+        )
+        self.assertIn(
+            '--max_iterations="${TARGET_ITERATIONS}"', launcher
+        )
         self.assertIn('TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"', launcher)
         self.assertIn('TRAIN_SEED="${N2_SEED:-42}"', launcher)
         self.assertIn(
@@ -1831,6 +1841,25 @@ class SourceCompatibilityTests(unittest.TestCase):
             ROOT / "sim2sim" / "eval_stairs_mujoco.py"
         ).read_text()
         self.assertIn('"mean_arm_swing_match"', evaluator_source)
+        evaluator_root = evaluator_source.index(
+            "_REPOSITORY_ROOT ="
+        )
+        evaluator_humanoid = evaluator_source.index(
+            "from humanoid import LEGGED_GYM_ROOT_DIR"
+        )
+        self.assertLess(evaluator_root, evaluator_humanoid)
+        self.assertIn(
+            "sys.path.insert(1, _REPOSITORY_ROOT)",
+            evaluator_source,
+        )
+        sim2sim_source = (
+            ROOT / "sim2sim" / "sim2sim.py"
+        ).read_text()
+        sim2sim_root = sim2sim_source.index("_REPOSITORY_ROOT =")
+        sim2sim_humanoid = sim2sim_source.index(
+            "from humanoid import LEGGED_GYM_ROOT_DIR"
+        )
+        self.assertLess(sim2sim_root, sim2sim_humanoid)
 
     def test_algorithm_utilities_do_not_eagerly_import_isaacgym(self):
         init_source = (
