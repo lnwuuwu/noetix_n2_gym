@@ -138,7 +138,12 @@ mujoco_training:
   initial_joint_noise: 0.015
   initial_lateral_noise: 0.025
   initial_yaw_noise: 0.06
-  randomize_gait_phase: true
+  # The guide must initially agree with a real support leg.  Starting every
+  # discovery episode at the observable phase origin lets the right/left
+  # sequence establish itself on the flat approach; touchdown resets then
+  # keep the clock synchronized.  Robust phase randomization belongs after a
+  # natural alternating policy has been learned.
+  randomize_gait_phase: false
   progress_grace_s: 2.0
   progress_timeout_s: 5.0
   progress_epsilon_m: 0.05
@@ -186,6 +191,34 @@ mujoco_training:
   next_tread_target_full_phase: 0.85
   nominal_foot_surface_offset_m: 0.045
   foot_surface_offset_update_rate: 0.10
+  # v10 proved that terminal gait penalties alone cannot escape the inherited
+  # step-to local optimum: the Actor either kept joining the feet or eventually
+  # destroyed its otherwise stable 2 cm policy.  v11 uses a training-plant-only
+  # sagittal swing reference.  Its action blend fades completely to zero, while
+  # a small raw-action imitation objective remains as ordinary reward shaping.
+  # All periodic selection, promotion, export, and acceptance runs are
+  # deterministic and unassisted.
+  gait_guidance:
+    enabled: true
+    min_target_steps: 2
+    # Start on the flat approach (start_x is 0.60 m), not at the first riser.
+    # This avoids asking the guide to lift an arbitrary load-bearing foot.
+    activation_distance_m: 0.60
+    max_assistance_scale: 0.35
+    hold_iterations: 150
+    fade_iterations: 450
+    post_fade_stagnation_evaluations: 8
+    imitation_floor: 0.35
+    imitation_sharpness: 1.5
+    reference_step_height_m: 0.02
+    motion_start_phase: 0.06
+    blend_ramp_fraction: 0.20
+    hip_landing_offset_rad: 0.22
+    hip_landing_height_gain: 1.25
+    knee_clearance_offset_rad: 0.34
+    knee_clearance_height_gain: 3.00
+    knee_landing_offset_rad: 0.05
+    knee_landing_height_gain: 0.75
   arm_swing_amplitude_rad: 0.22
   arm_swing_sharpness: 12.0
   forward_pitch_base_target_rad: 0.04
@@ -304,6 +337,8 @@ mujoco_training:
     expected_swing_liftoff: 2.0
     expected_swing_delay: -3.0
     wrong_foot_swing: -8.0
+    gait_guide_match: 2.0
+    gait_guide_error: -1.0
     arm_swing: 0.20
     no_progress: -0.50
     double_flight: -8.0

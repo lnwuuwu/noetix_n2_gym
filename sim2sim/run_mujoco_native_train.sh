@@ -60,10 +60,29 @@ case "${MODE}" in
             --smoke \
             "${WARM_START_ARGS[@]}" \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v10_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v11_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}"
         ;;
-    pilot|long|recover|retune)
+    guide-check)
+        GUIDE_CHECKPOINT="${INIT_CHECKPOINT}"
+        if [[ "${GUIDE_CHECKPOINT}" == "auto" || \
+              -z "${GUIDE_CHECKPOINT}" || \
+              ! -f "${GUIDE_CHECKPOINT}" ]]; then
+            echo "guide-check requires an explicit known-good checkpoint:" >&2
+            echo "N2_INIT_CHECKPOINT=/absolute/model_stage_best.pt $0 guide-check" >&2
+            exit 2
+        fi
+        GUIDE_OUTPUT="${ROOT_DIR}/logs_mujoco/gait_guide_check_s${TRAIN_SEED}.csv"
+        exec "${PYTHON_BIN}" -u sim2sim/eval_stairs_mujoco.py \
+            --checkpoint_path="${GUIDE_CHECKPOINT}" \
+            --gait_guide_sweep \
+            --episodes=16 \
+            --step_height=0.02 \
+            --command_speed=0.18 \
+            --output="${GUIDE_OUTPUT}" \
+            --seed="${TRAIN_SEED}"
+        ;;
+    pilot|long|recover|retune|guided-long)
         if pgrep -f '[t]rain_stairs_mujoco.py' >/dev/null; then
             echo "A MuJoCo stair trainer is already running:"
             pgrep -af '[t]rain_stairs_mujoco.py'
@@ -72,37 +91,46 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
             TARGET_ITERATIONS=800
-            RUN_NAME="mujoco_curriculum_v10_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v11_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
         elif [[ "${MODE}" == "long" ]]; then
             TARGET_ITERATIONS=3000
-            RUN_NAME="mujoco_curriculum_v10_long${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v11_long${RUN_VARIANT}_s${TRAIN_SEED}"
         else
             if [[ "${NO_WARM_START}" == "1" ]]; then
-                echo "recover reuses an Actor; set N2_NO_WARM_START=0." >&2
+                echo "${MODE} reuses an Actor; set N2_NO_WARM_START=0." >&2
                 exit 2
             fi
             RECOVERY_CHECKPOINT="${INIT_CHECKPOINT}"
             if [[ "${RECOVERY_CHECKPOINT}" == "auto" || \
                   -z "${RECOVERY_CHECKPOINT}" || \
                   ! -f "${RECOVERY_CHECKPOINT}" ]]; then
-                echo "recover requires an explicit known-good checkpoint:" >&2
+                echo "${MODE} requires an explicit known-good checkpoint:" >&2
                 echo "N2_INIT_CHECKPOINT=/absolute/model_*.pt $0 recover" >&2
                 exit 2
             fi
             WARM_START_ARGS=("--init_checkpoint=${RECOVERY_CHECKPOINT}")
-            TARGET_ITERATIONS=300
-            RUN_NAME="mujoco_curriculum_v10_recover_s${TRAIN_SEED}"
-            FREEZE_ACTOR_ITERATIONS=25
-            LEARNING_RATE=2e-5
-            ACTION_NOISE_STD=0.18
-            SYMMETRY_LOSS_COEFF=0.75
+            if [[ "${MODE}" == "guided-long" ]]; then
+                TARGET_ITERATIONS=3000
+                RUN_NAME="mujoco_curriculum_v11_guided_long_s${TRAIN_SEED}"
+                FREEZE_ACTOR_ITERATIONS=100
+                LEARNING_RATE=5e-6
+                ACTION_NOISE_STD=0.10
+                SYMMETRY_LOSS_COEFF=0.35
+            else
+                TARGET_ITERATIONS=300
+                RUN_NAME="mujoco_curriculum_v11_recover_s${TRAIN_SEED}"
+                FREEZE_ACTOR_ITERATIONS=25
+                LEARNING_RATE=1e-5
+                ACTION_NOISE_STD=0.12
+                SYMMETRY_LOSS_COEFF=0.50
+            fi
             LEARNING_RATE_ARGS=("--fixed_learning_rate")
         fi
         if [[ -n "${MAX_ITERATIONS_OVERRIDE}" ]]; then
             TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE}"
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v10_s${TRAIN_SEED}.pid"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v11_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             "${WARM_START_ARGS[@]}" \
             --num_envs=32 \
@@ -151,8 +179,8 @@ case "${MODE}" in
         fi
         RUN_DIR="$(dirname "${LATEST_MODEL}")"
         STAMP="$(date +%m%d_%H-%M-%S)"
-        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v10_resume_s${TRAIN_SEED}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v10_s${TRAIN_SEED}.pid"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v11_resume_s${TRAIN_SEED}_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v11_s${TRAIN_SEED}.pid"
         TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
@@ -175,7 +203,7 @@ case "${MODE}" in
             --symmetry_loss_coeff="${RESUME_SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v10_resume_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v11_resume_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}" \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
@@ -251,7 +279,7 @@ case "${MODE}" in
             --seed="${TRAIN_SEED}"
         ;;
     *)
-        echo "Usage: $0 {smoke|pilot|long|recover|resume|status|stop|view}" >&2
+        echo "Usage: $0 {smoke|guide-check|pilot|long|recover|guided-long|resume|status|stop|view}" >&2
         exit 2
         ;;
 esac

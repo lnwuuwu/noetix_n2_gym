@@ -26,6 +26,12 @@ def load_pure_stairs_module():
     return module
 
 
+def load_pure_gait_guidance_module():
+    return load_module(
+        "n2_gait_guidance_test", "sim2sim/gait_guidance.py"
+    )
+
+
 def load_pure_mujoco_eval_module():
     """Load the contact tracker without requiring MuJoCo or Isaac Gym."""
     previous_mujoco = sys.modules.get("mujoco")
@@ -431,6 +437,66 @@ class StairGeometryTests(unittest.TestCase):
 
 
 class MujocoSim2SimTests(unittest.TestCase):
+    def test_phase_swing_guidance_is_alternating_and_foot_level(self):
+        guidance = load_pure_gait_guidance_module()
+        cfg = {
+            "reference_step_height_m": 0.02,
+            "motion_start_phase": 0.06,
+            "blend_ramp_fraction": 0.20,
+            "hip_landing_offset_rad": 0.22,
+            "hip_landing_height_gain": 1.25,
+            "knee_clearance_offset_rad": 0.34,
+            "knee_clearance_height_gain": 3.00,
+            "knee_landing_offset_rad": 0.05,
+            "knee_landing_height_gain": 0.75,
+        }
+        indices = np.asarray([[6, 7, 8], [15, 16, 17]])
+        right, right_mask, right_foot, _, right_weight = (
+            guidance.phase_swing_action_reference(
+                0.25, 0.02, 0.25, 18, indices, cfg
+            )
+        )
+        left, left_mask, left_foot, _, left_weight = (
+            guidance.phase_swing_action_reference(
+                0.75, 0.02, 0.25, 18, indices, cfg
+            )
+        )
+        self.assertEqual(right_foot, 1)
+        self.assertEqual(left_foot, 0)
+        np.testing.assert_array_equal(
+            np.flatnonzero(right_mask), indices[1]
+        )
+        np.testing.assert_array_equal(
+            np.flatnonzero(left_mask), indices[0]
+        )
+        self.assertGreater(right_weight, 0.99)
+        self.assertGreater(left_weight, 0.99)
+        self.assertLess(right[15], 0.0)
+        self.assertGreater(right[16], 0.0)
+        self.assertAlmostEqual(
+            float(np.sum(right[indices[1]])), 0.0, places=6
+        )
+        np.testing.assert_allclose(
+            left[indices[0]], right[indices[1]], atol=1.0e-7
+        )
+
+    def test_guidance_blends_only_the_scheduled_sagittal_joints(self):
+        guidance = load_pure_gait_guidance_module()
+        policy = np.linspace(-0.5, 0.5, 18, dtype=np.float32)
+        reference = np.zeros(18, dtype=np.float32)
+        reference[[6, 7, 8]] = [-1.0, 1.0, 0.0]
+        mask = np.zeros(18, dtype=bool)
+        mask[[6, 7, 8]] = True
+        blended, scale = guidance.blend_swing_action(
+            policy, reference, mask, 0.40, 0.50
+        )
+        self.assertAlmostEqual(scale, 0.20)
+        np.testing.assert_allclose(blended[~mask], policy[~mask])
+        np.testing.assert_allclose(
+            blended[mask],
+            0.80 * policy[mask] + 0.20 * reference[mask],
+        )
+
     @classmethod
     def setUpClass(cls):
         cls.evaluator = load_pure_mujoco_eval_module()
@@ -1750,6 +1816,8 @@ class SourceCompatibilityTests(unittest.TestCase):
             "expected_swing_liftoff",
             "expected_swing_delay",
             "wrong_foot_swing",
+            "gait_guide_match",
+            "gait_guide_error",
             "arm_swing",
             "foot_riser_collision",
             "lower_leg_collision",
@@ -1829,8 +1897,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 10', env_source)
-        self.assertIn("4, 5, 6, 7, 8, 9, 10", env_source)
+        self.assertIn('"version": 11', env_source)
+        self.assertIn("4, 5, 6, 7, 8, 9, 10, 11", env_source)
         self.assertIn('"gait_completion"', env_source)
         self.assertIn('"gait_failure"', env_source)
         self.assertIn("mujoco_gait_failure_rate", env_source)
@@ -1846,6 +1914,23 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("scheduled_clearance_base_m", env_source)
         self.assertIn("actual_contacts[opposite_foot]", env_source)
         self.assertIn('"wrong_foot_swing"', env_source)
+        self.assertIn("def set_gait_guidance", env_source)
+        self.assertIn("def _prepare_executed_actions", env_source)
+        self.assertIn("self.executed_actions", env_source)
+        self.assertIn('"gait_guide_match"', env_source)
+        guidance = training["gait_guidance"]
+        self.assertTrue(guidance["enabled"])
+        self.assertGreater(guidance["max_assistance_scale"], 0.0)
+        self.assertLessEqual(guidance["max_assistance_scale"], 0.50)
+        self.assertGreater(guidance["fade_iterations"], 0)
+        self.assertGreater(
+            guidance["post_fade_stagnation_evaluations"], 0
+        )
+        self.assertFalse(training["randomize_gait_phase"])
+        self.assertGreaterEqual(
+            guidance["activation_distance_m"],
+            config["stairs"]["start_x"],
+        )
         self.assertIn("-16.0 * float(state[\"yaw\"] ** 2)", env_source)
         self.assertTrue(config["gait_phase"]["contact_phase_reset"])
 
@@ -1872,6 +1957,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("baseline_unusable", source)
         self.assertIn("absolute_regression", source)
         self.assertIn("NATIVE_MUJOCO_EARLY_STOP", source)
+        self.assertIn("gait_guidance_schedule", source)
+        self.assertIn("env.set_gait_guidance", source)
+        self.assertIn("reason=post_guidance_", source)
+        self.assertIn('"--gait_guide_scale"', source)
+        self.assertIn('"0.0"', source)
         self.assertIn("NATIVE_MUJOCO_STAGE_BEST", source)
         self.assertIn('"fixed" if args.fixed_learning_rate', source)
         self.assertIn('"model_progress_best.pt"', source)
@@ -1932,16 +2022,25 @@ class SourceCompatibilityTests(unittest.TestCase):
             '--symmetry_loss_coeff="${SYMMETRY_LOSS_COEFF}"',
             launcher,
         )
-        self.assertIn("pilot|long|recover|retune", launcher)
+        self.assertIn(
+            "pilot|long|recover|retune|guided-long", launcher
+        )
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v10_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v11_recover_s${TRAIN_SEED}"',
             launcher,
         )
-        self.assertIn("LEARNING_RATE=2e-5", launcher)
-        self.assertIn("ACTION_NOISE_STD=0.18", launcher)
+        self.assertIn("LEARNING_RATE=1e-5", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.12", launcher)
         self.assertIn("FREEZE_ACTOR_ITERATIONS=25", launcher)
+        self.assertIn("guide-check)", launcher)
+        self.assertIn("--gait_guide_sweep", launcher)
+        self.assertIn(
+            'RUN_NAME="mujoco_curriculum_v11_guided_long_s${TRAIN_SEED}"',
+            launcher,
+        )
+        self.assertIn("LEARNING_RATE=5e-6", launcher)
         self.assertIn('LEARNING_RATE_ARGS=("--fixed_learning_rate")', launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',

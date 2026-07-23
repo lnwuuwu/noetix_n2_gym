@@ -271,6 +271,38 @@ def set_policy_noise_std(policy, action_noise_std):
             )
 
 
+def gait_guidance_schedule(training_cfg, iteration):
+    """Return plant assistance and raw-action imitation weights.
+
+    Assistance is a temporary deterministic action transform inside the
+    training environment.  It reaches exactly zero after the configured fade.
+    A small imitation floor remains as reward shaping; deterministic selection
+    never calls this function and therefore always evaluates the raw Actor.
+    """
+    guidance = training_cfg.get("gait_guidance", {})
+    if not bool(guidance.get("enabled", False)):
+        return 0.0, 0.0
+    maximum = float(guidance["max_assistance_scale"])
+    hold = int(guidance["hold_iterations"])
+    fade = int(guidance["fade_iterations"])
+    floor = float(guidance["imitation_floor"])
+    if not 0.0 <= maximum <= 1.0:
+        raise ValueError("max_assistance_scale must be in [0, 1]")
+    if hold < 0 or fade < 1:
+        raise ValueError("gait guidance hold/fade iterations are invalid")
+    if not 0.0 <= floor <= 1.0:
+        raise ValueError("imitation_floor must be in [0, 1]")
+    iteration = max(0, int(iteration))
+    if iteration <= hold:
+        fraction = 1.0
+    else:
+        fraction = max(
+            0.0,
+            1.0 - (iteration - hold) / float(fade),
+        )
+    return maximum * fraction, floor + (1.0 - floor) * fraction
+
+
 def export_actor(runner, output_path):
     exporter = ActorExporter(runner.alg.policy.actor)
     exporter.eval()
@@ -315,6 +347,10 @@ def run_mujoco_evaluation(
         "0.60",
         "--command_speed",
         "0.18",
+        # Selection, promotion, tournament, and acceptance must measure the
+        # deployable Actor, never the temporary training-plant scaffold.
+        "--gait_guide_scale",
+        "0.0",
         "--episodes",
         str(episodes),
         "--output",
@@ -788,8 +824,17 @@ def train_stage(
         regression_guard["consecutive_evaluations"]
     )
     regression_streak = 0
+    guidance_cfg = env.training_cfg.get("gait_guidance", {})
+    stagnation_limit = int(
+        guidance_cfg.get("post_fade_stagnation_evaluations", 0)
+    )
+    post_fade_stagnation = 0
     while runner.current_learning_iteration < target_iteration:
         current = int(runner.current_learning_iteration)
+        assistance, imitation = gait_guidance_schedule(
+            env.training_cfg, current
+        )
+        env.set_gait_guidance(assistance, imitation)
         chunk = target_iteration - current
         if not args.skip_eval and args.selection_interval > 0:
             chunk = min(chunk, int(args.selection_interval))
@@ -882,8 +927,9 @@ def train_stage(
         # updated gate streak/height in the same numeric checkpoint so resume
         # cannot silently fall back one physical stage.
         runner.save(str(checkpoint))
+        progress_improved = False
         if not regressed:
-            update_progress_best(
+            progress_improved = update_progress_best(
                 log_dir,
                 checkpoint,
                 current,
@@ -893,6 +939,20 @@ def train_stage(
                 readiness_score,
                 progress_best,
             )
+        assistance_finished = (
+            bool(guidance_cfg.get("enabled", False))
+            and assistance <= 1.0e-9
+        )
+        if (
+            assistance_finished
+            and not height_gate_passed
+            and not promoted
+        ):
+            post_fade_stagnation = (
+                0 if progress_improved else post_fade_stagnation + 1
+            )
+        else:
+            post_fade_stagnation = 0
         print(
             "NATIVE_MUJOCO_HEIGHT_GATE iter={} passed={} streak={}/{} "
             "height={:.2f}m alternate={:.1%} join={:.1%} "
@@ -929,6 +989,21 @@ def train_stage(
                 "NATIVE_MUJOCO_EARLY_STOP iter={} reason=deterministic_"
                 "regression restore=model_progress_best.pt".format(
                     current
+                ),
+                flush=True,
+            )
+            return True
+        if (
+            stagnation_limit > 0
+            and post_fade_stagnation >= stagnation_limit
+        ):
+            print(
+                "NATIVE_MUJOCO_EARLY_STOP iter={} reason=post_guidance_"
+                "stagnation streak={}/{} restore=model_progress_best.pt"
+                .format(
+                    current,
+                    post_fade_stagnation,
+                    stagnation_limit,
                 ),
                 flush=True,
             )
@@ -1075,7 +1150,10 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 10,
+        "curriculum_version": 11,
+        "gait_guidance": config["mujoco_training"].get(
+            "gait_guidance", {}
+        ),
         "symmetry_loss_coeff": args.symmetry_loss_coeff,
         "fixed_learning_rate": bool(args.fixed_learning_rate),
         "selection_episodes": args.selection_episodes,
@@ -1391,7 +1469,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v10_s42"
+        "--run_name", default="mujoco_curriculum_v11_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

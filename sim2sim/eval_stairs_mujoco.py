@@ -36,10 +36,23 @@ from humanoid import LEGGED_GYM_ROOT_DIR
 _UTILS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, "humanoid", "utils")
 if _UTILS_DIR not in sys.path:
     sys.path.insert(0, _UTILS_DIR)
+_SIM2SIM_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SIM2SIM_DIR not in sys.path:
+    sys.path.insert(0, _SIM2SIM_DIR)
 from stairs_terrain import (  # noqa: E402
     classify_tread_transition,
     terrain_height_at_x,
 )
+try:  # noqa: E402
+    from gait_guidance import (
+        blend_swing_action,
+        phase_swing_action_reference,
+    )
+except ImportError:  # Imported as ``sim2sim.eval_stairs_mujoco`` in tests.
+    from sim2sim.gait_guidance import (
+        blend_swing_action,
+        phase_swing_action_reference,
+    )
 
 # When this file is executed as ``python sim2sim/eval_stairs_mujoco.py``, the
 # sibling sim2sim.py is importable as the top-level ``sim2sim`` module.
@@ -112,6 +125,7 @@ PHYSICS_PRESETS = {
 }
 
 PHASE_SWEEP_OFFSETS = tuple(index / 8.0 for index in range(8))
+GAIT_GUIDE_SWEEP_SCALES = (0.0, 0.20, 0.35, 0.50)
 
 STABILIZATION_PRESETS = {
     # Preserve the exported policy exactly as the baseline.
@@ -812,6 +826,21 @@ def run_episode(config, model, policy, seed, step_callback=None):
         joint_order.index("L_leg_hip_yaw_joint"),
         joint_order.index("R_leg_hip_yaw_joint"),
     )
+    sagittal_joint_indices = np.asarray(
+        [
+            [
+                joint_order.index("L_leg_hip_pitch_joint"),
+                joint_order.index("L_leg_knee_joint"),
+                joint_order.index("L_leg_ankle_joint"),
+            ],
+            [
+                joint_order.index("R_leg_hip_pitch_joint"),
+                joint_order.index("R_leg_knee_joint"),
+                joint_order.index("R_leg_ankle_joint"),
+            ],
+        ],
+        dtype=np.int64,
+    )
     shoulder_pitch_policy_indices = (
         joint_order.index("L_arm_shoulder_pitch_joint"),
         joint_order.index("R_arm_shoulder_pitch_joint"),
@@ -873,6 +902,13 @@ def run_episode(config, model, policy, seed, step_callback=None):
     contact_phase_reset = bool(
         phase_cfg.get("contact_phase_reset", False)
     )
+    native_training = config.get("mujoco_training", {})
+    gait_guidance_cfg = native_training.get("gait_guidance", {})
+    diagnostic_guide_scale = float(
+        config.get("_diagnostic_gait_guide_scale", 0.0)
+    )
+    if not 0.0 <= diagnostic_guide_scale <= 1.0:
+        raise ValueError("diagnostic gait guide scale must be in [0, 1]")
 
     lowlevel_steps = int(math.ceil(duration / simulation_dt))
     for lowlevel_step in range(lowlevel_steps):
@@ -916,7 +952,45 @@ def run_episode(config, model, policy, seed, step_callback=None):
             action[:] = np.clip(
                 output.detach().cpu().numpy(), -clip_actions, clip_actions
             )
-            target_q = action * action_scale + default
+            phase = (
+                runtime_phase_offset
+                + elapsed * gait_frequency
+            ) % 1.0
+            executed_action = action
+            guide_active = (
+                diagnostic_guide_scale > 0.0
+                and bool(gait_guidance_cfg.get("enabled", False))
+                and float(data.qpos[0])
+                >= float(stair_cfg["start_x"])
+                - float(
+                    gait_guidance_cfg.get(
+                        "activation_distance_m", 0.30
+                    )
+                )
+            )
+            if guide_active:
+                (
+                    guide_reference,
+                    guide_mask,
+                    _,
+                    _,
+                    guide_phase_weight,
+                ) = phase_swing_action_reference(
+                    phase,
+                    float(stair_cfg["step_height"]),
+                    action_scale,
+                    num_actions,
+                    sagittal_joint_indices,
+                    gait_guidance_cfg,
+                )
+                executed_action, _ = blend_swing_action(
+                    action,
+                    guide_reference,
+                    guide_mask,
+                    diagnostic_guide_scale,
+                    guide_phase_weight,
+                )
+            target_q = executed_action * action_scale + default
             heading_correction = heading_stabilizer_offset(
                 yaw, omega[2], config
             )
@@ -947,12 +1021,7 @@ def run_episode(config, model, policy, seed, step_callback=None):
                 )
             control_steps += 1
             speed_sum += float(velocity[0])
-            phase = (
-                runtime_phase_offset
-                + elapsed * gait_frequency
-            ) % 1.0
             phase_sine = math.sin(2.0 * math.pi * phase)
-            native_training = config.get("mujoco_training", {})
             arm_amplitude = float(
                 native_training.get("arm_swing_amplitude_rad", 0.22)
             )
@@ -1122,6 +1191,9 @@ def aggregate_results(results, config, policy_path):
         "gait_phase_offset": float(
             config.get("gait_phase", {}).get("phase_offset", 0.0)
         ),
+        "diagnostic_gait_guide_scale": float(
+            config.get("_diagnostic_gait_guide_scale", 0.0)
+        ),
         "yaw_observation_gain": float(
             config.get("heading_stabilizer", {}).get(
                 "yaw_observation_gain", 1.0
@@ -1212,6 +1284,12 @@ def _apply_cli_overrides(config, args):
         if not 0.0 <= phase_offset < 1.0:
             raise ValueError("--phase_offset must be in [0, 1)")
         config.setdefault("gait_phase", {})["phase_offset"] = phase_offset
+    gait_guide_scale = float(
+        getattr(args, "gait_guide_scale", 0.0) or 0.0
+    )
+    if not 0.0 <= gait_guide_scale <= 1.0:
+        raise ValueError("--gait_guide_scale must be in [0, 1]")
+    config["_diagnostic_gait_guide_scale"] = gait_guide_scale
     if args.physics_preset is not None:
         if args.physics_preset not in PHYSICS_PRESETS:
             raise ValueError(
@@ -1304,6 +1382,7 @@ def evaluate(args):
         "MuJoCo physics={physics_preset} inertia={inertial_source} "
         "start={stair_start_x_m:.2f}m "
         "step={step_height_m:.2f}m phase={gait_phase_offset:.3f} "
+        "guide={diagnostic_gait_guide_scale:.2f} "
         "yawobs={yaw_observation_gain:.2f} hipkp={hip_yaw_kp:+.2f} "
         "success={success_rate:.1%} "
         "completion={completion_rate:.1%} fall={fall_rate:.1%} "
@@ -1352,6 +1431,7 @@ if __name__ == "__main__":
         "--path_violation_dwell_s", type=float, default=None
     )
     parser.add_argument("--phase_offset", type=float, default=None)
+    parser.add_argument("--gait_guide_scale", type=float, default=0.0)
     parser.add_argument("--yaw_observation_gain", type=float, default=None)
     parser.add_argument("--hip_yaw_kp", type=float, default=None)
     parser.add_argument("--hip_yaw_kd", type=float, default=None)
@@ -1361,6 +1441,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--physics_sweep", action="store_true")
     parser.add_argument("--phase_sweep", action="store_true")
+    parser.add_argument("--gait_guide_sweep", action="store_true")
     parser.add_argument("--stabilization_sweep", action="store_true")
     parser.add_argument("--output", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -1372,13 +1453,14 @@ if __name__ == "__main__":
         for value in (
             arguments.physics_sweep,
             arguments.phase_sweep,
+            arguments.gait_guide_sweep,
             arguments.stabilization_sweep,
         )
     )
     if sweep_count > 1:
         raise ValueError(
             "Choose only one of --physics_sweep/--phase_sweep/"
-            "--stabilization_sweep"
+            "--gait_guide_sweep/--stabilization_sweep"
         )
     if arguments.physics_sweep:
         output_path = arguments.output
@@ -1415,6 +1497,53 @@ if __name__ == "__main__":
                 )
             )
             evaluate(sweep_arguments)
+    elif arguments.gait_guide_sweep:
+        output_path = arguments.output
+        candidates = []
+        for guide_scale in GAIT_GUIDE_SWEEP_SCALES:
+            sweep_arguments = copy.copy(arguments)
+            sweep_arguments.gait_guide_sweep = False
+            sweep_arguments.gait_guide_scale = guide_scale
+            if output_path:
+                output_root, output_extension = os.path.splitext(output_path)
+                if output_extension.lower() != ".csv":
+                    output_root = output_path
+                sweep_arguments.output = "{}_guide_{:03d}.csv".format(
+                    output_root, round(guide_scale * 100)
+                )
+            print(
+                "\n=== MuJoCo diagnostic gait guide: {:.2f} ===".format(
+                    guide_scale
+                )
+            )
+            candidates.append(
+                (guide_scale, evaluate(sweep_arguments))
+            )
+
+        recommended_scale, recommended = max(
+            candidates,
+            key=lambda item: (
+                item[1]["completion_rate"]
+                - item[1]["fall_rate"]
+                - item[1]["path_failure_rate"]
+                + 2.0 * item[1]["mean_alternating_tread_rate"]
+                - item[1]["mean_same_tread_join_rate"],
+                item[1]["completion_rate"],
+                item[1]["mean_alternating_tread_rate"],
+                -item[1]["mean_max_yaw_deviation_rad"],
+            ),
+        )
+        print(
+            "MuJoCo diagnostic gait-guide recommendation={:.2f} "
+            "completion={:.1%} fall={:.1%} alternate={:.1%} "
+            "join={:.1%}".format(
+                recommended_scale,
+                recommended["completion_rate"],
+                recommended["fall_rate"],
+                recommended["mean_alternating_tread_rate"],
+                recommended["mean_same_tread_join_rate"],
+            )
+        )
     elif arguments.stabilization_sweep:
         output_path = arguments.output
         candidates = []
