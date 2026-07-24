@@ -272,26 +272,22 @@ def set_policy_noise_std(policy, action_noise_std):
 
 
 def gait_guidance_schedule(training_cfg, iteration):
-    """Return plant assistance and raw-action imitation weights.
+    """Return the optional training-plant residual scale.
 
-    Assistance is a temporary deterministic action transform inside the
-    training environment.  It reaches exactly zero after the configured fade.
-    A small imitation floor remains as reward shaping; deterministic selection
-    never calls this function and therefore always evaluates the raw Actor.
+    Assistance reaches exactly zero after the configured fade.  Climb-first
+    training disables it; deterministic selection always evaluates raw Actor
+    actions regardless of this schedule.
     """
     guidance = training_cfg.get("gait_guidance", {})
     if not bool(guidance.get("enabled", False)):
-        return 0.0, 0.0
+        return 0.0
     maximum = float(guidance["max_assistance_scale"])
     hold = int(guidance["hold_iterations"])
     fade = int(guidance["fade_iterations"])
-    floor = float(guidance["imitation_floor"])
     if not 0.0 <= maximum <= 1.0:
         raise ValueError("max_assistance_scale must be in [0, 1]")
     if hold < 0 or fade < 1:
         raise ValueError("gait guidance hold/fade iterations are invalid")
-    if not 0.0 <= floor <= 1.0:
-        raise ValueError("imitation_floor must be in [0, 1]")
     iteration = max(0, int(iteration))
     if iteration <= hold:
         fraction = 1.0
@@ -300,7 +296,7 @@ def gait_guidance_schedule(training_cfg, iteration):
             0.0,
             1.0 - (iteration - hold) / float(fade),
         )
-    return maximum * fraction, floor + (1.0 - floor) * fraction
+    return maximum * fraction
 
 
 def export_actor(runner, output_path):
@@ -373,17 +369,17 @@ def run_mujoco_evaluation(
 
 
 def selection_score(summary):
-    """Balance physical completion with strict natural-gait quality."""
+    """Rank physical climbing first and gait quality second."""
     expected_climb = max(
         float(summary["step_height_m"]) * 6.0, 1.0e-6
     )
     return (
-        20.0 * float(summary["success_rate"])
-        + 8.0 * float(summary["completion_rate"])
+        2.0 * float(summary["success_rate"])
+        + 10.0 * float(summary["completion_rate"])
         - 3.0 * float(summary["path_failure_rate"])
         - 3.0 * float(summary["fall_rate"])
-        + 2.0 * float(summary["mean_alternating_tread_rate"])
-        - 1.5 * float(summary["mean_same_tread_join_rate"])
+        + 0.5 * float(summary["mean_alternating_tread_rate"])
+        - 0.5 * float(summary["mean_same_tread_join_rate"])
         + 0.25 * float(summary.get("mean_arm_swing_match", 0.0))
         - 1.0
         * float(summary["mean_foot_riser_collision_fraction"])
@@ -421,6 +417,18 @@ def physical_promotion_readiness(env, summary):
         float(summary["mean_forward_speed_m_s"])
         - float(summary["command_speed_m_s"])
     )
+    gait_checks = ()
+    if bool(gate.get("require_gait_quality", True)):
+        gait_checks = (
+            float(summary["mean_alternating_tread_rate"])
+            >= env._physical_gate_value(
+                gate, "min_alternating_tread_rate"
+            ),
+            float(summary["mean_same_tread_join_rate"])
+            <= env._physical_gate_value(
+                gate, "max_same_tread_join_rate"
+            ),
+        )
     checks = (
         math.isclose(
             float(summary["step_height_m"]),
@@ -436,19 +444,11 @@ def physical_promotion_readiness(env, summary):
         float(summary["mean_climb_height_m"])
         >= env._physical_gate_value(gate, "min_climb_fraction")
         * expected_climb,
-        float(summary["mean_alternating_tread_rate"])
-        >= env._physical_gate_value(
-            gate, "min_alternating_tread_rate"
-        ),
-        float(summary["mean_same_tread_join_rate"])
-        <= env._physical_gate_value(
-            gate, "max_same_tread_join_rate"
-        ),
         speed_error
         <= env._physical_gate_value(gate, "max_speed_error_m_s"),
         float(summary["mean_max_yaw_deviation_rad"])
         <= env._physical_gate_value(gate, "max_yaw_deviation_rad"),
-    )
+    ) + gait_checks
     # A policy satisfying one more hard gate must outrank any cosmetic score
     # gain. This preserves the speed-controlled model_300-like candidate over
     # a faster model with slightly higher completion but two failed gates.
@@ -458,11 +458,22 @@ def physical_promotion_readiness(env, summary):
 
 
 def checkpoint_gate_passed(summary, curriculum_cfg):
-    """Require deterministic 10 cm climbing before naming a model best."""
+    """Require deterministic 10 cm physical climbing before naming a best."""
     heights = curriculum_cfg["physical_step_heights_m"]
     final_height = float(heights[-1])
     gate = curriculum_cfg["checkpoint_gate"]
     expected_climb = final_height * 6.0
+    natural_gait_passed = (
+        not bool(gate.get("require_natural_gait", True))
+        or (
+            float(summary["success_rate"])
+            >= float(gate["min_success_rate"])
+            and float(summary["mean_alternating_tread_rate"])
+            >= float(gate["min_alternating_tread_rate"])
+            and float(summary["mean_same_tread_join_rate"])
+            <= float(gate["max_same_tread_join_rate"])
+        )
+    )
     return (
         math.isclose(
             float(summary["step_height_m"]),
@@ -472,18 +483,13 @@ def checkpoint_gate_passed(summary, curriculum_cfg):
         )
         and float(summary["completion_rate"])
         >= float(gate["min_completion_rate"])
-        and float(summary["success_rate"])
-        >= float(gate["min_success_rate"])
         and float(summary["fall_rate"])
         <= float(gate["max_fall_rate"])
         and float(summary["path_failure_rate"])
         <= float(gate["max_path_failure_rate"])
         and float(summary["mean_climb_height_m"])
         >= float(gate["min_climb_fraction"]) * expected_climb
-        and float(summary["mean_alternating_tread_rate"])
-        >= float(gate["min_alternating_tread_rate"])
-        and float(summary["mean_same_tread_join_rate"])
-        <= float(gate["max_same_tread_join_rate"])
+        and natural_gait_passed
         and abs(
             float(summary["mean_forward_speed_m_s"])
             - float(summary["command_speed_m_s"])
@@ -676,6 +682,13 @@ def evaluate_initial_policy(
         return None
     score = selection_score(summary)
     readiness_score = physical_promotion_readiness(env, summary)
+    baseline_gate_passed = env._physical_gate_passed(
+        summary, env.curriculum_cfg["physical_promotion"]
+    )
+    env.update_physical_curriculum(summary)
+    # Persist the deterministic gate streak in model_0 so a restart does not
+    # discard valid evidence from the untouched source policy.
+    runner.save(str(checkpoint))
     update_progress_best(
         log_dir,
         checkpoint,
@@ -689,7 +702,8 @@ def evaluate_initial_policy(
     print(
         "NATIVE_MUJOCO_BASELINE score={:.4f} readiness={:.1f} "
         "height={:.2f}m completion={:.1%} fall={:.1%} "
-        "speederr={:.3f}m/s alternate={:.1%} join={:.1%}".format(
+        "speederr={:.3f}m/s alternate={:.1%} join={:.1%} "
+        "height_gate={}/{}".format(
             score,
             readiness_score,
             summary["step_height_m"],
@@ -701,6 +715,12 @@ def evaluate_initial_policy(
             ),
             summary["mean_alternating_tread_rate"],
             summary["mean_same_tread_join_rate"],
+            int(env.physical_promotion_streak)
+            if baseline_gate_passed
+            else 0,
+            env.curriculum_cfg["physical_promotion"][
+                "consecutive_evaluations"
+            ],
         ),
         flush=True,
     )
@@ -823,7 +843,11 @@ def train_stage(
     regression_limit = int(
         regression_guard["consecutive_evaluations"]
     )
+    promotion_grace_evaluations = int(
+        regression_guard.get("promotion_grace_evaluations", 0)
+    )
     regression_streak = 0
+    height_evaluation_counts = {}
     guidance_cfg = env.training_cfg.get("gait_guidance", {})
     stagnation_limit = int(
         guidance_cfg.get("post_fade_stagnation_evaluations", 0)
@@ -831,10 +855,8 @@ def train_stage(
     post_fade_stagnation = 0
     while runner.current_learning_iteration < target_iteration:
         current = int(runner.current_learning_iteration)
-        assistance, imitation = gait_guidance_schedule(
-            env.training_cfg, current
-        )
-        env.set_gait_guidance(assistance, imitation)
+        assistance = gait_guidance_schedule(env.training_cfg, current)
+        env.set_gait_guidance(assistance)
         chunk = target_iteration - current
         if not args.skip_eval and args.selection_interval > 0:
             chunk = min(chunk, int(args.selection_interval))
@@ -904,6 +926,9 @@ def train_stage(
         )
         promotion_gate = env.curriculum_cfg["physical_promotion"]
         evaluated_height_index = int(env.physical_height_index)
+        height_evaluation_counts[evaluated_height_index] = (
+            height_evaluation_counts.get(evaluated_height_index, 0) + 1
+        )
         height_gate_passed = (
             env.physical_curriculum_complete
             or env._physical_gate_passed(summary, promotion_gate)
@@ -914,9 +939,19 @@ def train_stage(
             summary,
             regression_guard,
         )
-        regression_streak = (
-            regression_streak + 1 if regressed else 0
+        regression_grace_active = (
+            regressed
+            and evaluated_height_index
+            > int(progress_best["height_index"])
+            and height_evaluation_counts[evaluated_height_index]
+            <= promotion_grace_evaluations
         )
+        if regression_grace_active:
+            regression_streak = 0
+        else:
+            regression_streak = (
+                regression_streak + 1 if regressed else 0
+            )
         promoted = env.update_physical_curriculum(summary)
         reported_gate_streak = (
             int(promotion_gate["consecutive_evaluations"])
@@ -972,7 +1007,20 @@ def train_stage(
             ),
             flush=True,
         )
-        if regressed:
+        if regression_grace_active:
+            print(
+                "NATIVE_MUJOCO_REGRESSION_GRACE iter={} height={:.2f}m "
+                "evaluation={}/{} completion={:.1%} fall={:.1%}".format(
+                    current,
+                    summary["step_height_m"],
+                    height_evaluation_counts[evaluated_height_index],
+                    promotion_grace_evaluations,
+                    summary["completion_rate"],
+                    summary["fall_rate"],
+                ),
+                flush=True,
+            )
+        elif regressed:
             print(
                 "NATIVE_MUJOCO_REGRESSION iter={} streak={}/{} "
                 "completion={:.1%} fall={:.1%}".format(
@@ -1150,7 +1198,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 11,
+        "curriculum_version": 12,
         "gait_guidance": config["mujoco_training"].get(
             "gait_guidance", {}
         ),
@@ -1469,7 +1517,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v11_s42"
+        "--run_name", default="mujoco_curriculum_v12_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

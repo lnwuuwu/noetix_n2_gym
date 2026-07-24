@@ -45,13 +45,15 @@ from stairs_terrain import (  # noqa: E402
 )
 try:  # noqa: E402
     from gait_guidance import (
-        blend_swing_action,
-        phase_swing_action_reference,
+        apply_swing_action_residual,
+        phase_swing_action_residual,
+        support_guard_allows_residual,
     )
 except ImportError:  # Imported as ``sim2sim.eval_stairs_mujoco`` in tests.
     from sim2sim.gait_guidance import (
-        blend_swing_action,
-        phase_swing_action_reference,
+        apply_swing_action_residual,
+        phase_swing_action_residual,
+        support_guard_allows_residual,
     )
 
 # When this file is executed as ``python sim2sim/eval_stairs_mujoco.py``, the
@@ -125,7 +127,7 @@ PHYSICS_PRESETS = {
 }
 
 PHASE_SWEEP_OFFSETS = tuple(index / 8.0 for index in range(8))
-GAIT_GUIDE_SWEEP_SCALES = (0.0, 0.20, 0.35, 0.50)
+GAIT_GUIDE_SWEEP_SCALES = (0.0, 0.10, 0.20, 0.35)
 
 STABILIZATION_PRESETS = {
     # Preserve the exported policy exactly as the baseline.
@@ -959,7 +961,6 @@ def run_episode(config, model, policy, seed, step_callback=None):
             executed_action = action
             guide_active = (
                 diagnostic_guide_scale > 0.0
-                and bool(gait_guidance_cfg.get("enabled", False))
                 and float(data.qpos[0])
                 >= float(stair_cfg["start_x"])
                 - float(
@@ -970,12 +971,12 @@ def run_episode(config, model, policy, seed, step_callback=None):
             )
             if guide_active:
                 (
-                    guide_reference,
+                    guide_residual,
                     guide_mask,
-                    _,
+                    swing_foot,
                     _,
                     guide_phase_weight,
-                ) = phase_swing_action_reference(
+                ) = phase_swing_action_residual(
                     phase,
                     float(stair_cfg["step_height"]),
                     action_scale,
@@ -983,13 +984,19 @@ def run_episode(config, model, policy, seed, step_callback=None):
                     sagittal_joint_indices,
                     gait_guidance_cfg,
                 )
-                executed_action, _ = blend_swing_action(
-                    action,
-                    guide_reference,
-                    guide_mask,
-                    diagnostic_guide_scale,
-                    guide_phase_weight,
-                )
+                if support_guard_allows_residual(
+                    swing_foot,
+                    tracker.stable_tread,
+                    tracker.pending_swing,
+                    tracker.accepted_tread,
+                ):
+                    executed_action, _ = apply_swing_action_residual(
+                        action,
+                        guide_residual,
+                        guide_mask,
+                        diagnostic_guide_scale,
+                        guide_phase_weight,
+                    )
             target_q = executed_action * action_scale + default
             heading_correction = heading_stabilizer_offset(
                 yaw, omega[2], config

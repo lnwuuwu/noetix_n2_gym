@@ -60,7 +60,7 @@ case "${MODE}" in
             --smoke \
             "${WARM_START_ARGS[@]}" \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v11_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v12_smoke${RUN_VARIANT}_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}"
         ;;
     guide-check)
@@ -82,7 +82,7 @@ case "${MODE}" in
             --output="${GUIDE_OUTPUT}" \
             --seed="${TRAIN_SEED}"
         ;;
-    pilot|long|recover|retune|guided-long)
+    pilot|long|recover|retune|climb-long)
         if pgrep -f '[t]rain_stairs_mujoco.py' >/dev/null; then
             echo "A MuJoCo stair trainer is already running:"
             pgrep -af '[t]rain_stairs_mujoco.py'
@@ -91,10 +91,10 @@ case "${MODE}" in
         STAMP="$(date +%m%d_%H-%M-%S)"
         if [[ "${MODE}" == "pilot" ]]; then
             TARGET_ITERATIONS=800
-            RUN_NAME="mujoco_curriculum_v11_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v12_pilot${RUN_VARIANT}_s${TRAIN_SEED}"
         elif [[ "${MODE}" == "long" ]]; then
             TARGET_ITERATIONS=3000
-            RUN_NAME="mujoco_curriculum_v11_long${RUN_VARIANT}_s${TRAIN_SEED}"
+            RUN_NAME="mujoco_curriculum_v12_long${RUN_VARIANT}_s${TRAIN_SEED}"
         else
             if [[ "${NO_WARM_START}" == "1" ]]; then
                 echo "${MODE} reuses an Actor; set N2_NO_WARM_START=0." >&2
@@ -109,16 +109,16 @@ case "${MODE}" in
                 exit 2
             fi
             WARM_START_ARGS=("--init_checkpoint=${RECOVERY_CHECKPOINT}")
-            if [[ "${MODE}" == "guided-long" ]]; then
+            if [[ "${MODE}" == "climb-long" ]]; then
                 TARGET_ITERATIONS=3000
-                RUN_NAME="mujoco_curriculum_v11_guided_long_s${TRAIN_SEED}"
-                FREEZE_ACTOR_ITERATIONS=100
+                RUN_NAME="mujoco_curriculum_v12_climb_long_s${TRAIN_SEED}"
+                FREEZE_ACTOR_ITERATIONS=25
                 LEARNING_RATE=5e-6
                 ACTION_NOISE_STD=0.10
                 SYMMETRY_LOSS_COEFF=0.35
             else
                 TARGET_ITERATIONS=300
-                RUN_NAME="mujoco_curriculum_v11_recover_s${TRAIN_SEED}"
+                RUN_NAME="mujoco_curriculum_v12_recover_s${TRAIN_SEED}"
                 FREEZE_ACTOR_ITERATIONS=25
                 LEARNING_RATE=1e-5
                 ACTION_NOISE_STD=0.12
@@ -130,7 +130,7 @@ case "${MODE}" in
             TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE}"
         fi
         TRAIN_LOG="${LOG_ROOT}/${RUN_NAME}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v11_s${TRAIN_SEED}.pid"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v12_s${TRAIN_SEED}.pid"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             "${WARM_START_ARGS[@]}" \
             --num_envs=32 \
@@ -179,8 +179,8 @@ case "${MODE}" in
         fi
         RUN_DIR="$(dirname "${LATEST_MODEL}")"
         STAMP="$(date +%m%d_%H-%M-%S)"
-        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v11_resume_s${TRAIN_SEED}_${STAMP}.log"
-        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v11_s${TRAIN_SEED}.pid"
+        TRAIN_LOG="${LOG_ROOT}/mujoco_curriculum_v12_resume_s${TRAIN_SEED}_${STAMP}.log"
+        PID_FILE="${LOG_ROOT}/mujoco_curriculum_v12_s${TRAIN_SEED}.pid"
         TARGET_ITERATIONS="${MAX_ITERATIONS_OVERRIDE:-6000}"
         nohup "${PYTHON_BIN}" -u sim2sim/train_stairs_mujoco.py \
             --resume="${LATEST_MODEL}" \
@@ -203,7 +203,7 @@ case "${MODE}" in
             --symmetry_loss_coeff="${RESUME_SYMMETRY_LOSS_COEFF}" \
             --critic_symmetry_loss_coeff=0.05 \
             --device="${TRAIN_DEVICE}" \
-            --run_name="mujoco_curriculum_v11_resume_s${TRAIN_SEED}" \
+            --run_name="mujoco_curriculum_v12_resume_s${TRAIN_SEED}" \
             --seed="${TRAIN_SEED}" \
             >"${TRAIN_LOG}" 2>&1 </dev/null &
         TRAIN_PID=$!
@@ -279,7 +279,7 @@ case "${MODE}" in
             --seed="${TRAIN_SEED}"
         ;;
     *)
-        echo "Usage: $0 {smoke|guide-check|pilot|long|recover|guided-long|resume|status|stop|view}" >&2
+        echo "Usage: $0 {smoke|guide-check|pilot|long|recover|retune|climb-long|resume|status|stop|view}" >&2
         exit 2
         ;;
 esac

@@ -452,12 +452,12 @@ class MujocoSim2SimTests(unittest.TestCase):
         }
         indices = np.asarray([[6, 7, 8], [15, 16, 17]])
         right, right_mask, right_foot, _, right_weight = (
-            guidance.phase_swing_action_reference(
+            guidance.phase_swing_action_residual(
                 0.25, 0.02, 0.25, 18, indices, cfg
             )
         )
         left, left_mask, left_foot, _, left_weight = (
-            guidance.phase_swing_action_reference(
+            guidance.phase_swing_action_residual(
                 0.75, 0.02, 0.25, 18, indices, cfg
             )
         )
@@ -480,21 +480,44 @@ class MujocoSim2SimTests(unittest.TestCase):
             left[indices[0]], right[indices[1]], atol=1.0e-7
         )
 
-    def test_guidance_blends_only_the_scheduled_sagittal_joints(self):
+    def test_guidance_adds_only_to_scheduled_sagittal_joints(self):
         guidance = load_pure_gait_guidance_module()
         policy = np.linspace(-0.5, 0.5, 18, dtype=np.float32)
-        reference = np.zeros(18, dtype=np.float32)
-        reference[[6, 7, 8]] = [-1.0, 1.0, 0.0]
+        residual = np.zeros(18, dtype=np.float32)
+        residual[[6, 7, 8]] = [-1.0, 1.0, 0.0]
         mask = np.zeros(18, dtype=bool)
         mask[[6, 7, 8]] = True
-        blended, scale = guidance.blend_swing_action(
-            policy, reference, mask, 0.40, 0.50
+        assisted, scale = guidance.apply_swing_action_residual(
+            policy, residual, mask, 0.40, 0.50
         )
         self.assertAlmostEqual(scale, 0.20)
-        np.testing.assert_allclose(blended[~mask], policy[~mask])
+        np.testing.assert_allclose(assisted[~mask], policy[~mask])
         np.testing.assert_allclose(
-            blended[mask],
-            0.80 * policy[mask] + 0.20 * reference[mask],
+            assisted[mask],
+            policy[mask] + 0.20 * residual[mask],
+        )
+
+    def test_guidance_requires_opposite_support_and_trailing_foot(self):
+        guidance = load_pure_gait_guidance_module()
+        self.assertTrue(
+            guidance.support_guard_allows_residual(
+                0, [0, 0], [False, False], [0, 0]
+            )
+        )
+        self.assertFalse(
+            guidance.support_guard_allows_residual(
+                0, [0, -1], [False, False], [0, 0]
+            )
+        )
+        self.assertFalse(
+            guidance.support_guard_allows_residual(
+                0, [0, 1], [False, True], [0, 1]
+            )
+        )
+        self.assertFalse(
+            guidance.support_guard_allows_residual(
+                0, [1, 0], [False, False], [2, 1]
+            )
         )
 
     @classmethod
@@ -1737,17 +1760,14 @@ class SourceCompatibilityTests(unittest.TestCase):
             curriculum["physical_promotion"]["consecutive_evaluations"],
             2,
         )
-        self.assertEqual(
-            curriculum["physical_promotion"][
-                "min_alternating_tread_rate_by_height"
-            ],
-            [0.15, 0.25, 0.35, 0.45],
+        self.assertFalse(
+            curriculum["physical_promotion"]["require_gait_quality"]
         )
         self.assertEqual(
             curriculum["physical_promotion"][
-                "max_same_tread_join_rate_by_height"
+                "max_speed_error_m_s_by_height"
             ],
-            [0.40, 0.35, 0.30, 0.25],
+            [0.10, 0.10, 0.09, 0.08],
         )
         self.assertGreater(
             curriculum["physical_promotion"]["max_speed_error_m_s"],
@@ -1755,6 +1775,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(
             curriculum["gait_promotion_min_target_steps"], 2
+        )
+        self.assertFalse(
+            curriculum["require_gait_for_logical_promotion"]
         )
         self.assertGreaterEqual(
             curriculum["gait_promotion_min_alternating_tread_rate"],
@@ -1767,8 +1790,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertGreater(
             curriculum["checkpoint_gate"]["min_completion_rate"], 0.0
         )
-        self.assertGreater(
-            curriculum["checkpoint_gate"]["min_success_rate"], 0.0
+        self.assertFalse(
+            curriculum["checkpoint_gate"]["require_natural_gait"]
         )
         self.assertLess(
             curriculum["checkpoint_gate"]["max_fall_rate"], 1.0
@@ -1816,8 +1839,6 @@ class SourceCompatibilityTests(unittest.TestCase):
             "expected_swing_liftoff",
             "expected_swing_delay",
             "wrong_foot_swing",
-            "gait_guide_match",
-            "gait_guide_error",
             "arm_swing",
             "foot_riser_collision",
             "lower_leg_collision",
@@ -1837,6 +1858,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertTrue(required_rewards.issubset(training["reward_scales"]))
         reward_scales = training["reward_scales"]
         regression_guard = training["regression_guard"]
+        self.assertGreater(
+            regression_guard["promotion_grace_evaluations"], 0
+        )
         self.assertEqual(
             regression_guard["consecutive_evaluations"], 2
         )
@@ -1897,8 +1921,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 11', env_source)
-        self.assertIn("4, 5, 6, 7, 8, 9, 10, 11", env_source)
+        self.assertIn('"version": 12', env_source)
+        self.assertIn("4, 5, 6, 7, 8, 9, 10, 11, 12", env_source)
         self.assertIn('"gait_completion"', env_source)
         self.assertIn('"gait_failure"', env_source)
         self.assertIn("mujoco_gait_failure_rate", env_source)
@@ -1917,9 +1941,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("def set_gait_guidance", env_source)
         self.assertIn("def _prepare_executed_actions", env_source)
         self.assertIn("self.executed_actions", env_source)
-        self.assertIn('"gait_guide_match"', env_source)
+        self.assertIn("support_guard_allows_residual", env_source)
+        self.assertIn("tracker.stable_tread", env_source)
+        self.assertNotIn('"gait_guide_match"', env_source)
         guidance = training["gait_guidance"]
-        self.assertTrue(guidance["enabled"])
+        self.assertFalse(guidance["enabled"])
         self.assertGreater(guidance["max_assistance_scale"], 0.0)
         self.assertLessEqual(guidance["max_assistance_scale"], 0.50)
         self.assertGreater(guidance["fade_iterations"], 0)
@@ -2023,12 +2049,12 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
-            "pilot|long|recover|retune|guided-long", launcher
+            "pilot|long|recover|retune|climb-long", launcher
         )
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v11_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v12_recover_s${TRAIN_SEED}"',
             launcher,
         )
         self.assertIn("LEARNING_RATE=1e-5", launcher)
@@ -2037,7 +2063,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("guide-check)", launcher)
         self.assertIn("--gait_guide_sweep", launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v11_guided_long_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v12_climb_long_s${TRAIN_SEED}"',
             launcher,
         )
         self.assertIn("LEARNING_RATE=5e-6", launcher)

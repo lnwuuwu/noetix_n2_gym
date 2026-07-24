@@ -21,13 +21,15 @@ from eval_stairs_mujoco import (
 )
 try:
     from gait_guidance import (
-        blend_swing_action,
-        phase_swing_action_reference,
+        apply_swing_action_residual,
+        phase_swing_action_residual,
+        support_guard_allows_residual,
     )
 except ImportError:
     from sim2sim.gait_guidance import (
-        blend_swing_action,
-        phase_swing_action_reference,
+        apply_swing_action_residual,
+        phase_swing_action_residual,
+        support_guard_allows_residual,
     )
 from sim2sim import load_mujoco_model, pd_control, resolve_joint_layout
 
@@ -142,20 +144,14 @@ class MujocoStairsVecEnv(VecEnv):
             )
         self.physical_height_index = 0
         self.physical_promotion_streak = 0
-        for key in (
-            "min_alternating_tread_rate",
-            "max_same_tread_join_rate",
-        ):
-            values = self.curriculum_cfg["physical_promotion"].get(
-                key + "_by_height"
-            )
-            if values is not None and len(values) != (
+        for key, values in self.curriculum_cfg[
+            "physical_promotion"
+        ].items():
+            if key.endswith("_by_height") and len(values) != (
                 len(self.physical_step_heights) - 1
             ):
                 raise ValueError(
-                    "{}_by_height must have one value per promotion".format(
-                        key
-                    )
+                    "{} must have one value per promotion".format(key)
                 )
 
         xml_path = config["_resolved_xml_path"]
@@ -238,7 +234,6 @@ class MujocoStairsVecEnv(VecEnv):
             "gait_guidance", {}
         )
         self.gait_assistance_scale = 0.0
-        self.gait_imitation_weight = 0.0
 
         workers = max(1, min(int(num_workers), self.num_envs))
         self.num_workers = workers
@@ -261,16 +256,6 @@ class MujocoStairsVecEnv(VecEnv):
             (self.num_envs, self.num_actions), dtype=np.float32
         )
         self.executed_actions = np.zeros_like(self.actions)
-        self.gait_guide_reference = np.zeros_like(self.actions)
-        self.gait_guide_mask = np.zeros_like(
-            self.actions, dtype=bool
-        )
-        self.gait_guide_phase_weight = np.zeros(
-            self.num_envs, dtype=np.float32
-        )
-        self.gait_guide_blend = np.zeros(
-            self.num_envs, dtype=np.float32
-        )
         self.last_actions = np.zeros_like(self.actions)
         self.last_last_actions = np.zeros_like(self.actions)
         self.last_torques = np.zeros_like(self.actions, dtype=np.float64)
@@ -437,6 +422,19 @@ class MujocoStairsVecEnv(VecEnv):
         expected_climb = (
             int(self.stair_cfg["num_steps"]) * self.physical_step_height
         )
+        gait_quality_passed = (
+            not bool(gate.get("require_gait_quality", True))
+            or (
+                float(summary["mean_alternating_tread_rate"])
+                >= self._physical_gate_value(
+                    gate, "min_alternating_tread_rate"
+                )
+                and float(summary["mean_same_tread_join_rate"])
+                <= self._physical_gate_value(
+                    gate, "max_same_tread_join_rate"
+                )
+            )
+        )
         return (
             math.isclose(
                 float(summary["step_height_m"]),
@@ -455,14 +453,7 @@ class MujocoStairsVecEnv(VecEnv):
                 gate, "min_climb_fraction"
             )
             * expected_climb
-            and float(summary["mean_alternating_tread_rate"])
-            >= self._physical_gate_value(
-                gate, "min_alternating_tread_rate"
-            )
-            and float(summary["mean_same_tread_join_rate"])
-            <= self._physical_gate_value(
-                gate, "max_same_tread_join_rate"
-            )
+            and gait_quality_passed
             and abs(
                 float(summary["mean_forward_speed_m_s"])
                 - float(summary["command_speed_m_s"])
@@ -627,42 +618,31 @@ class MujocoStairsVecEnv(VecEnv):
         stage = "actor-head adaptation" if active else "full-policy"
         print("MuJoCo training stage: " + stage, flush=True)
 
-    def set_gait_guidance(self, assistance_scale, imitation_weight):
-        """Set the training-only action blend and raw-action objective."""
+    def set_gait_guidance(self, assistance_scale):
+        """Set the optional training-only swing-action residual scale."""
         assistance_scale = float(assistance_scale)
-        imitation_weight = float(imitation_weight)
         if not 0.0 <= assistance_scale <= 1.0:
             raise ValueError("gait assistance scale must be in [0, 1]")
-        if not 0.0 <= imitation_weight <= 1.0:
-            raise ValueError("gait imitation weight must be in [0, 1]")
         if not bool(self.gait_guidance_cfg.get("enabled", False)):
             assistance_scale = 0.0
-            imitation_weight = 0.0
         self.gait_assistance_scale = assistance_scale
-        self.gait_imitation_weight = imitation_weight
         print(
-            "NATIVE_MUJOCO_GAIT_GUIDANCE assistance={:.3f} "
-            "imitation={:.3f}".format(
-                self.gait_assistance_scale,
-                self.gait_imitation_weight,
+            "NATIVE_MUJOCO_GAIT_GUIDANCE residual={:.3f}".format(
+                self.gait_assistance_scale
             ),
             flush=True,
         )
 
     def _prepare_executed_actions(self):
-        """Apply an observable, phase-driven swing scaffold to the plant.
+        """Apply an optional support-protected swing residual to the plant.
 
         ``self.actions`` always remains the raw Actor output: it is stored in
         observations, receives smoothness penalties, and is what checkpoints
-        export.  Only ``executed_actions`` is blended, so an Actor that relies
-        on this scaffold immediately fails the separate unassisted selection
-        evaluation and can never promote the physical-height curriculum.
+        export.  The residual never attenuates that output, is blocked unless
+        the opposite foot has stable support, and is disabled in the climb-
+        first configuration and all deterministic selection evaluations.
         """
         self.executed_actions[:] = self.actions
-        self.gait_guide_reference[:] = 0.0
-        self.gait_guide_mask[:] = False
-        self.gait_guide_phase_weight[:] = 0.0
-        self.gait_guide_blend[:] = 0.0
         if not bool(self.gait_guidance_cfg.get("enabled", False)):
             return
 
@@ -685,12 +665,12 @@ class MujocoStairsVecEnv(VecEnv):
             ):
                 continue
             (
-                reference,
+                residual,
                 mask,
-                _,
+                swing_foot,
                 _,
                 phase_weight,
-            ) = phase_swing_action_reference(
+            ) = phase_swing_action_residual(
                 self._phase_fraction(env_id),
                 self.physical_step_height,
                 self.action_scale,
@@ -698,15 +678,20 @@ class MujocoStairsVecEnv(VecEnv):
                 self.sagittal_joint_indices,
                 self.gait_guidance_cfg,
             )
-            self.gait_guide_reference[env_id] = reference
-            self.gait_guide_mask[env_id] = mask
-            self.gait_guide_phase_weight[env_id] = phase_weight
+            tracker = self.trackers[env_id]
+            if not support_guard_allows_residual(
+                swing_foot,
+                tracker.stable_tread,
+                tracker.pending_swing,
+                tracker.accepted_tread,
+            ):
+                continue
             (
                 self.executed_actions[env_id],
-                self.gait_guide_blend[env_id],
-            ) = blend_swing_action(
+                _,
+            ) = apply_swing_action_residual(
                 self.actions[env_id],
-                reference,
+                residual,
                 mask,
                 self.gait_assistance_scale,
                 phase_weight,
@@ -952,10 +937,6 @@ class MujocoStairsVecEnv(VecEnv):
         )
         self.actions[env_id] = 0.0
         self.executed_actions[env_id] = 0.0
-        self.gait_guide_reference[env_id] = 0.0
-        self.gait_guide_mask[env_id] = False
-        self.gait_guide_phase_weight[env_id] = 0.0
-        self.gait_guide_blend[env_id] = 0.0
         self.last_actions[env_id] = 0.0
         self.last_last_actions[env_id] = 0.0
         self.last_torques[env_id] = 0.0
@@ -1656,32 +1637,6 @@ class MujocoStairsVecEnv(VecEnv):
             if foot_pitch_errors
             else 0.0
         )
-        guide_mask = self.gait_guide_mask[env_id]
-        guide_weight = (
-            float(self.gait_guide_phase_weight[env_id])
-            * self.gait_imitation_weight
-        )
-        if bool(np.any(guide_mask)) and guide_weight > 0.0:
-            guide_error = float(
-                np.mean(
-                    np.square(
-                        self.actions[env_id, guide_mask]
-                        - self.gait_guide_reference[
-                            env_id, guide_mask
-                        ]
-                    )
-                )
-            )
-            guide_error = min(guide_error, 4.0)
-            guide_match = math.exp(
-                -float(
-                    self.gait_guidance_cfg["imitation_sharpness"]
-                )
-                * guide_error
-            )
-        else:
-            guide_error = 0.0
-            guide_match = 0.0
         action_rate = float(
             np.mean(
                 np.square(
@@ -1813,11 +1768,6 @@ class MujocoStairsVecEnv(VecEnv):
             "wrong_foot_swing": float(
                 swing_reference["wrong_foot_swing"]
             ),
-            # These terms supervise the raw Actor action, never the blended
-            # plant command.  Assistance can therefore fade to zero while the
-            # deployable policy retains the alternating swing reference.
-            "gait_guide_match": guide_match * guide_weight,
-            "gait_guide_error": guide_error * guide_weight,
             "arm_swing": arm_match * gait_active,
             "no_progress": float(progress_velocity < 0.03),
             "double_flight": float(np.all(raw_tread < 0)),
@@ -1994,6 +1944,12 @@ class MujocoStairsVecEnv(VecEnv):
         return goal_reached, natural_success
 
     def _curriculum_gait_gate_active(self, ended_level):
+        if not bool(
+            self.curriculum_cfg.get(
+                "require_gait_for_logical_promotion", True
+            )
+        ):
+            return False
         target_steps = int(
             self.curriculum_target_steps[int(ended_level)]
         )
@@ -2113,11 +2069,6 @@ class MujocoStairsVecEnv(VecEnv):
             "mujoco_gait_assistance_scale": np.full(
                 len(env_ids),
                 self.gait_assistance_scale,
-                dtype=np.float64,
-            ),
-            "mujoco_gait_imitation_weight": np.full(
-                len(env_ids),
-                self.gait_imitation_weight,
                 dtype=np.float64,
             ),
             "mujoco_forward_distance": np.asarray(
@@ -2514,7 +2465,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 11,
+            "version": 12,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
@@ -2528,7 +2479,7 @@ class MujocoStairsVecEnv(VecEnv):
 
     def load_checkpoint_state(self, state):
         if int(state.get("version", -1)) not in (
-            4, 5, 6, 7, 8, 9, 10, 11
+            4, 5, 6, 7, 8, 9, 10, 11, 12
         ):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
