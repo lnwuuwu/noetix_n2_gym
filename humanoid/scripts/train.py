@@ -55,6 +55,27 @@ def parse_reward_scale_overrides(value):
     return overrides
 
 
+def parse_terrain_level_mix(value):
+    """Parse a weighted, comma-separated stair-level mixture."""
+    if value is None or not value.strip():
+        return None
+    levels = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            level = int(item)
+        except ValueError as error:
+            raise ValueError(
+                "Terrain-level mix entries must be integers: " + item
+            ) from error
+        levels.append(level)
+    if not levels:
+        raise ValueError("--terrain_level_mix cannot be empty")
+    return levels
+
+
 def train(args):
     """
     训练函数：根据提供的参数执行强化学习训练
@@ -119,16 +140,26 @@ def train(args):
     reward_scale_overrides = parse_reward_scale_overrides(
         args.reward_scale_overrides
     )
+    terrain_level_mix = parse_terrain_level_mix(args.terrain_level_mix)
     if (
         args.fixed_terrain_level is not None
+        and terrain_level_mix is not None
+    ):
+        raise ValueError(
+            "--fixed_terrain_level and --terrain_level_mix are mutually "
+            "exclusive"
+        )
+    if (
+        args.fixed_terrain_level is not None
+        or terrain_level_mix is not None
         or args.command_speed is not None
         or reward_scale_overrides
         or args.observation_noise_level is not None
     ):
         if args.task not in stair_tasks:
             raise ValueError(
-                "--fixed_terrain_level and --command_speed are only valid "
-                "for n2_stairs tasks"
+                "Stair terrain, command, reward, and noise overrides are "
+                "only valid for n2_stairs tasks"
             )
         env_cfg, _ = task_registry.get_cfgs(name=args.task)
     if args.fixed_terrain_level is not None:
@@ -149,6 +180,27 @@ def train(args):
             env_cfg.commands.max_curriculum, fixed_speed_max
         )
         env_cfg.commands.curriculum = False
+    if terrain_level_mix is not None:
+        invalid_levels = [
+            level for level in terrain_level_mix
+            if not 0 <= level < env_cfg.terrain.num_rows
+        ]
+        if invalid_levels:
+            raise ValueError(
+                "--terrain_level_mix entries must be in [0, {}], received "
+                "{}".format(
+                    env_cfg.terrain.num_rows - 1,
+                    ",".join(str(level) for level in invalid_levels),
+                )
+            )
+        env_cfg.terrain.curriculum = False
+        env_cfg.terrain.fixed_level = -1
+        env_cfg.terrain.level_mix = list(terrain_level_mix)
+        print(
+            "Balanced terrain-level mix: {}".format(
+                ",".join(str(level) for level in terrain_level_mix)
+            )
+        )
     if args.command_speed is not None:
         command_speed = float(args.command_speed)
         command_min = float(env_cfg.commands.ranges.lin_vel_x[0])
@@ -341,6 +393,16 @@ if __name__ == '__main__':
                 "type": int,
                 "default": None,
                 "help": "Optional fixed n2_stairs row (0=2 cm, ..., 4=10 cm).",
+            },
+            {
+                "name": "--terrain_level_mix",
+                "type": str,
+                "default": None,
+                "help": (
+                    "Weighted stair-row mixture, for example "
+                    "0,1,2,3,4,4,4,4 keeps half of the environments at "
+                    "10 cm."
+                ),
             },
             {
                 "name": "--reset_optimizer",

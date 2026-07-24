@@ -202,7 +202,31 @@ class N2StairsEnv(N2Env):
     def _get_env_origins(self):
         super()._get_env_origins()
         fixed_level = int(getattr(self.cfg.terrain, "fixed_level", -1))
-        if fixed_level >= 0:
+        level_mix = list(getattr(self.cfg.terrain, "level_mix", []))
+        if level_mix:
+            if any(
+                level < 0 or level >= self.max_terrain_level
+                for level in level_mix
+            ):
+                raise ValueError(
+                    "mixed stair levels must all be inside [0, {}]".format(
+                        self.max_terrain_level - 1
+                    )
+                )
+            mixed_levels = torch.tensor(
+                level_mix,
+                dtype=self.terrain_levels.dtype,
+                device=self.device,
+            )
+            indices = (
+                torch.arange(self.num_envs, device=self.device)
+                % len(mixed_levels)
+            )
+            self.terrain_levels[:] = mixed_levels[indices]
+            self.env_origins[:] = self.terrain_origins[
+                self.terrain_levels, self.terrain_types
+            ]
+        elif fixed_level >= 0:
             if fixed_level >= self.max_terrain_level:
                 raise ValueError(
                     "fixed stair level {} is outside [0, {}]".format(

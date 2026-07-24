@@ -72,6 +72,10 @@ class N2StairsCfg(N2_18DofCfg):
         num_cols = 8
         max_init_terrain_level = 0
         fixed_level = -1
+        # Optional weighted row list used by protected mixed-level fine-tuning.
+        # Repeated entries deliberately allocate more parallel environments to
+        # that row while keeping every environment on a fixed row across resets.
+        level_mix = []
 
         # Each row is exactly one curriculum level. Every column is upstairs;
         # this proportion vector is kept explicit for audit tools and readers.

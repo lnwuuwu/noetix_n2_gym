@@ -39,6 +39,13 @@ def load_isaac_stage_gate_module():
     )
 
 
+def load_isaac_stability_tournament_module():
+    return load_module(
+        "n2_isaac_stability_tournament_test",
+        "humanoid/scripts/isaac_stability_tournament.py",
+    )
+
+
 def load_pure_mujoco_eval_module():
     """Load the contact tracker without requiring MuJoCo or Isaac Gym."""
     previous_mujoco = sys.modules.get("mujoco")
@@ -1738,7 +1745,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("--terrain_level=4", launcher)
         self.assertIn("--stream_port=${STREAM_PORT}", launcher)
 
-    def test_isaac_stability_curriculum_is_guarded_across_all_levels(self):
+    def test_isaac_stability_search_uses_mixed_levels_and_holdout(self):
         launcher = (
             ROOT / "humanoid" / "scripts"
             / "run_isaac_stability_curriculum.sh"
@@ -1753,13 +1760,23 @@ class SourceCompatibilityTests(unittest.TestCase):
             ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
         ).read_text()
 
-        self.assertIn("for level in 0 1 2 3 4", launcher)
-        self.assertIn("local speeds=(0.12 0.14 0.16 0.17 0.18)", launcher)
-        self.assertIn("--actor_trainable_layers=2", launcher)
-        self.assertIn("--reward_scale_overrides=${REWARD_OVERRIDES}", launcher)
-        self.assertIn("isaac_stairs_stage_gate.py", launcher)
-        self.assertIn("candidate_high_csv", launcher)
+        self.assertIn(
+            'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"',
+            launcher,
+        )
+        self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
+        self.assertIn("--actor_trainable_layers=1", launcher)
+        self.assertIn(
+            "--reward_scale_overrides=${PROFILE_REWARD_OVERRIDES}", launcher
+        )
+        self.assertIn("isaac_stability_tournament.py", launcher)
+        self.assertIn("local profiles=(conservative smooth balance)", launcher)
+        self.assertIn("ISAAC_STABILITY_HOLDOUT", launcher)
+        self.assertIn("reason=no_safe_style_improvement", launcher)
+        self.assertNotIn("for level in 0 1 2 3 4", launcher)
+        self.assertNotIn("isaac_stairs_stage_gate.py", launcher)
         self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
+        self.assertIn("N2_ISAAC_STABILITY_IMPROVED=", launcher)
         self.assertIn("model_9050.pt", launcher)
         self.assertIn("latest guarded model_9050.pt", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
@@ -1770,6 +1787,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "--actor_trainable_layers",
             "--reward_scale_overrides",
             "--observation_noise_level",
+            "--terrain_level_mix",
         ):
             self.assertIn(option, train_source)
         for metric in (
@@ -1782,6 +1800,78 @@ class SourceCompatibilityTests(unittest.TestCase):
             self.assertIn(metric, eval_source)
         self.assertIn(
             "def _reward_stairs_stride_symmetry", stairs_source
+        )
+        self.assertIn("level_mix", stairs_source)
+
+        train_tree = ast.parse(train_source)
+        mix_parser = next(
+            node for node in train_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "parse_terrain_level_mix"
+        )
+        parser_module = ast.fix_missing_locations(
+            ast.Module(body=[mix_parser], type_ignores=[])
+        )
+        namespace = {}
+        exec(compile(parser_module, "train.py", "exec"), namespace)
+        self.assertEqual(
+            namespace["parse_terrain_level_mix"]("0,1,2,3,4,4,4,4"),
+            [0, 1, 2, 3, 4, 4, 4, 4],
+        )
+
+    def test_isaac_stability_tournament_handles_episode_resolution(self):
+        tournament = load_isaac_stability_tournament_module()
+
+        def row(**overrides):
+            values = {
+                "episodes": 64.0,
+                "completion_rate": 0.984375,
+                "fall_rate": 0.0,
+                "path_failure_rate": 0.0,
+                "mean_command_error_m_s": 0.04,
+                "mean_action_rate_rms": 0.70,
+                "mean_action_accel_rms": 0.50,
+                "mean_left_swing_length_m": 0.10,
+                "mean_right_swing_length_m": 0.19,
+                "mean_final_lateral_position_m": 0.03,
+                "mean_max_lateral_deviation_m": 0.09,
+                "mean_max_yaw_deviation_rad": 0.20,
+                "mean_double_flight_fraction": 0.04,
+            }
+            values.update(overrides)
+            return values
+
+        baseline = {level: row() for level in range(5)}
+        candidate = {
+            level: row(
+                mean_action_rate_rms=0.64,
+                mean_action_accel_rms=0.44,
+                mean_right_swing_length_m=0.17,
+                mean_final_lateral_position_m=0.02,
+                mean_max_lateral_deviation_m=0.08,
+            )
+            for level in range(5)
+        }
+        # Two episodes out of 64 is 3.125%, so a literal 3% threshold would
+        # reject a candidate based only on evaluation quantization.
+        candidate[4]["completion_rate"] = 0.953125
+        accepted = tournament.compare(baseline, candidate, episodes=64)
+        self.assertTrue(accepted["eligible"], accepted["reasons"])
+        self.assertAlmostEqual(
+            accepted["high_level_episode_tolerance"], 2.0 / 64.0
+        )
+
+        unsafe = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        unsafe[4]["completion_rate"] = 0.75
+        rejected = tournament.compare(baseline, unsafe, episodes=64)
+        self.assertFalse(rejected["eligible"])
+        self.assertTrue(
+            any(
+                "10 cm completion regressed" in reason
+                for reason in rejected["reasons"]
+            )
         )
 
     def test_isaac_stability_gate_accepts_improvement_and_blocks_regression(self):
