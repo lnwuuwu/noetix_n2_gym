@@ -1721,7 +1721,15 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("--command_speed=0.18", launcher)
         self.assertIn('PILOT_ITERATIONS="${N2_PILOT_ITERATIONS:-50}"', launcher)
         self.assertIn('LEARNING_RATE="${N2_LEARNING_RATE:-5e-6}"', launcher)
-        self.assertIn("baseline|smoke|pilot|status|log|stop|candidate|compare", launcher)
+        self.assertIn(
+            "baseline|smoke|pilot|status|log|stop|candidate|compare|view",
+            launcher,
+        )
+        self.assertIn("resolve_view_checkpoint", launcher)
+        self.assertIn("stream_checkpoint", launcher)
+        self.assertIn("humanoid/scripts/stream_stairs.py", launcher)
+        self.assertIn("--terrain_level=4", launcher)
+        self.assertIn("--stream_port=${STREAM_PORT}", launcher)
 
     def test_isaac_actor_mirror_is_an_involution(self):
         source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"

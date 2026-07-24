@@ -14,6 +14,11 @@ LEARNING_RATE="${N2_LEARNING_RATE:-5e-6}"
 ACTION_NOISE_STD="${N2_ACTION_NOISE_STD:-0.10}"
 REFERENCE_COEFF="${N2_REFERENCE_COEFF:-0.25}"
 SYMMETRY_COEFF="${N2_SYMMETRY_COEFF:-0.05}"
+STREAM_PORT="${N2_STREAM_PORT:-8080}"
+CAMERA_WIDTH="${N2_CAMERA_WIDTH:-960}"
+CAMERA_HEIGHT="${N2_CAMERA_HEIGHT:-540}"
+JPEG_QUALITY="${N2_JPEG_QUALITY:-80}"
+VIEW_CHECKPOINT="${N2_VIEW_CHECKPOINT:-}"
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
 PID_FILE="${LAUNCHER_DIR}/n2_stairs_polish_s${TRAIN_SEED}.pid"
 ACTIVE_LOG_FILE="${LAUNCHER_DIR}/n2_stairs_polish_s${TRAIN_SEED}.logpath"
@@ -21,8 +26,9 @@ ACTIVE_LOG_FILE="${LAUNCHER_DIR}/n2_stairs_polish_s${TRAIN_SEED}.logpath"
 mkdir -p "${LAUNCHER_DIR}"
 
 usage() {
-    echo "Usage: $0 baseline|smoke|pilot|status|log|stop|candidate|compare"
+    echo "Usage: $0 baseline|smoke|pilot|status|log|stop|candidate|compare|view"
     echo "Set N2_INIT_CHECKPOINT=/absolute/path/model_9000.pt for train/eval modes."
+    echo "Set N2_VIEW_CHECKPOINT to override automatic model_9050.pt discovery."
 }
 
 require_checkpoint() {
@@ -174,6 +180,78 @@ latest_candidate() {
     echo "${candidate}"
 }
 
+resolve_view_checkpoint() {
+    if [[ -n "${VIEW_CHECKPOINT}" ]]; then
+        if [[ ! -f "${VIEW_CHECKPOINT}" ]]; then
+            echo "View checkpoint does not exist: ${VIEW_CHECKPOINT}" >&2
+            return 1
+        fi
+        readlink -f "${VIEW_CHECKPOINT}"
+        return
+    fi
+
+    local selected="${HOME}/n2_checkpoints/isaac_9050/model_9050.pt"
+    if [[ -f "${selected}" ]]; then
+        readlink -f "${selected}"
+        return
+    fi
+
+    local matches=()
+    shopt -s nullglob
+    matches=(
+        "${ROOT_DIR}/logs/n2_stairs_walk/"*"_isaac_l4_guarded_pilot_from_9000_s${TRAIN_SEED}/model_9050.pt"
+    )
+    shopt -u nullglob
+    if [[ "${#matches[@]}" -eq 0 ]]; then
+        echo "Cannot find model_9050.pt; set N2_VIEW_CHECKPOINT explicitly." >&2
+        return 1
+    fi
+    local newest="${matches[0]}"
+    local checkpoint
+    for checkpoint in "${matches[@]:1}"; do
+        if [[ "${checkpoint}" -nt "${newest}" ]]; then
+            newest="${checkpoint}"
+        fi
+    done
+    readlink -f "${newest}"
+}
+
+stream_checkpoint() {
+    local checkpoint_path="$1"
+    local checkpoint_name
+    local checkpoint_iteration
+    local checkpoint_run
+    checkpoint_name="$(basename "${checkpoint_path}")"
+    if [[ ! "${checkpoint_name}" =~ ^model_([0-9]+)\.pt$ ]]; then
+        echo "Cannot stream nonstandard checkpoint: ${checkpoint_path}" >&2
+        exit 2
+    fi
+    checkpoint_iteration="${BASH_REMATCH[1]}"
+    checkpoint_run="$(dirname "${checkpoint_path}")"
+    if ! python -c "from PIL import Image" >/dev/null 2>&1; then
+        echo "Pillow is missing. Install it with: python -m pip install Pillow" >&2
+        exit 2
+    fi
+    echo "Streaming checkpoint: ${checkpoint_path}"
+    echo "Server endpoint: http://127.0.0.1:${STREAM_PORT}/"
+    echo "This is off-screen rendering; no server GUI will be created."
+    python -u humanoid/scripts/stream_stairs.py \
+        --task=n2_stairs_walk \
+        --resume \
+        "--load_run=${checkpoint_run}" \
+        "--checkpoint=${checkpoint_iteration}" \
+        --headless \
+        "--sim_device=${TRAIN_DEVICE}" \
+        "--rl_device=${TRAIN_DEVICE}" \
+        "--seed=${TRAIN_SEED}" \
+        --terrain_level=4 \
+        --command_speed=0.18 \
+        "--stream_port=${STREAM_PORT}" \
+        "--camera_width=${CAMERA_WIDTH}" \
+        "--camera_height=${CAMERA_HEIGHT}" \
+        "--jpeg_quality=${JPEG_QUALITY}"
+}
+
 case "${MODE}" in
     baseline)
         require_checkpoint
@@ -236,6 +314,10 @@ case "${MODE}" in
         echo
         echo "Candidate:"
         cat "${LAUNCHER_DIR}/evaluations/candidate_${PILOT_TARGET}_s${TRAIN_SEED}.csv"
+        ;;
+    view)
+        view_checkpoint="$(resolve_view_checkpoint)"
+        stream_checkpoint "${view_checkpoint}"
         ;;
     *)
         usage
