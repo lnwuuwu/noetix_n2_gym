@@ -33,7 +33,8 @@ CHILD_PID=""
 
 usage() {
     echo "Usage: $0 smoke|long|status|log|stop"
-    echo "Set N2_INIT_CHECKPOINT=/absolute/path/model_9050.pt."
+    echo "The latest guarded model_9050.pt is selected automatically."
+    echo "Set N2_INIT_CHECKPOINT only to override automatic selection."
 }
 
 require_positive_integer() {
@@ -46,8 +47,32 @@ require_positive_integer() {
 }
 
 require_checkpoint() {
+    if [[ -z "${INIT_CHECKPOINT}" ]]; then
+        local preferred="${HOME}/n2_checkpoints/isaac_9050/model_9050.pt"
+        if [[ -f "${preferred}" ]]; then
+            INIT_CHECKPOINT="${preferred}"
+        else
+            local matches=()
+            local newest
+            local checkpoint
+            shopt -s nullglob
+            matches=(
+                "${ROOT_DIR}/logs/n2_stairs_walk/"*"_isaac_l4_guarded_pilot_from_9000_s${TRAIN_SEED}/model_9050.pt"
+            )
+            shopt -u nullglob
+            if [[ "${#matches[@]}" -gt 0 ]]; then
+                newest="${matches[0]}"
+                for checkpoint in "${matches[@]:1}"; do
+                    if [[ "${checkpoint}" -nt "${newest}" ]]; then
+                        newest="${checkpoint}"
+                    fi
+                done
+                INIT_CHECKPOINT="${newest}"
+            fi
+        fi
+    fi
     if [[ -z "${INIT_CHECKPOINT}" || ! -f "${INIT_CHECKPOINT}" ]]; then
-        echo "N2_INIT_CHECKPOINT must name an existing checkpoint." >&2
+        echo "Cannot find model_9050.pt; set N2_INIT_CHECKPOINT." >&2
         exit 2
     fi
     INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"

@@ -1760,6 +1760,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("isaac_stairs_stage_gate.py", launcher)
         self.assertIn("candidate_high_csv", launcher)
         self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
+        self.assertIn("model_9050.pt", launcher)
+        self.assertIn("latest guarded model_9050.pt", launcher)
         for option in (
             "--actor_trainable_layers",
             "--reward_scale_overrides",
