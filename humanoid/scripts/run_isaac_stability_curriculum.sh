@@ -92,6 +92,8 @@ checkpoint_iteration() {
 }
 
 require_checkpoint() {
+    local checkpoint_iter
+    local numeric_checkpoint
     if [[ -z "${INIT_CHECKPOINT}" ]]; then
         local preferred="${HOME}/n2_checkpoints/isaac_9050/model_9050.pt"
         if [[ -f "${preferred}" ]]; then
@@ -121,7 +123,17 @@ require_checkpoint() {
         exit 2
     fi
     INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"
-    checkpoint_iteration "${INIT_CHECKPOINT}" >/dev/null
+    checkpoint_iter="$(checkpoint_iteration "${INIT_CHECKPOINT}")"
+    if [[ "$(basename "${INIT_CHECKPOINT}")" == "model_best.pt" ]]; then
+        numeric_checkpoint="$(
+            dirname "${INIT_CHECKPOINT}"
+        )/model_${checkpoint_iter}.pt"
+        if [[ ! -f "${numeric_checkpoint}" ]]; then
+            cp -f "${INIT_CHECKPOINT}" "${numeric_checkpoint}"
+            echo "Materialized numbered checkpoint: ${numeric_checkpoint}"
+        fi
+        INIT_CHECKPOINT="${numeric_checkpoint}"
+    fi
 }
 
 require_approved_selection() {
