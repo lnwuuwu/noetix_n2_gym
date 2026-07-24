@@ -30,6 +30,8 @@ SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.10}"
 REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.08,dof_acc=-3e-7,stairs_lateral_drift=-16,stairs_heading_alignment=4,stairs_stride_symmetry=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
+VIEW_PORT="${N2_STREAM_PORT:-18080}"
+SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_stairs_stability"
@@ -45,8 +47,9 @@ TRAINED_RUN=""
 TARGET_ITERATION=""
 
 usage() {
-    echo "Usage: $0 smoke|pilot|long|status|log|stop"
+    echo "Usage: $0 smoke|pilot|long|final|status|log|stop|view"
     echo "pilot: one 75-iteration run; long: one 250-iteration run."
+    echo "final: refine a holdout-approved model for 200 more iterations."
     echo "The guarded model_9050.pt is selected automatically."
     echo "Set N2_STABILITY_INIT_CHECKPOINT only to override it."
 }
@@ -97,6 +100,29 @@ require_checkpoint() {
     fi
     if [[ -z "${INIT_CHECKPOINT}" || ! -f "${INIT_CHECKPOINT}" ]]; then
         echo "Cannot find model_9050.pt; set N2_STABILITY_INIT_CHECKPOINT." >&2
+        exit 2
+    fi
+    INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"
+    checkpoint_iteration "${INIT_CHECKPOINT}" >/dev/null
+}
+
+require_approved_selection() {
+    local summary_path="${RESULT_DIR}/search_summary.txt"
+    local selected_path="${RESULT_DIR}/selected_checkpoint.txt"
+    if [[ ! -f "${summary_path}" || ! -f "${selected_path}" ]]; then
+        echo "No completed guarded selection exists yet." >&2
+        echo "Wait for the current holdout to finish before using final/view." >&2
+        exit 2
+    fi
+    if ! grep -qx 'improved=True' "${summary_path}" \
+        && ! grep -qx 'approved=True' "${summary_path}"; then
+        echo "The independent holdout did not approve a new policy." >&2
+        echo "Final refinement is blocked to avoid spending GPU time on an unverified checkpoint." >&2
+        exit 2
+    fi
+    INIT_CHECKPOINT="$(<"${selected_path}")"
+    if [[ ! -f "${INIT_CHECKPOINT}" ]]; then
+        echo "Selected checkpoint does not exist: ${INIT_CHECKPOINT}" >&2
         exit 2
     fi
     INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"
@@ -276,6 +302,7 @@ run_continuous() {
     local selected_checkpoint
     local final_evaluation
     local improved
+    local approved
     local holdout_seed
     local holdout_baseline_csv
     local holdout_candidate_csv
@@ -344,6 +371,7 @@ run_continuous() {
     improved="$(
         decision_value "${decision_json}" 'd["improved"]'
     )"
+    approved="${SOURCE_APPROVED}"
 
     if [[ "${selected_checkpoint}" != "${INIT_CHECKPOINT}" ]]; then
         holdout_seed=$((TRAIN_SEED + 1000))
@@ -374,18 +402,25 @@ run_continuous() {
         )"
         if [[ "${improved}" == "True" ]]; then
             echo "ISAAC_STABILITY_HOLDOUT_ACCEPT checkpoint=${selected_checkpoint}"
+            approved="True"
         else
             echo "ISAAC_STABILITY_HOLDOUT_REJECT restoring=${INIT_CHECKPOINT}"
         fi
     fi
+    if [[ "${improved}" == "True" ]]; then
+        approved="True"
+    fi
 
     selected_iteration="$(checkpoint_iteration "${selected_checkpoint}")"
     selected_copy="${RESULT_DIR}/model_${selected_iteration}.pt"
-    cp -f "${selected_checkpoint}" "${selected_copy}"
+    if [[ "${selected_checkpoint}" != "${selected_copy}" ]]; then
+        cp -f "${selected_checkpoint}" "${selected_copy}"
+    fi
     cp -f "${final_evaluation}" "${RESULT_DIR}/evaluation_all_levels.csv"
     printf '%s\n' "${selected_copy}" > "${RESULT_DIR}/selected_checkpoint.txt"
     printf '%s\n' \
         "improved=${improved}" \
+        "approved=${approved}" \
         "source=${INIT_CHECKPOINT}" \
         "selected=${selected_copy}" \
         "evaluation=${RESULT_DIR}/evaluation_all_levels.csv" \
@@ -394,6 +429,7 @@ run_continuous() {
         > "${RESULT_DIR}/search_summary.txt"
 
     echo "N2_ISAAC_STABILITY_IMPROVED=${improved}"
+    echo "N2_ISAAC_STABILITY_APPROVED=${approved}"
     echo "N2_ISAAC_STABILITY_CHECKPOINT=${selected_copy}"
     echo "N2_ISAAC_STABILITY_EVALUATION=${RESULT_DIR}/evaluation_all_levels.csv"
     echo "N2_ISAAC_STABILITY_TRAINED_RUN=${TRAINED_RUN}"
@@ -404,6 +440,21 @@ smoke_train() {
     TRAIN_ENVS="${N2_NUM_ENVS:-32}"
     train_trajectory "${INIT_CHECKPOINT}" 2 1
     echo "N2_ISAAC_STABILITY_SMOKE_CHECKPOINT=${TRAINED_RUN}/model_${TARGET_ITERATION}.pt"
+}
+
+view_selected() {
+    require_approved_selection
+    if active_pid >/dev/null; then
+        echo "Wait for stability training/evaluation to finish before streaming." >&2
+        exit 2
+    fi
+    echo "Selected checkpoint: ${INIT_CHECKPOINT}"
+    echo "Headless browser stream port: ${VIEW_PORT}"
+    N2_VIEW_CHECKPOINT="${INIT_CHECKPOINT}" \
+    N2_STREAM_PORT="${VIEW_PORT}" \
+    N2_DEVICE="${TRAIN_DEVICE}" \
+    N2_SEED="${TRAIN_SEED}" \
+        bash humanoid/scripts/run_isaac_stairs_polish.sh view
 }
 
 launch_continuous() {
@@ -441,6 +492,25 @@ case "${MODE}" in
     long)
         launch_continuous long
         ;;
+    final)
+        if active_pid >/dev/null; then
+            echo "The current training/holdout is still running; do not start final refinement yet." >&2
+            exit 2
+        fi
+        require_approved_selection
+        launch_continuous final \
+            "N2_STABILITY_INIT_CHECKPOINT=${INIT_CHECKPOINT}" \
+            N2_STABILITY_SOURCE_APPROVED=True \
+            N2_STABILITY_TRAIN_ITERATIONS=200 \
+            N2_STABILITY_CHECKPOINT_INTERVAL=20 \
+            N2_STABILITY_EVAL_ENVS=128 \
+            N2_STABILITY_HOLDOUT_ENVS=256 \
+            N2_STABILITY_LEARNING_RATE=8.0e-7 \
+            N2_STABILITY_ACTION_NOISE=0.05 \
+            N2_STABILITY_REFERENCE_COEFF=0.35 \
+            N2_STABILITY_SYMMETRY_COEFF=0.001 \
+            N2_STABILITY_ACTOR_LAYERS=2
+        ;;
     _run)
         run_continuous
         ;;
@@ -472,6 +542,9 @@ case "${MODE}" in
         else
             echo "No Isaac stability training is running."
         fi
+        ;;
+    view)
+        view_selected
         ;;
     *)
         usage

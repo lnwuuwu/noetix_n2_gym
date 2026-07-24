@@ -1792,9 +1792,17 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertNotIn("isaac_stairs_stage_gate.py", launcher)
         self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
         self.assertIn("N2_ISAAC_STABILITY_IMPROVED=", launcher)
+        self.assertIn("N2_ISAAC_STABILITY_APPROVED=", launcher)
         self.assertIn("model_9050.pt", launcher)
         self.assertIn("guarded model_9050.pt", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
+        self.assertIn("N2_STABILITY_SOURCE_APPROVED=True", launcher)
+        self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=200", launcher)
+        self.assertIn("require_approved_selection", launcher)
+        self.assertIn(
+            "bash humanoid/scripts/run_isaac_stairs_polish.sh view",
+            launcher,
+        )
         self.assertNotIn(
             'INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-}"', launcher
         )
