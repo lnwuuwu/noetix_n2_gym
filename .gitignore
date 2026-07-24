@@ -66,6 +66,8 @@ server_logs/
 reports/
 docs/*
 !docs/AUTODL_STAIRS.md
+!docs/N2_STAIRS_TRAINING_GUIDE.md
+!docs/RL_ALGORITHM_ALTERNATIVES.md
 # resources
 
 # other
