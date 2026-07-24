@@ -1388,7 +1388,7 @@ def evaluate(args):
     print(
         "MuJoCo physics={physics_preset} inertia={inertial_source} "
         "start={stair_start_x_m:.2f}m "
-        "step={step_height_m:.2f}m phase={gait_phase_offset:.3f} "
+        "step={step_height_m:.3f}m phase={gait_phase_offset:.3f} "
         "guide={diagnostic_gait_guide_scale:.2f} "
         "yawobs={yaw_observation_gain:.2f} hipkp={hip_yaw_kp:+.2f} "
         "success={success_rate:.1%} "

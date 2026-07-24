@@ -1753,7 +1753,20 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertEqual(curriculum["target_steps"][-1], 6)
         self.assertEqual(
             curriculum["physical_step_heights_m"],
-            [0.02, 0.04, 0.06, 0.08, 0.10],
+            [
+                0.02,
+                0.025,
+                0.03,
+                0.035,
+                0.04,
+                0.045,
+                0.05,
+                0.06,
+                0.07,
+                0.08,
+                0.09,
+                0.10,
+            ],
         )
         self.assertEqual(curriculum["successes_before_promotion"], 2)
         self.assertEqual(
@@ -1763,11 +1776,28 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertFalse(
             curriculum["physical_promotion"]["require_gait_quality"]
         )
+        self.assertTrue(
+            curriculum["physical_promotion"][
+                "reset_optimizer_on_promotion"
+            ]
+        )
         self.assertEqual(
             curriculum["physical_promotion"][
                 "max_speed_error_m_s_by_height"
             ],
-            [0.10, 0.10, 0.09, 0.08],
+            [
+                0.10,
+                0.10,
+                0.10,
+                0.10,
+                0.10,
+                0.09,
+                0.09,
+                0.09,
+                0.08,
+                0.08,
+                0.08,
+            ],
         )
         self.assertGreater(
             curriculum["physical_promotion"]["max_speed_error_m_s"],
@@ -1789,6 +1819,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         self.assertGreater(
             curriculum["checkpoint_gate"]["min_completion_rate"], 0.0
+        )
+        self.assertGreaterEqual(
+            curriculum["checkpoint_gate"]["min_completion_rate"], 0.70
         )
         self.assertFalse(
             curriculum["checkpoint_gate"]["require_natural_gait"]
@@ -1858,8 +1891,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertTrue(required_rewards.issubset(training["reward_scales"]))
         reward_scales = training["reward_scales"]
         regression_guard = training["regression_guard"]
-        self.assertGreater(
-            regression_guard["promotion_grace_evaluations"], 0
+        self.assertEqual(
+            regression_guard["promotion_grace_evaluations"], 4
         )
         self.assertEqual(
             regression_guard["consecutive_evaluations"], 2
@@ -1920,9 +1953,20 @@ class SourceCompatibilityTests(unittest.TestCase):
             "def _synchronize_phase_after_advance", env_source
         )
         self.assertIn("NATIVE_MUJOCO_HEIGHT_PROMOTION", env_source)
+        self.assertIn(
+            "NATIVE_MUJOCO_HEIGHT_PROMOTION {:.3f}m -> {:.3f}m",
+            env_source,
+        )
         self.assertIn("target_contact_reached", env_source)
-        self.assertIn('"version": 12', env_source)
-        self.assertIn("4, 5, 6, 7, 8, 9, 10, 11, 12", env_source)
+        self.assertIn('"version": 13', env_source)
+        self.assertIn(
+            "4, 5, 6, 7, 8, 9, 10, 11, 12, 13", env_source
+        )
+        self.assertIn("LEGACY_PHYSICAL_STEP_HEIGHTS", env_source)
+        self.assertIn('"physical_step_height_m"', env_source)
+        self.assertIn(
+            "MuJoCo checkpoint physical height is missing", env_source
+        )
         self.assertIn('"gait_completion"', env_source)
         self.assertIn('"gait_failure"', env_source)
         self.assertIn("mujoco_gait_failure_rate", env_source)
@@ -1974,6 +2018,10 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("robust_checkpoint_tournament", source)
         self.assertIn("NATIVE_MUJOCO_CURRICULUM", source)
         self.assertIn("NATIVE_MUJOCO_HEIGHT_GATE", source)
+        self.assertIn("NATIVE_MUJOCO_HEIGHT_OPTIMIZER_RESET", source)
+        self.assertIn(
+            "reset_optimizer_after_height_promotion", source
+        )
         self.assertIn("NATIVE_MUJOCO_BEST_REJECT", source)
         self.assertIn("NATIVE_MUJOCO_TOURNAMENT", source)
         self.assertIn("NATIVE_MUJOCO_ROBUST_BEST", source)
@@ -2008,6 +2056,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         ).read_text()
         self.assertIn("TARGET_ITERATIONS=800", launcher)
         self.assertIn("TARGET_ITERATIONS=3000", launcher)
+        self.assertIn("TARGET_ITERATIONS=4000", launcher)
         self.assertIn(
             'MAX_ITERATIONS_OVERRIDE="${N2_MAX_ITERATIONS:-}"',
             launcher,
@@ -2054,7 +2103,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stop)", launcher)
         self.assertIn('kill -TERM "${TRAIN_PIDS[@]}"', launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v12_recover_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v13_recover_s${TRAIN_SEED}"',
             launcher,
         )
         self.assertIn("LEARNING_RATE=1e-5", launcher)
@@ -2063,10 +2112,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("guide-check)", launcher)
         self.assertIn("--gait_guide_sweep", launcher)
         self.assertIn(
-            'RUN_NAME="mujoco_curriculum_v12_climb_long_s${TRAIN_SEED}"',
+            'RUN_NAME="mujoco_curriculum_v13_climb_long_s${TRAIN_SEED}"',
             launcher,
         )
-        self.assertIn("LEARNING_RATE=5e-6", launcher)
+        self.assertIn("LEARNING_RATE=3e-6", launcher)
+        self.assertIn("ACTION_NOISE_STD=0.08", launcher)
         self.assertIn('LEARNING_RATE_ARGS=("--fixed_learning_rate")', launcher)
         self.assertIn(
             '--resume_action_noise_std="${RESUME_ACTION_NOISE_STD}"',

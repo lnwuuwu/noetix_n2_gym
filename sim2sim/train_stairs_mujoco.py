@@ -271,6 +271,18 @@ def set_policy_noise_std(policy, action_noise_std):
             )
 
 
+def reset_optimizer_after_height_promotion(runner, step_height):
+    """Discard stale Adam moments after the staircase geometry changes."""
+
+    runner.alg.optimizer.state.clear()
+    print(
+        "NATIVE_MUJOCO_HEIGHT_OPTIMIZER_RESET height={:.3f}m".format(
+            float(step_height)
+        ),
+        flush=True,
+    )
+
+
 def gait_guidance_schedule(training_cfg, iteration):
     """Return the optional training-plant residual scale.
 
@@ -610,7 +622,7 @@ def update_progress_best(
     with (log_dir / "model_progress_best.json").open("w") as state_file:
         json.dump(progress_best, state_file, indent=2)
     print(
-        "NATIVE_MUJOCO_PROGRESS_BEST iter={} height={:.2f}m "
+        "NATIVE_MUJOCO_PROGRESS_BEST iter={} height={:.3f}m "
         "score={:.4f} readiness={:.1f} completion={:.1%} fall={:.1%} "
         "alternate={:.1%} join={:.1%}".format(
             iteration,
@@ -701,7 +713,7 @@ def evaluate_initial_policy(
     )
     print(
         "NATIVE_MUJOCO_BASELINE score={:.4f} readiness={:.1f} "
-        "height={:.2f}m completion={:.1%} fall={:.1%} "
+        "height={:.3f}m completion={:.1%} fall={:.1%} "
         "speederr={:.3f}m/s alternate={:.1%} join={:.1%} "
         "height_gate={}/{}".format(
             score,
@@ -866,7 +878,7 @@ def train_stage(
             curriculum = env.curriculum_summary()
             print(
                 "NATIVE_MUJOCO_CURRICULUM iter={} mean={:.2f} "
-                "max={} final={:.1%} height={:.2f}m "
+                "max={} final={:.1%} height={:.3f}m "
                 "height_gate={}/{} levels={}".format(
                     current,
                     curriculum["mean_mastery_level"],
@@ -900,7 +912,7 @@ def train_stage(
         readiness_score = physical_promotion_readiness(env, summary)
         print(
             "NATIVE_MUJOCO_SELECTION iter={} score={:.4f} "
-            "height={:.2f}m completion={:.1%} success={:.1%} path={:.1%} "
+            "height={:.3f}m completion={:.1%} success={:.1%} path={:.1%} "
             "fall={:.1%} speed={:.3f}m/s speederr={:.3f}m/s "
             "yaw={:.3f}rad distance={:.3f}m "
             "climb={:.3f}m alternate={:.1%} join={:.1%}".format(
@@ -953,6 +965,12 @@ def train_stage(
                 regression_streak + 1 if regressed else 0
             )
         promoted = env.update_physical_curriculum(summary)
+        if promoted and bool(
+            promotion_gate.get("reset_optimizer_on_promotion", False)
+        ):
+            reset_optimizer_after_height_promotion(
+                runner, env.physical_step_height
+            )
         reported_gate_streak = (
             int(promotion_gate["consecutive_evaluations"])
             if promoted
@@ -990,7 +1008,7 @@ def train_stage(
             post_fade_stagnation = 0
         print(
             "NATIVE_MUJOCO_HEIGHT_GATE iter={} passed={} streak={}/{} "
-            "height={:.2f}m alternate={:.1%} join={:.1%} "
+            "height={:.3f}m alternate={:.1%} join={:.1%} "
             "speederr={:.3f}m/s yaw={:.3f}rad".format(
                 current,
                 height_gate_passed,
@@ -1009,7 +1027,7 @@ def train_stage(
         )
         if regression_grace_active:
             print(
-                "NATIVE_MUJOCO_REGRESSION_GRACE iter={} height={:.2f}m "
+                "NATIVE_MUJOCO_REGRESSION_GRACE iter={} height={:.3f}m "
                 "evaluation={}/{} completion={:.1%} fall={:.1%}".format(
                     current,
                     summary["step_height_m"],
@@ -1058,14 +1076,14 @@ def train_stage(
             return True
         if promoted:
             print(
-                "NATIVE_MUJOCO_CURRICULUM_RESET iter={} height={:.2f}m".format(
+                "NATIVE_MUJOCO_CURRICULUM_RESET iter={} height={:.3f}m".format(
                     current, env.physical_step_height
                 ),
                 flush=True,
             )
         if not checkpoint_gate_passed(summary, env.curriculum_cfg):
             print(
-                "NATIVE_MUJOCO_BEST_REJECT iter={} height={:.2f}m "
+                "NATIVE_MUJOCO_BEST_REJECT iter={} height={:.3f}m "
                 "completion={:.1%} success={:.1%} path={:.1%} "
                 "fall={:.1%} climb={:.3f}m speederr={:.3f}m/s "
                 "alternate={:.1%} join={:.1%}".format(
@@ -1198,7 +1216,7 @@ def main(args):
         "device": device,
         "max_iterations": args.max_iterations,
         "freeze_actor_iterations": args.freeze_actor_iterations,
-        "curriculum_version": 12,
+        "curriculum_version": 13,
         "gait_guidance": config["mujoco_training"].get(
             "gait_guidance", {}
         ),
@@ -1223,7 +1241,7 @@ def main(args):
     progress_best = restore_progress_best(log_dir)
     if progress_best["iteration"] is not None:
         print(
-            "Restored progress-best selection: iter={} height={:.2f}m "
+            "Restored progress-best selection: iter={} height={:.3f}m "
             "score={:.4f}".format(
                 progress_best["iteration"],
                 progress_best["height_m"],
@@ -1394,7 +1412,7 @@ def main(args):
             log_dir / "policy_stage_best.pt",
         )
         print(
-            "NATIVE_MUJOCO_STAGE_BEST iter={} height={:.2f}m "
+            "NATIVE_MUJOCO_STAGE_BEST iter={} height={:.3f}m "
             "checkpoint={}".format(
                 progress_best["iteration"],
                 progress_best["height_m"],
@@ -1517,7 +1535,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_warm_start", action="store_true")
     parser.add_argument("--resume", default=None)
     parser.add_argument(
-        "--run_name", default="mujoco_curriculum_v12_s42"
+        "--run_name", default="mujoco_curriculum_v13_s42"
     )
     parser.add_argument("--log_dir", default=None)
     parser.add_argument(

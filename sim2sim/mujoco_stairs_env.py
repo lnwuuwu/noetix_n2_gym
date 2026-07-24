@@ -37,6 +37,8 @@ from sim2sim import load_mujoco_model, pd_control, resolve_joint_layout
 class MujocoStairsVecEnv(VecEnv):
     """Independent data sharing a model resized only between rollout chunks."""
 
+    LEGACY_PHYSICAL_STEP_HEIGHTS = (0.02, 0.04, 0.06, 0.08, 0.10)
+
     EVENT_REWARD_TERMS = {
         "tread_advance",
         "alternating_tread",
@@ -490,7 +492,7 @@ class MujocoStairsVecEnv(VecEnv):
         self._apply_physical_step_height(self.physical_step_height)
         self.reset()
         print(
-            "NATIVE_MUJOCO_HEIGHT_PROMOTION {:.2f}m -> {:.2f}m".format(
+            "NATIVE_MUJOCO_HEIGHT_PROMOTION {:.3f}m -> {:.3f}m".format(
                 previous, self.physical_step_height
             ),
             flush=True,
@@ -2465,12 +2467,13 @@ class MujocoStairsVecEnv(VecEnv):
 
     def get_checkpoint_state(self):
         return {
-            "version": 12,
+            "version": 13,
             "mastery_levels": self.mastery_levels.copy(),
             "curriculum_success_streak": (
                 self.curriculum_success_streak.copy()
             ),
             "physical_height_index": int(self.physical_height_index),
+            "physical_step_height_m": self.physical_step_height,
             "physical_promotion_streak": int(
                 self.physical_promotion_streak
             ),
@@ -2478,8 +2481,9 @@ class MujocoStairsVecEnv(VecEnv):
         }
 
     def load_checkpoint_state(self, state):
-        if int(state.get("version", -1)) not in (
-            4, 5, 6, 7, 8, 9, 10, 11, 12
+        state_version = int(state.get("version", -1))
+        if state_version not in (
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13
         ):
             raise ValueError("Unsupported MuJoCo curriculum state")
         mastery = np.asarray(
@@ -2494,14 +2498,35 @@ class MujocoStairsVecEnv(VecEnv):
             raise ValueError(
                 "MuJoCo curriculum checkpoint environment count differs"
             )
-        physical_height_index = int(state["physical_height_index"])
-        if not 0 <= physical_height_index < len(
-            self.physical_step_heights
-        ):
-            raise ValueError(
-                "MuJoCo checkpoint physical height index is invalid"
+        saved_height = state.get("physical_step_height_m")
+        if saved_height is None:
+            if state_version >= 13:
+                raise ValueError(
+                    "MuJoCo checkpoint physical height is missing"
+                )
+            legacy_index = int(state["physical_height_index"])
+            if not 0 <= legacy_index < len(
+                self.LEGACY_PHYSICAL_STEP_HEIGHTS
+            ):
+                raise ValueError(
+                    "Legacy MuJoCo checkpoint height index is invalid"
+                )
+            saved_height = self.LEGACY_PHYSICAL_STEP_HEIGHTS[
+                legacy_index
+            ]
+        matches = np.flatnonzero(
+            np.isclose(
+                self.physical_step_heights,
+                float(saved_height),
+                rtol=0.0,
+                atol=1.0e-9,
             )
-        self.physical_height_index = physical_height_index
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "MuJoCo checkpoint height is absent from this curriculum"
+            )
+        self.physical_height_index = int(matches[0])
         self.physical_promotion_streak = max(
             0, int(state.get("physical_promotion_streak", 0))
         )

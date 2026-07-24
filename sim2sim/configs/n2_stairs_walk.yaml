@@ -230,9 +230,9 @@ mujoco_training:
   # same-height progress-best baseline exists yet.
   regression_guard:
     consecutive_evaluations: 2
-    # Give a newly promoted physical height three deterministic evaluations
-    # to adapt before catastrophic-regression early stopping becomes active.
-    promotion_grace_evaluations: 3
+    # Dense height stages get four deterministic evaluations to adapt before
+    # catastrophic-regression early stopping becomes active.
+    promotion_grace_evaluations: 4
     relative_completion_drop: 0.20
     relative_fall_increase: 0.20
     absolute_max_completion_rate: 0.40
@@ -240,12 +240,16 @@ mujoco_training:
   # The episode goal moves from straight flat approach to one, two, ...,
   # six completed risers at each physical-height stage.
   curriculum:
-    # Raise the physical riser only after repeatable deterministic climbing.
-    # Gait quality is deliberately a soft objective in the climb-first stage:
-    # it must not trap an otherwise stable policy forever at 2 cm.
-    physical_step_heights_m: [0.02, 0.04, 0.06, 0.08, 0.10]
+    # v12 showed that doubling the riser from 2 cm to 4 cm immediately reduced
+    # deterministic completion from 93.8% to single digits.  v13 uses 5 mm
+    # increments through 5 cm, then 1 cm increments to the 10 cm target.
+    # Gait quality remains a soft objective and cannot block height progress.
+    physical_step_heights_m:
+      [0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05,
+       0.06, 0.07, 0.08, 0.09, 0.10]
     physical_promotion:
       consecutive_evaluations: 2
+      reset_optimizer_on_promotion: true
       require_gait_quality: false
       min_completion_rate: 0.70
       max_fall_rate: 0.30
@@ -255,13 +259,15 @@ mujoco_training:
       # by roughly 5 cm while climbing a 12 cm-tall 2 cm staircase.
       min_climb_fraction: 0.0
       # The known-good 2 cm Actor runs at about 0.264 m/s for a 0.18 m/s
-      # command.  Tighten speed only after it has crossed the first height.
+      # command. Tighten speed gradually instead of rejecting the source.
       max_speed_error_m_s: 0.10
-      max_speed_error_m_s_by_height: [0.10, 0.10, 0.09, 0.08]
+      max_speed_error_m_s_by_height:
+        [0.10, 0.10, 0.10, 0.10, 0.10, 0.09,
+         0.09, 0.09, 0.08, 0.08, 0.08]
       max_yaw_deviation_rad: 0.35
     checkpoint_gate:
       require_natural_gait: false
-      min_completion_rate: 0.50
+      min_completion_rate: 0.70
       max_fall_rate: 0.20
       max_path_failure_rate: 0.35
       # The evaluator's completion condition already requires sustained
