@@ -438,10 +438,13 @@ class N2StairsWalkCfg(N2StairsCfg):
         foothold_min_half_width = 0.055
         foothold_crossover_normalizer = 0.055
         # Single-support shake is measured from roll tilt/rate and lateral
-        # body velocity.  It is reflection symmetric, so it cannot improve
-        # one support leg by sacrificing the other.
+        # body velocity plus policy action rate/acceleration. The separate
+        # right-support term targets the observed unstable phase in which the
+        # right foot supports while the left foot swings.
         single_support_roll_rate_scale = 0.20
         single_support_lateral_velocity_scale = 0.50
+        single_support_action_rate_scale = 0.04
+        single_support_action_accel_scale = 0.02
         # Preserve a natural early swing and introduce the absolute landing
         # target only after the foot has crossed the stance leg.
         next_tread_target_start_phase = 0.50
@@ -555,6 +558,7 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_foot_crossover = 0.0
             stairs_foot_lane_error = 0.0
             stairs_single_support_stability = 0.0
+            stairs_right_support_stability = 0.0
             stairs_swing_trajectory = 5.0
             stairs_swing_trajectory_error = -6.0
             stairs_swing_timeout = -3.0

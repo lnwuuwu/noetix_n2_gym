@@ -1761,15 +1761,15 @@ class SourceCompatibilityTests(unittest.TestCase):
         ).read_text()
 
         self.assertIn(
-            'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"',
+            'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"',
             launcher,
         )
         self.assertIn(
-            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-250}"',
+            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-400}"',
             launcher,
         )
         self.assertIn(
-            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"',
+            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"',
             launcher,
         )
         self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
@@ -1808,6 +1808,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stairs_foot_crossover=-12", launcher)
         self.assertIn("stairs_foot_lane_error=-8", launcher)
         self.assertIn("stairs_single_support_stability=-4", launcher)
+        self.assertIn("stairs_right_support_stability=-4", launcher)
+        self.assertIn("N2_ISAAC_STABILITY_BEST=", launcher)
         self.assertIn(
             "bash humanoid/scripts/run_isaac_stairs_polish.sh view",
             launcher,
@@ -1961,6 +1963,26 @@ class SourceCompatibilityTests(unittest.TestCase):
             any(
                 "foot-lane center error increased" in reason
                 for reason in rejected["reasons"]
+            )
+        )
+
+        # A tiny isolated style trade-off may use the balanced fallback only
+        # when the hard completion/fall/path gates and net style gain pass.
+        fallback_candidate = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        for values in fallback_candidate.values():
+            values["mean_max_yaw_deviation_rad"] = 0.235
+        fallback = tournament.compare(
+            baseline, fallback_candidate, episodes=64
+        )
+        self.assertFalse(fallback["eligible"])
+        self.assertTrue(fallback["hard_safe"])
+        self.assertTrue(fallback["fallback_eligible"])
+        self.assertTrue(
+            any(
+                "weighted yaw deviation increased" in reason
+                for reason in fallback["soft_reasons"]
             )
         )
 

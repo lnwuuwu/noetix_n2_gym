@@ -12,30 +12,34 @@ INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 
 # This is one continuous adaptation run.  Periodic checkpoints are evaluated
 # afterwards; training is not restarted from model_9050 for each candidate.
-TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-250}"
-CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"
+TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-400}"
+CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"
 EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-128}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
-TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"
+# The inherited policy learns a low-step shuffle on 2/4 cm stairs. Focus
+# adaptation on 6--10 cm while retaining three riser heights.
+TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
 # model_9050 already climbs.  Give the last two Actor layers enough freedom to
 # reshape the gait, while a moderate teacher anchor and conservative learning
 # rate protect the climbing skill.  The previous 4-iteration search used a
 # 5--10x smaller rate, a 25x stronger anchor, and only the output layer.
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-2.0e-6}"
-ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.08}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.10}"
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-1.0e-6}"
+ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.05}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.20}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
-SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
+SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.006}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
-OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.10}"
-REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.08,dof_acc=-3e-7,stairs_lateral_drift=-16,stairs_heading_alignment=4,stairs_stride_symmetry=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
+OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.05}"
+REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.16,action_smoothness=-0.12,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-10,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-10,stairs_foot_lane_error=-6,stairs_single_support_stability=-5,stairs_right_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
+SELECTION_MODE="${N2_ISAAC_STABILITY_SELECTION_MODE:-balanced}"
+export N2_ISAAC_STABILITY_SELECTION_MODE="${SELECTION_MODE}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_stairs_stability"
@@ -54,7 +58,7 @@ PREFLIGHT_EVALUATION=""
 
 usage() {
     echo "Usage: $0 smoke|pilot|long|diagnose|correct|final|status|log|stop|view"
-    echo "pilot: one 75-iteration run; long: one 250-iteration run."
+    echo "pilot: one 80-iteration run; long: one 400-iteration run."
     echo "diagnose: zero-training mirrored-policy safety/style preflight."
     echo "correct/final: preflight-gated 100-iteration full-Actor distillation."
     echo "The guarded model_9050.pt is selected automatically."
@@ -73,11 +77,18 @@ require_positive_integer() {
 checkpoint_iteration() {
     local name
     name="$(basename "$1")"
-    if [[ ! "${name}" =~ ^model_([0-9]+)\.pt$ ]]; then
-        echo "Checkpoint must be named model_<iteration>.pt: $1" >&2
-        return 1
+    if [[ "${name}" =~ ^model_([0-9]+)\.pt$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
     fi
-    echo "${BASH_REMATCH[1]}"
+    if [[ "${name}" == "model_best.pt" ]]; then
+        python -c \
+            'import sys,torch; print(int(torch.load(sys.argv[1], map_location="cpu")["iter"]))' \
+            "$1"
+        return $?
+    fi
+    echo "Checkpoint must be model_<iteration>.pt or model_best.pt: $1" >&2
+    return 1
 }
 
 require_checkpoint() {
@@ -396,6 +407,8 @@ run_continuous() {
     local holdout_decision_json
     local selected_iteration
     local selected_copy
+    local best_copy
+    local trained_best_copy
     local candidate_count
     local expected_transitions
     local optimizer_updates
@@ -411,7 +424,7 @@ run_continuous() {
     optimizer_updates=$((TRAIN_ITERATIONS * 5 * 4))
 
     echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${INIT_CHECKPOINT}"
-    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX}"
+    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX} selection=${SELECTION_MODE}"
     echo "ISAAC_STABILITY_TRAINING_VOLUME transitions=${expected_transitions} optimizer_minibatch_updates=${optimizer_updates}"
     evaluate_checkpoint \
         "${INIT_CHECKPOINT}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
@@ -512,6 +525,10 @@ run_continuous() {
     if [[ "${selected_checkpoint}" != "${selected_copy}" ]]; then
         cp -f "${selected_checkpoint}" "${selected_copy}"
     fi
+    best_copy="${RESULT_DIR}/model_best.pt"
+    trained_best_copy="${TRAINED_RUN}/model_best.pt"
+    cp -f "${selected_checkpoint}" "${best_copy}"
+    cp -f "${selected_checkpoint}" "${trained_best_copy}"
     cp -f "${final_evaluation}" "${RESULT_DIR}/evaluation_all_levels.csv"
     printf '%s\n' "${selected_copy}" > "${RESULT_DIR}/selected_checkpoint.txt"
     printf '%s\n' \
@@ -519,6 +536,7 @@ run_continuous() {
         "approved=${approved}" \
         "source=${INIT_CHECKPOINT}" \
         "selected=${selected_copy}" \
+        "best=${best_copy}" \
         "evaluation=${RESULT_DIR}/evaluation_all_levels.csv" \
         "trained_run=${TRAINED_RUN}" \
         "screened_checkpoints=${candidate_count}" \
@@ -528,6 +546,7 @@ run_continuous() {
     echo "N2_ISAAC_STABILITY_IMPROVED=${improved}"
     echo "N2_ISAAC_STABILITY_APPROVED=${approved}"
     echo "N2_ISAAC_STABILITY_CHECKPOINT=${selected_copy}"
+    echo "N2_ISAAC_STABILITY_BEST=${best_copy}"
     echo "N2_ISAAC_STABILITY_EVALUATION=${RESULT_DIR}/evaluation_all_levels.csv"
     echo "N2_ISAAC_STABILITY_TRAINED_RUN=${TRAINED_RUN}"
     echo "N2_ISAAC_POLICY_SYMMETRY_BLEND=${effective_policy_blend}"
@@ -588,8 +607,8 @@ case "${MODE}" in
         ;;
     pilot)
         launch_continuous pilot \
-            N2_STABILITY_TRAIN_ITERATIONS=75 \
-            N2_STABILITY_CHECKPOINT_INTERVAL=15 \
+            N2_STABILITY_TRAIN_ITERATIONS=80 \
+            N2_STABILITY_CHECKPOINT_INTERVAL=10 \
             N2_STABILITY_EVAL_ENVS=64 \
             N2_STABILITY_HOLDOUT_ENVS=128
         ;;
@@ -626,7 +645,7 @@ case "${MODE}" in
             N2_STABILITY_POLICY_LOSS_SCALE=0.0 \
             N2_STABILITY_ACTOR_LAYERS=4 \
             N2_STABILITY_OBSERVATION_NOISE=0.0 \
-            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-12,stairs_foot_lane_error=-8,stairs_single_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
+            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-12,stairs_foot_lane_error=-8,stairs_single_support_stability=-4,stairs_right_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
         ;;
     _run)
         run_continuous

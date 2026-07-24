@@ -3383,23 +3383,50 @@ class N2StairsEnv(N2Env):
             * active.float()
         )
 
-    def _reward_stairs_single_support_stability(self):
-        """Suppress roll/lateral shaking while exactly one foot supports."""
+    def _single_support_stability_state(self):
+        """Return support masks and a dense body/action shake cost."""
         support = self.stable_contacts & self.contacts
         single_support = torch.sum(support.int(), dim=1) == 1
         roll_tilt = self.projected_gravity[:, 1]
         roll_rate = self.base_ang_vel[:, 0]
         lateral_velocity = self.base_lin_vel[:, 1]
+        action_rate = torch.mean(
+            torch.square(self.actions - self.last_actions), dim=1
+        )
+        action_accel = torch.mean(
+            torch.square(
+                self.actions
+                + self.last_last_actions
+                - 2.0 * self.last_actions
+            ),
+            dim=1,
+        )
         cost = (
             torch.square(roll_tilt)
             + float(self.cfg.env.single_support_roll_rate_scale)
             * torch.square(roll_rate)
             + float(self.cfg.env.single_support_lateral_velocity_scale)
             * torch.square(lateral_velocity)
+            + float(self.cfg.env.single_support_action_rate_scale)
+            * action_rate
+            + float(self.cfg.env.single_support_action_accel_scale)
+            * action_accel
         )
         moving = self.root_states[:, 7] > 0.03
         upright = -self.projected_gravity[:, 2] > 0.80
-        return cost * (single_support & moving & upright).float()
+        active = single_support & moving & upright
+        return support, cost, active
+
+    def _reward_stairs_single_support_stability(self):
+        """Suppress roll/lateral/action shaking on either support foot."""
+        _, cost, active = self._single_support_stability_state()
+        return cost * active.float()
+
+    def _reward_stairs_right_support_stability(self):
+        """Extra damping for the measured right-support/left-swing shake."""
+        support, cost, active = self._single_support_stability_state()
+        right_support_only = support[:, 1] & ~support[:, 0]
+        return cost * (active & right_support_only).float()
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""
