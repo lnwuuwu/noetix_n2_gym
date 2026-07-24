@@ -1625,9 +1625,11 @@ class SourceCompatibilityTests(unittest.TestCase):
             "humanoid/envs/base/base_task.py",
             "humanoid/envs/n2/n2_stairs_config.py",
             "humanoid/envs/n2/n2_stairs_env.py",
+            "humanoid/algo/ppo/ppo.py",
             "humanoid/scripts/eval_stairs.py",
             "humanoid/scripts/play.py",
             "humanoid/scripts/stream_stairs.py",
+            "humanoid/scripts/train.py",
             "humanoid/utils/stairs_terrain.py",
             "sim2sim/eval_stairs_mujoco.py",
             "sim2sim/compare_isaac_checkpoints_mujoco.py",
@@ -1686,6 +1688,134 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("def gait_phase_observations", sim2sim_source)
         self.assertIn('config.get("navigation_state")', sim2sim_source)
         self.assertIn('config.get("include_base_lin_vel", False)', sim2sim_source)
+
+    def test_guarded_isaac_polish_contract_is_explicit(self):
+        train_source = (
+            ROOT / "humanoid" / "scripts" / "train.py"
+        ).read_text()
+        ppo_source = (
+            ROOT / "humanoid" / "algo" / "ppo" / "ppo.py"
+        ).read_text()
+        stairs_source = (
+            ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        ).read_text()
+        launcher = (
+            ROOT / "humanoid" / "scripts"
+            / "run_isaac_stairs_polish.sh"
+        ).read_text()
+
+        for option in (
+            "--actor_reference_loss_coeff",
+            "--actor_head_only",
+            "--freeze_action_noise",
+            "--symmetry_loss_coeff",
+        ):
+            self.assertIn(option, train_source)
+            self.assertIn(option, launcher)
+        self.assertIn("def set_actor_reference", ppo_source)
+        self.assertIn('"actor_reference": mean_actor_reference_loss', ppo_source)
+        self.assertIn("def set_symmetry_config", ppo_source)
+        self.assertIn("def mirror_observations", stairs_source)
+        self.assertIn("def mirror_actions", stairs_source)
+        self.assertIn("--fixed_terrain_level=4", launcher)
+        self.assertIn("--command_speed=0.18", launcher)
+        self.assertIn('PILOT_ITERATIONS="${N2_PILOT_ITERATIONS:-50}"', launcher)
+        self.assertIn('LEARNING_RATE="${N2_LEARNING_RATE:-5e-6}"', launcher)
+        self.assertIn("baseline|smoke|pilot|status|log|stop|candidate|compare", launcher)
+
+    def test_isaac_actor_mirror_is_an_involution(self):
+        source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        environment = nested_class(tree, "N2StairsEnv")
+        method_names = {
+            "_build_mirror_layout",
+            "mirror_actions",
+            "mirror_observations",
+        }
+        methods = [
+            node for node in environment.body
+            if isinstance(node, ast.FunctionDef) and node.name in method_names
+        ]
+        harness = ast.ClassDef(
+            name="MirrorHarness",
+            bases=[],
+            keywords=[],
+            body=methods,
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[harness], type_ignores=[])
+        )
+        namespace = {"torch": torch}
+        exec(compile(module, str(source_path), "exec"), namespace)
+
+        config_tree = parse_tree("humanoid/envs/n2/n2_stairs_config.py")
+        joint_order = literal_assignments(
+            nested_class(config_tree, "N2StairsCfg", "asset")
+        )["expected_dof_order"]
+        instance = namespace["MirrorHarness"]()
+        instance.num_actions = 18
+        instance.include_gait_phase = True
+        instance.include_base_lin_vel = True
+        instance.include_navigation_state = True
+        instance.cfg = types.SimpleNamespace(
+            env=types.SimpleNamespace(
+                num_single_obs=82,
+                num_observations=410,
+                frame_stack=5,
+            ),
+            terrain=types.SimpleNamespace(
+                actor_measured_points_x=[0.25, 0.45, 0.65, 0.85],
+                actor_measured_points_y=[-0.24, 0.0, 0.24],
+            ),
+        )
+        instance._build_mirror_layout(joint_order)
+
+        actions = torch.randn(7, 18)
+        observations = torch.randn(7, 410)
+        self.assertTrue(
+            torch.equal(
+                instance.mirror_actions(instance.mirror_actions(actions)),
+                actions,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                instance.mirror_observations(
+                    instance.mirror_observations(observations)
+                ),
+                observations,
+            )
+        )
+
+    def test_actor_reference_is_an_independent_frozen_teacher(self):
+        from humanoid.algo.ppo.actor_critic import ActorCritic
+        from humanoid.algo.ppo.ppo import PPO
+
+        policy = ActorCritic(
+            4,
+            3,
+            2,
+            actor_hidden_dims=[8],
+            critic_hidden_dims=[8],
+        )
+        algorithm = PPO(policy, device="cpu")
+        algorithm.set_actor_reference(0.25)
+        reference_before = {
+            name: value.detach().clone()
+            for name, value in algorithm.actor_reference.state_dict().items()
+        }
+        with torch.no_grad():
+            policy.actor[-1].weight.add_(1.0)
+        self.assertEqual(algorithm.actor_reference_loss_coeff, 0.25)
+        self.assertTrue(
+            all(
+                not parameter.requires_grad
+                for parameter in algorithm.actor_reference.parameters()
+            )
+        )
+        for name, value in algorithm.actor_reference.state_dict().items():
+            self.assertTrue(torch.equal(value, reference_before[name]))
 
     def test_randomized_surface_properties_stay_two_dimensional(self):
         base_source = (

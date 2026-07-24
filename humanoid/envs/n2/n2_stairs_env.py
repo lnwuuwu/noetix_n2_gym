@@ -35,6 +35,7 @@ class N2StairsEnv(N2Env):
                 "Isaac Gym N2 DOF order differs from the policy/PD order.\n"
                 "Expected: {}\nActual: {}".format(expected_order, actual_order)
             )
+        self._build_mirror_layout(actual_order)
         # N2Env historically used numeric indices based on a different joint
         # ordering. Resolve every semantic group by name for this task.
         dof_index = {name: index for index, name in enumerate(actual_order)}
@@ -62,6 +63,122 @@ class N2StairsEnv(N2Env):
         self.up_joint_idxs = [
             dof_index[name] for name in actual_order if "_arm_" in name
         ]
+
+    def _build_mirror_layout(self, joint_order):
+        """Build the exact left/right reflection for the stacked Actor input."""
+        sign_by_suffix = {
+            "arm_shoulder_pitch_joint": 1.0,
+            "arm_shoulder_roll_joint": -1.0,
+            "arm_shoulder_yaw_joint": -1.0,
+            "arm_elbow_joint": -1.0,
+            "leg_hip_yaw_joint": -1.0,
+            "leg_hip_roll_joint": -1.0,
+            "leg_hip_pitch_joint": 1.0,
+            "leg_knee_joint": 1.0,
+            "leg_ankle_joint": 1.0,
+        }
+        joint_index = {name: index for index, name in enumerate(joint_order)}
+        action_source = [0] * self.num_actions
+        action_sign = [1.0] * self.num_actions
+        for index, name in enumerate(joint_order):
+            if not (name.startswith("L_") or name.startswith("R_")):
+                raise ValueError("Cannot mirror unpaired N2 joint " + name)
+            suffix = name[2:]
+            opposite = ("R_" if name.startswith("L_") else "L_") + suffix
+            if suffix not in sign_by_suffix or opposite not in joint_index:
+                raise ValueError("Cannot mirror N2 joint " + name)
+            action_source[index] = joint_index[opposite]
+            action_sign[index] = sign_by_suffix[suffix]
+        self.mirror_action_source = torch.tensor(
+            action_source, dtype=torch.long
+        )
+        self.mirror_action_sign = torch.tensor(
+            action_sign, dtype=torch.float
+        )
+
+        source = list(range(self.cfg.env.num_single_obs))
+        signs = [1.0] * self.cfg.env.num_single_obs
+        cursor = 0
+        # command x/y/yaw
+        signs[cursor:cursor + 3] = [1.0, -1.0, -1.0]
+        cursor += 3
+        if self.include_gait_phase:
+            # Swapping left/right advances the gait clock by half a cycle.
+            signs[cursor:cursor + 2] = [-1.0, -1.0]
+            cursor += 2
+        if self.include_base_lin_vel:
+            signs[cursor:cursor + 3] = [1.0, -1.0, 1.0]
+            cursor += 3
+        if self.include_navigation_state:
+            signs[cursor:cursor + 2] = [-1.0, -1.0]
+            cursor += 2
+        # Angular velocity is axial; projected gravity is polar.
+        signs[cursor:cursor + 3] = [-1.0, 1.0, -1.0]
+        cursor += 3
+        signs[cursor:cursor + 3] = [1.0, -1.0, 1.0]
+        cursor += 3
+        for _ in range(3):
+            for output, input_index in enumerate(action_source):
+                source[cursor + output] = cursor + input_index
+                signs[cursor + output] = action_sign[output]
+            cursor += self.num_actions
+
+        points_x = list(self.cfg.terrain.actor_measured_points_x)
+        points_y = list(self.cfg.terrain.actor_measured_points_y)
+        for x_index in range(len(points_x)):
+            for y_index, point_y in enumerate(points_y):
+                candidates = [
+                    index for index, value in enumerate(points_y)
+                    if abs(value + point_y) <= 1.0e-6
+                ]
+                if len(candidates) != 1:
+                    raise ValueError(
+                        "Actor height Y point has no unique mirror: {}".format(
+                            point_y
+                        )
+                    )
+                output = cursor + x_index * len(points_y) + y_index
+                source[output] = (
+                    cursor + x_index * len(points_y) + candidates[0]
+                )
+        height_count = len(points_x) * len(points_y)
+        if cursor + height_count != self.cfg.env.num_single_obs:
+            raise ValueError(
+                "Mirror layout {} + {} != {}".format(
+                    cursor, height_count, self.cfg.env.num_single_obs
+                )
+            )
+        self.mirror_single_source = torch.tensor(source, dtype=torch.long)
+        self.mirror_single_sign = torch.tensor(signs, dtype=torch.float)
+
+    def mirror_actions(self, actions):
+        source = self.mirror_action_source.to(device=actions.device)
+        signs = self.mirror_action_sign.to(
+            device=actions.device, dtype=actions.dtype
+        )
+        return actions.index_select(-1, source) * signs
+
+    def mirror_observations(self, observations):
+        expected_width = int(self.cfg.env.num_observations)
+        if observations.shape[-1] != expected_width:
+            raise ValueError(
+                "N2 Actor mirror expects {} observations, received {}".format(
+                    expected_width, observations.shape[-1]
+                )
+            )
+        shape = observations.shape
+        frames = observations.reshape(
+            *shape[:-1],
+            int(self.cfg.env.frame_stack),
+            int(self.cfg.env.num_single_obs),
+        )
+        source = self.mirror_single_source.to(device=observations.device)
+        signs = self.mirror_single_sign.to(
+            device=observations.device, dtype=observations.dtype
+        )
+        return (
+            frames.index_select(-1, source) * signs
+        ).reshape(shape)
 
     def create_sim(self):
         """Create the directional stair generator instead of mixed HumanoidTerrain."""

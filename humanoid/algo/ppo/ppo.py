@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -98,9 +99,15 @@ class PPO:
         self.schedule = schedule                        # 学习率调度策略
         self.learning_rate = learning_rate              # 学习率
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch  # 优势函数归一化标志
-        self.symmetry = symmetry_cfg
-        if self.symmetry is not None:
-            symmetry_env = self.symmetry.get("_env")
+        self.symmetry = None
+        self.set_symmetry_config(symmetry_cfg)
+        self.actor_reference = None
+        self.actor_reference_loss_coeff = 0.0
+
+    def set_symmetry_config(self, symmetry_cfg):
+        """Configure an optional exact actor-reflection consistency loss."""
+        if symmetry_cfg is not None:
+            symmetry_env = symmetry_cfg.get("_env")
             if symmetry_env is None:
                 raise ValueError("symmetry_cfg requires _env")
             if not (
@@ -110,6 +117,30 @@ class PPO:
                 raise ValueError(
                     "Symmetry environment must mirror observations/actions"
                 )
+            actor_coefficient = float(
+                symmetry_cfg.get("actor_loss_coeff", 0.0)
+            )
+            critic_coefficient = float(
+                symmetry_cfg.get("critic_loss_coeff", 0.0)
+            )
+            if actor_coefficient < 0.0 or critic_coefficient < 0.0:
+                raise ValueError("Symmetry loss coefficients cannot be negative")
+        self.symmetry = symmetry_cfg
+
+    def set_actor_reference(self, loss_coefficient):
+        """Freeze the loaded Actor as a teacher that limits policy drift."""
+        loss_coefficient = float(loss_coefficient)
+        if loss_coefficient < 0.0:
+            raise ValueError(
+                "Actor reference loss coefficient cannot be negative"
+            )
+        self.actor_reference_loss_coeff = loss_coefficient
+        if loss_coefficient == 0.0:
+            self.actor_reference = None
+            return
+        self.actor_reference = copy.deepcopy(self.policy.actor).to(self.device)
+        self.actor_reference.eval()
+        self.actor_reference.requires_grad_(False)
 
     def init_storage(
         self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, actions_shape
@@ -213,6 +244,7 @@ class PPO:
         mean_surrogate_loss = 0  # 平均替代损失
         mean_entropy = 0         # 平均熵
         mean_symmetry_loss = 0
+        mean_actor_reference_loss = 0
 
         # 小批次生成器
         if self.policy.is_recurrent:
@@ -325,6 +357,14 @@ class PPO:
                         critic_coefficient
                         * F.mse_loss(mirrored_value, value_batch)
                     )
+            actor_reference_loss = torch.zeros((), device=self.device)
+            if self.actor_reference is not None:
+                with torch.no_grad():
+                    reference_mean = self.actor_reference(obs_batch)
+                actor_reference_loss = (
+                    self.actor_reference_loss_coeff
+                    * F.mse_loss(self.policy.action_mean, reference_mean)
+                )
 
             # KL散度计算
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -390,6 +430,7 @@ class PPO:
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch.mean()
                 + symmetry_loss
+                + actor_reference_loss
             )
 
             # 计算梯度
@@ -411,6 +452,7 @@ class PPO:
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
             mean_symmetry_loss += symmetry_loss.item()
+            mean_actor_reference_loss += actor_reference_loss.item()
 
         # -- 对于PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches  # 更新次数
@@ -418,6 +460,7 @@ class PPO:
         mean_surrogate_loss /= num_updates  # 平均替代损失
         mean_entropy /= num_updates         # 平均熵
         mean_symmetry_loss /= num_updates
+        mean_actor_reference_loss /= num_updates
        
         # -- 清除存储
         self.storage.clear()
@@ -428,6 +471,7 @@ class PPO:
             "surrogate": mean_surrogate_loss,     # 替代损失
             "entropy": mean_entropy,              # 熵
             "symmetry": mean_symmetry_loss,
+            "actor_reference": mean_actor_reference_loss,
         }
 
         return loss_dict

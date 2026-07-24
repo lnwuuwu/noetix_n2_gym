@@ -34,11 +34,29 @@ def train(args):
         args.load_run is not None
         or args.checkpoint is not None
         or args.reset_optimizer
+        or args.actor_head_only
+        or args.freeze_action_noise
+        or args.actor_reference_loss_coeff > 0.0
+        or args.symmetry_loss_coeff > 0.0
     )
     if resume_only_options and not args.resume:
         raise ValueError(
-            "--load_run, --checkpoint, and --reset_optimizer require --resume"
+            "Checkpoint and protected fine-tuning options require --resume"
         )
+    if args.actor_head_only and not args.reset_optimizer:
+        raise ValueError(
+            "--actor_head_only requires --reset_optimizer so stale Adam "
+            "moments cannot alter the protected policy"
+        )
+    for option_name in (
+        "actor_reference_loss_coeff",
+        "symmetry_loss_coeff",
+    ):
+        value = float(getattr(args, option_name))
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(
+                "--{} must be non-negative and finite".format(option_name)
+            )
 
     # 根据任务名称和参数创建环境实例
     # env: 环境对象，用于模拟和交互
@@ -138,6 +156,57 @@ def train(args):
                     + str(policy.noise_std_type)
                 )
         print("Action-noise std override: {:.3f}".format(action_noise_std))
+    if args.actor_reference_loss_coeff > 0.0:
+        coefficient = float(args.actor_reference_loss_coeff)
+        ppo_runner.alg.set_actor_reference(coefficient)
+        ppo_runner.alg_cfg["actor_reference_loss_coeff"] = coefficient
+        print(
+            "Actor reference anchor: coefficient={:.4f}".format(coefficient)
+        )
+    if args.actor_head_only:
+        actor = ppo_runner.alg.policy.actor
+        linear_layers = [
+            module for module in actor.modules()
+            if isinstance(module, torch.nn.Linear)
+        ]
+        if not linear_layers:
+            raise RuntimeError("Actor has no Linear output layer to fine-tune")
+        actor.requires_grad_(False)
+        linear_layers[-1].requires_grad_(True)
+        trainable = sum(
+            parameter.numel() for parameter in actor.parameters()
+            if parameter.requires_grad
+        )
+        total = sum(parameter.numel() for parameter in actor.parameters())
+        print(
+            "Actor fine-tuning scope: output head only "
+            "({}/{} parameters trainable)".format(trainable, total)
+        )
+    if args.freeze_action_noise:
+        policy = ppo_runner.alg.policy
+        noise_parameter = (
+            policy.std
+            if policy.noise_std_type == "scalar"
+            else policy.log_std
+        )
+        noise_parameter.requires_grad_(False)
+        print("Action-noise parameter: frozen")
+    if args.symmetry_loss_coeff > 0.0:
+        if args.task != "n2_stairs_walk":
+            raise ValueError(
+                "--symmetry_loss_coeff currently supports n2_stairs_walk only"
+            )
+        coefficient = float(args.symmetry_loss_coeff)
+        symmetry_cfg = {
+            "_env": env,
+            "actor_loss_coeff": coefficient,
+            "critic_loss_coeff": 0.0,
+        }
+        ppo_runner.alg.set_symmetry_config(symmetry_cfg)
+        ppo_runner.alg_cfg["symmetry_cfg"] = symmetry_cfg
+        print(
+            "Actor reflection loss: coefficient={:.4f}".format(coefficient)
+        )
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.
@@ -222,6 +291,33 @@ if __name__ == '__main__':
                 "type": float,
                 "default": None,
                 "help": "Override policy exploration std after checkpoint load.",
+            },
+            {
+                "name": "--actor_reference_loss_coeff",
+                "type": float,
+                "default": 0.0,
+                "help": (
+                    "Penalize deterministic Actor drift from the checkpoint "
+                    "loaded at startup."
+                ),
+            },
+            {
+                "name": "--actor_head_only",
+                "action": "store_true",
+                "default": False,
+                "help": "Freeze the Actor trunk and train only its output layer.",
+            },
+            {
+                "name": "--freeze_action_noise",
+                "action": "store_true",
+                "default": False,
+                "help": "Keep the overridden action-noise parameter fixed.",
+            },
+            {
+                "name": "--symmetry_loss_coeff",
+                "type": float,
+                "default": 0.0,
+                "help": "Exact N2 left/right Actor consistency coefficient.",
             },
         ]
     )
