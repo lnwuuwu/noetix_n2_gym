@@ -8,7 +8,9 @@ MODE="${1:-}"
 TRAIN_SEED="${N2_SEED:-42}"
 TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"
 TRAIN_ENVS="${N2_NUM_ENVS:-256}"
-INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-}"
+# Use a curriculum-specific override so a stale N2_INIT_CHECKPOINT left by
+# earlier Isaac/MuJoCo experiments cannot silently select the wrong seed.
+INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 STAGE_ITERATIONS="${N2_STAGE_ITERATIONS:-25}"
 STAGE_CYCLES="${N2_STAGE_CYCLES:-2}"
 EVAL_ENVS="${N2_STAGE_EVAL_ENVS:-64}"
@@ -34,7 +36,7 @@ CHILD_PID=""
 usage() {
     echo "Usage: $0 smoke|long|status|log|stop"
     echo "The latest guarded model_9050.pt is selected automatically."
-    echo "Set N2_INIT_CHECKPOINT only to override automatic selection."
+    echo "Set N2_STABILITY_INIT_CHECKPOINT only to override automatic selection."
 }
 
 require_positive_integer() {
@@ -72,7 +74,7 @@ require_checkpoint() {
         fi
     fi
     if [[ -z "${INIT_CHECKPOINT}" || ! -f "${INIT_CHECKPOINT}" ]]; then
-        echo "Cannot find model_9050.pt; set N2_INIT_CHECKPOINT." >&2
+        echo "Cannot find model_9050.pt; set N2_STABILITY_INIT_CHECKPOINT." >&2
         exit 2
     fi
     INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"
