@@ -283,6 +283,14 @@ def train(args):
                     + str(policy.noise_std_type)
                 )
         print("Action-noise std override: {:.3f}".format(action_noise_std))
+    if args.save_interval is not None:
+        save_interval = int(args.save_interval)
+        if save_interval < 1:
+            raise ValueError("--save_interval must be positive")
+        ppo_runner.save_interval = save_interval
+        ppo_runner.cfg["runner"]["save_interval"] = save_interval
+        train_cfg.runner.save_interval = save_interval
+        print("Checkpoint save interval: {}".format(save_interval))
     if args.actor_reference_loss_coeff > 0.0:
         coefficient = float(args.actor_reference_loss_coeff)
         ppo_runner.alg.set_actor_reference(coefficient)
@@ -439,6 +447,12 @@ if __name__ == '__main__':
                 "type": float,
                 "default": None,
                 "help": "Override policy exploration std after checkpoint load.",
+            },
+            {
+                "name": "--save_interval",
+                "type": int,
+                "default": None,
+                "help": "Override checkpoint interval in PPO iterations.",
             },
             {
                 "name": "--actor_reference_loss_coeff",

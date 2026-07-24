@@ -1745,7 +1745,7 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("--terrain_level=4", launcher)
         self.assertIn("--stream_port=${STREAM_PORT}", launcher)
 
-    def test_isaac_stability_search_uses_mixed_levels_and_holdout(self):
+    def test_isaac_stability_training_is_continuous_and_guarded(self):
         launcher = (
             ROOT / "humanoid" / "scripts"
             / "run_isaac_stability_curriculum.sh"
@@ -1764,21 +1764,36 @@ class SourceCompatibilityTests(unittest.TestCase):
             'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"',
             launcher,
         )
-        self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
-        self.assertIn("--actor_trainable_layers=1", launcher)
         self.assertIn(
-            "--reward_scale_overrides=${PROFILE_REWARD_OVERRIDES}", launcher
+            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-250}"',
+            launcher,
         )
+        self.assertIn(
+            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"',
+            launcher,
+        )
+        self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
+        self.assertIn(
+            'ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"',
+            launcher,
+        )
+        self.assertIn("--actor_trainable_layers=${ACTOR_LAYERS}", launcher)
+        self.assertIn(
+            "--reward_scale_overrides=${REWARD_OVERRIDES}", launcher
+        )
+        self.assertIn("--save_interval=${checkpoint_interval}", launcher)
         self.assertIn("isaac_stability_tournament.py", launcher)
-        self.assertIn("local profiles=(conservative smooth balance)", launcher)
+        self.assertIn("ISAAC_STABILITY_CONTINUOUS_TRAIN", launcher)
+        self.assertIn("ISAAC_STABILITY_SCREEN", launcher)
         self.assertIn("ISAAC_STABILITY_HOLDOUT", launcher)
-        self.assertIn("reason=no_safe_style_improvement", launcher)
+        self.assertNotIn("ISAAC_STABILITY_MICRO_TRAIN", launcher)
+        self.assertNotIn("local profiles=", launcher)
         self.assertNotIn("for level in 0 1 2 3 4", launcher)
         self.assertNotIn("isaac_stairs_stage_gate.py", launcher)
         self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
         self.assertIn("N2_ISAAC_STABILITY_IMPROVED=", launcher)
         self.assertIn("model_9050.pt", launcher)
-        self.assertIn("latest guarded model_9050.pt", launcher)
+        self.assertIn("guarded model_9050.pt", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
         self.assertNotIn(
             'INIT_CHECKPOINT="${N2_INIT_CHECKPOINT:-}"', launcher
@@ -1788,6 +1803,7 @@ class SourceCompatibilityTests(unittest.TestCase):
             "--reward_scale_overrides",
             "--observation_noise_level",
             "--terrain_level_mix",
+            "--save_interval",
         ):
             self.assertIn(option, train_source)
         for metric in (
