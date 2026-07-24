@@ -79,12 +79,42 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
     episode_counts = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
     records = []
     maximum_steps = int(env.max_episode_length) * episodes_per_env * 3
+    previous_actions = torch.zeros(
+        env.num_envs, env.num_actions, device=env.device
+    )
+    previous_action_delta = torch.zeros_like(previous_actions)
+    has_previous_action = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
+    has_previous_delta = torch.zeros_like(has_previous_action)
+    action_rate_square_sum = torch.zeros(
+        env.num_envs, dtype=torch.float, device=env.device
+    )
+    action_accel_square_sum = torch.zeros_like(action_rate_square_sum)
+    action_rate_sample_count = torch.zeros_like(action_rate_square_sum)
+    action_accel_sample_count = torch.zeros_like(action_rate_square_sum)
 
     for _ in range(maximum_steps):
         env.commands[:, 0] = command_speed
         env.commands[:, 1:3] = 0.0
         with torch.inference_mode():
             actions = policy(obs.detach())
+        action_delta = actions - previous_actions
+        action_accel = action_delta - previous_action_delta
+        action_rate_square_sum += (
+            torch.mean(torch.square(action_delta), dim=1)
+            * has_previous_action.float()
+        )
+        action_accel_square_sum += (
+            torch.mean(torch.square(action_accel), dim=1)
+            * has_previous_delta.float()
+        )
+        action_rate_sample_count += has_previous_action.float()
+        action_accel_sample_count += has_previous_delta.float()
+        previous_actions[:] = actions
+        previous_action_delta[:] = action_delta
+        has_previous_delta |= has_previous_action
+        has_previous_action[:] = True
         obs, _, _, _, _, termination_ids, _ = env.step(actions.detach())
 
         if len(termination_ids) > 0:
@@ -224,9 +254,48 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         "right_tread_advances": float(
                             env.last_episode_right_tread_advances[env_id].item()
                         ),
+                        "final_lateral_position_m": float(
+                            env.last_episode_final_lateral_position[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_left_swing_length_m": float(
+                            env.last_episode_mean_left_swing_length[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_right_swing_length_m": float(
+                            env.last_episode_mean_right_swing_length[
+                                env_id
+                            ].item()
+                        ),
+                        "action_rate_rms": float(
+                            torch.sqrt(
+                                action_rate_square_sum[env_id]
+                                / torch.clamp(
+                                    action_rate_sample_count[env_id], min=1.0
+                                )
+                            ).item()
+                        ),
+                        "action_accel_rms": float(
+                            torch.sqrt(
+                                action_accel_square_sum[env_id]
+                                / torch.clamp(
+                                    action_accel_sample_count[env_id], min=1.0
+                                )
+                            ).item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
+            previous_actions[termination_ids] = 0.0
+            previous_action_delta[termination_ids] = 0.0
+            has_previous_action[termination_ids] = False
+            has_previous_delta[termination_ids] = False
+            action_rate_square_sum[termination_ids] = 0.0
+            action_accel_square_sum[termination_ids] = 0.0
+            action_rate_sample_count[termination_ids] = 0.0
+            action_accel_sample_count[termination_ids] = 0.0
 
         if torch.all(episode_counts >= episodes_per_env):
             break
@@ -298,6 +367,13 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "mean_max_swing_duration": mean("max_swing_duration"),
         "mean_left_tread_advances": mean("left_tread_advances"),
         "mean_right_tread_advances": mean("right_tread_advances"),
+        "mean_final_lateral_position_m": mean(
+            "final_lateral_position_m"
+        ),
+        "mean_left_swing_length_m": mean("mean_left_swing_length_m"),
+        "mean_right_swing_length_m": mean("mean_right_swing_length_m"),
+        "mean_action_rate_rms": mean("action_rate_rms"),
+        "mean_action_accel_rms": mean("action_accel_rms"),
     }
 
 
@@ -389,6 +465,11 @@ def evaluate(args):
             "footpitch={mean_foot_pitch_error:.3f}rad "
             "swingmax={mean_max_swing_duration:.2f}s "
             "adv=L{mean_left_tread_advances:.2f}/R{mean_right_tread_advances:.2f} "
+            "swing=L{mean_left_swing_length_m:.3f}/"
+            "R{mean_right_swing_length_m:.3f}m "
+            "final_y={mean_final_lateral_position_m:+.3f}m "
+            "action_rate={mean_action_rate_rms:.3f} "
+            "action_accel={mean_action_accel_rms:.3f} "
             "arm={mean_arm_swing_match:.2f} "
             "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(

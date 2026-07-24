@@ -563,6 +563,9 @@ class N2StairsWalkCfg(N2StairsCfg):
             # asymmetric deficit term supplies a usable recovery gradient.
             stairs_swing_knee_deficit = -6.0
             stairs_arm_swing = 0.50
+            # Disabled in the general walk task; guarded stability polishing
+            # enables it after the checkpoint already knows how to climb.
+            stairs_stride_symmetry = 0.0
             stairs_forward_pitch = 1.25
             stairs_base_behind_support = -4.0
             stairs_foot_pitch = -2.0

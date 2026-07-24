@@ -485,6 +485,28 @@ class N2StairsEnv(N2Env):
         self.right_tread_advance_count = torch.zeros_like(
             self.best_forward_progress
         )
+        # Measure actual forward displacement from physical lift-off to
+        # confirmed touchdown for each foot. Tread counts alone cannot reveal
+        # the visually obvious case where one leg consistently takes a longer
+        # step than the other.
+        self.last_swing_forward_displacement = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.swing_displacement_valid = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self.swing_forward_displacement_sum = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
+        self.swing_forward_displacement_count = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -612,6 +634,15 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_right_tread_advances = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_final_lateral_position = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_left_swing_length = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_right_swing_length = torch.zeros_like(
             self.best_forward_progress
         )
 
@@ -1299,6 +1330,24 @@ class N2StairsEnv(N2Env):
             self.swing_start_pos,
         )
         self.swing_start_valid[true_airborne_started] = True
+        measured_swing_landing = confirmed_landing & self.swing_start_valid
+        swing_forward_displacement = torch.clamp(
+            self.feet_pos[:, :, 0] - self.swing_start_pos[:, :, 0],
+            min=-0.10,
+            max=0.60,
+        )
+        self.last_swing_forward_displacement[:] = torch.where(
+            measured_swing_landing,
+            swing_forward_displacement,
+            self.last_swing_forward_displacement,
+        )
+        self.swing_displacement_valid |= measured_swing_landing
+        self.swing_forward_displacement_sum += (
+            swing_forward_displacement * measured_swing_landing.float()
+        )
+        self.swing_forward_displacement_count += (
+            measured_swing_landing.float()
+        )
         self.swing_start_valid[confirmed_landing] = False
         continued_pending_time = self.swing_pending_time + self.dt
         pending_duration = torch.where(
@@ -2310,6 +2359,18 @@ class N2StairsEnv(N2Env):
         right_tread_advances = (
             self.right_tread_advance_count[env_ids] * valid.float()
         )
+        final_lateral_position = (
+            self.root_states[env_ids, 1]
+            - self.env_origins[env_ids, 1]
+        ) * valid.float()
+        mean_swing_lengths = (
+            self.swing_forward_displacement_sum[env_ids]
+            / torch.clamp(
+                self.swing_forward_displacement_count[env_ids], min=1.0
+            )
+        ) * valid.float().unsqueeze(1)
+        mean_left_swing_length = mean_swing_lengths[:, 0]
+        mean_right_swing_length = mean_swing_lengths[:, 1]
 
         self.last_episode_success[env_ids] = success
         self.last_episode_completion[env_ids] = completion
@@ -2380,6 +2441,15 @@ class N2StairsEnv(N2Env):
         self.last_episode_max_swing_duration[env_ids] = max_swing_duration
         self.last_episode_left_tread_advances[env_ids] = left_tread_advances
         self.last_episode_right_tread_advances[env_ids] = right_tread_advances
+        self.last_episode_final_lateral_position[env_ids] = (
+            final_lateral_position
+        )
+        self.last_episode_mean_left_swing_length[env_ids] = (
+            mean_left_swing_length
+        )
+        self.last_episode_mean_right_swing_length[env_ids] = (
+            mean_right_swing_length
+        )
 
         super().reset_idx(env_ids)
 
@@ -2497,6 +2567,15 @@ class N2StairsEnv(N2Env):
                 "stairs_right_tread_advances": masked_mean(
                     right_tread_advances
                 ),
+                "stairs_final_lateral_position": masked_mean(
+                    final_lateral_position
+                ),
+                "stairs_mean_left_swing_length": masked_mean(
+                    mean_left_swing_length
+                ),
+                "stairs_mean_right_swing_length": masked_mean(
+                    mean_right_swing_length
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -2555,6 +2634,10 @@ class N2StairsEnv(N2Env):
         self.foot_pitch_sample_count[env_ids] = 0.0
         self.left_tread_advance_count[env_ids] = 0.0
         self.right_tread_advance_count[env_ids] = 0.0
+        self.last_swing_forward_displacement[env_ids] = 0.0
+        self.swing_displacement_valid[env_ids] = False
+        self.swing_forward_displacement_sum[env_ids] = 0.0
+        self.swing_forward_displacement_count[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.completion_buf[env_ids] = False
@@ -2948,6 +3031,25 @@ class N2StairsEnv(N2Env):
         # even though PPO still bootstraps its critic value at that time limit.
         failure = self.reset_buf.bool() & ~self.completion_buf
         return failure.float() / self.dt
+
+    def _reward_stairs_stride_symmetry(self):
+        """Penalize unequal measured left/right forward swing lengths."""
+        both_measured = torch.all(self.swing_displacement_valid, dim=1)
+        stride_difference = (
+            self.last_swing_forward_displacement[:, 0]
+            - self.last_swing_forward_displacement[:, 1]
+        )
+        normalized_error = torch.clamp(
+            stride_difference / float(self.cfg.terrain.step_width),
+            min=-1.0,
+            max=1.0,
+        )
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return (
+            torch.square(normalized_error)
+            * (both_measured & moving & upright).float()
+        )
 
     def _reward_stairs_lateral_drift(self):
         lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]

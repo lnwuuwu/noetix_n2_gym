@@ -23,6 +23,38 @@ import torch
 from humanoid.utils.helpers import parse_humanoid_args
 from humanoid.utils.task_registry import task_registry
 
+
+def parse_reward_scale_overrides(value):
+    """Parse a comma-separated ``reward=value`` override list."""
+    if value is None or not value.strip():
+        return {}
+    overrides = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                "Reward override must use name=value syntax: " + item
+            )
+        name, raw_value = item.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError("Reward override name cannot be empty")
+        try:
+            scale = float(raw_value)
+        except ValueError as error:
+            raise ValueError(
+                "Reward override '{}' is not numeric".format(item)
+            ) from error
+        if not math.isfinite(scale):
+            raise ValueError(
+                "Reward override '{}' must be finite".format(item)
+            )
+        overrides[name] = scale
+    return overrides
+
+
 def train(args):
     """
     训练函数：根据提供的参数执行强化学习训练
@@ -38,6 +70,9 @@ def train(args):
         or args.freeze_action_noise
         or args.actor_reference_loss_coeff > 0.0
         or args.symmetry_loss_coeff > 0.0
+        or args.actor_trainable_layers is not None
+        or args.reward_scale_overrides is not None
+        or args.observation_noise_level is not None
     )
     if resume_only_options and not args.resume:
         raise ValueError(
@@ -47,6 +82,20 @@ def train(args):
         raise ValueError(
             "--actor_head_only requires --reset_optimizer so stale Adam "
             "moments cannot alter the protected policy"
+        )
+    if (
+        args.actor_trainable_layers is not None
+        and args.actor_trainable_layers < 1
+    ):
+        raise ValueError("--actor_trainable_layers must be positive")
+    if args.actor_head_only and args.actor_trainable_layers is not None:
+        raise ValueError(
+            "--actor_head_only and --actor_trainable_layers are mutually "
+            "exclusive"
+        )
+    if args.actor_trainable_layers is not None and not args.reset_optimizer:
+        raise ValueError(
+            "--actor_trainable_layers requires --reset_optimizer"
         )
     for option_name in (
         "actor_reference_loss_coeff",
@@ -67,9 +116,14 @@ def train(args):
         "n2_stairs_robust",
         "n2_stairs_walk",
     )
+    reward_scale_overrides = parse_reward_scale_overrides(
+        args.reward_scale_overrides
+    )
     if (
         args.fixed_terrain_level is not None
         or args.command_speed is not None
+        or reward_scale_overrides
+        or args.observation_noise_level is not None
     ):
         if args.task not in stair_tasks:
             raise ValueError(
@@ -109,6 +163,27 @@ def train(args):
             )
         env_cfg.commands.ranges.lin_vel_x = [command_speed, command_speed]
         env_cfg.commands.curriculum = False
+    for reward_name, reward_scale in reward_scale_overrides.items():
+        if not hasattr(env_cfg.rewards.scales, reward_name):
+            raise ValueError(
+                "Unknown reward scale override: {}".format(reward_name)
+            )
+        setattr(env_cfg.rewards.scales, reward_name, reward_scale)
+        print(
+            "Reward-scale override: {}={:.6g}".format(
+                reward_name, reward_scale
+            )
+        )
+    if args.observation_noise_level is not None:
+        noise_level = float(args.observation_noise_level)
+        if not math.isfinite(noise_level) or noise_level < 0.0:
+            raise ValueError(
+                "--observation_noise_level must be non-negative and finite"
+            )
+        env_cfg.noise.noise_level = noise_level
+        print(
+            "Observation-noise level override: {:.3f}".format(noise_level)
+        )
     env, env_cfg = task_registry.make_env(
         name=args.task, args=args, env_cfg=env_cfg
     )
@@ -163,7 +238,10 @@ def train(args):
         print(
             "Actor reference anchor: coefficient={:.4f}".format(coefficient)
         )
+    trainable_actor_layers = args.actor_trainable_layers
     if args.actor_head_only:
+        trainable_actor_layers = 1
+    if trainable_actor_layers is not None:
         actor = ppo_runner.alg.policy.actor
         linear_layers = [
             module for module in actor.modules()
@@ -171,16 +249,24 @@ def train(args):
         ]
         if not linear_layers:
             raise RuntimeError("Actor has no Linear output layer to fine-tune")
+        if trainable_actor_layers > len(linear_layers):
+            raise ValueError(
+                "--actor_trainable_layers={} exceeds the Actor's {} Linear "
+                "layers".format(trainable_actor_layers, len(linear_layers))
+            )
         actor.requires_grad_(False)
-        linear_layers[-1].requires_grad_(True)
+        for layer in linear_layers[-trainable_actor_layers:]:
+            layer.requires_grad_(True)
         trainable = sum(
             parameter.numel() for parameter in actor.parameters()
             if parameter.requires_grad
         )
         total = sum(parameter.numel() for parameter in actor.parameters())
         print(
-            "Actor fine-tuning scope: output head only "
-            "({}/{} parameters trainable)".format(trainable, total)
+            "Actor fine-tuning scope: last {} Linear layer(s) "
+            "({}/{} parameters trainable)".format(
+                trainable_actor_layers, trainable, total
+            )
         )
     if args.freeze_action_noise:
         policy = ppo_runner.alg.policy
@@ -308,6 +394,14 @@ if __name__ == '__main__':
                 "help": "Freeze the Actor trunk and train only its output layer.",
             },
             {
+                "name": "--actor_trainable_layers",
+                "type": int,
+                "default": None,
+                "help": (
+                    "Freeze the Actor except for its last N Linear layers."
+                ),
+            },
+            {
                 "name": "--freeze_action_noise",
                 "action": "store_true",
                 "default": False,
@@ -318,6 +412,21 @@ if __name__ == '__main__':
                 "type": float,
                 "default": 0.0,
                 "help": "Exact N2 left/right Actor consistency coefficient.",
+            },
+            {
+                "name": "--reward_scale_overrides",
+                "type": str,
+                "default": None,
+                "help": (
+                    "Comma-separated stair reward overrides, for example "
+                    "action_rate=-0.3,stairs_lateral_drift=-18."
+                ),
+            },
+            {
+                "name": "--observation_noise_level",
+                "type": float,
+                "default": None,
+                "help": "Override the environment observation-noise multiplier.",
             },
         ]
     )

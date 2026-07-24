@@ -32,6 +32,13 @@ def load_pure_gait_guidance_module():
     )
 
 
+def load_isaac_stage_gate_module():
+    return load_module(
+        "n2_isaac_stage_gate_test",
+        "humanoid/scripts/isaac_stairs_stage_gate.py",
+    )
+
+
 def load_pure_mujoco_eval_module():
     """Load the contact tracker without requiring MuJoCo or Isaac Gym."""
     previous_mujoco = sys.modules.get("mujoco")
@@ -1730,6 +1737,109 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("humanoid/scripts/stream_stairs.py", launcher)
         self.assertIn("--terrain_level=4", launcher)
         self.assertIn("--stream_port=${STREAM_PORT}", launcher)
+
+    def test_isaac_stability_curriculum_is_guarded_across_all_levels(self):
+        launcher = (
+            ROOT / "humanoid" / "scripts"
+            / "run_isaac_stability_curriculum.sh"
+        ).read_text()
+        train_source = (
+            ROOT / "humanoid" / "scripts" / "train.py"
+        ).read_text()
+        eval_source = (
+            ROOT / "humanoid" / "scripts" / "eval_stairs.py"
+        ).read_text()
+        stairs_source = (
+            ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        ).read_text()
+
+        self.assertIn("for level in 0 1 2 3 4", launcher)
+        self.assertIn("local speeds=(0.12 0.14 0.16 0.17 0.18)", launcher)
+        self.assertIn("--actor_trainable_layers=2", launcher)
+        self.assertIn("--reward_scale_overrides=${REWARD_OVERRIDES}", launcher)
+        self.assertIn("isaac_stairs_stage_gate.py", launcher)
+        self.assertIn("candidate_high_csv", launcher)
+        self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
+        for option in (
+            "--actor_trainable_layers",
+            "--reward_scale_overrides",
+            "--observation_noise_level",
+        ):
+            self.assertIn(option, train_source)
+        for metric in (
+            "mean_action_rate_rms",
+            "mean_action_accel_rms",
+            "mean_final_lateral_position_m",
+            "mean_left_swing_length_m",
+            "mean_right_swing_length_m",
+        ):
+            self.assertIn(metric, eval_source)
+        self.assertIn(
+            "def _reward_stairs_stride_symmetry", stairs_source
+        )
+
+    def test_isaac_stability_gate_accepts_improvement_and_blocks_regression(self):
+        gate = load_isaac_stage_gate_module()
+
+        def summary(**overrides):
+            values = {
+                "completion_rate": 0.94,
+                "fall_rate": 0.04,
+                "path_failure_rate": 0.02,
+                "mean_max_lateral_deviation_m": 0.08,
+                "mean_max_yaw_deviation_rad": 0.18,
+                "mean_final_lateral_position_m": -0.03,
+                "mean_left_swing_length_m": 0.29,
+                "mean_right_swing_length_m": 0.25,
+                "mean_action_rate_rms": 0.08,
+                "mean_action_accel_rms": 0.05,
+                "mean_double_flight_fraction": 0.03,
+                "mean_command_error_m_s": 0.03,
+            }
+            values.update(overrides)
+            return values
+
+        baseline_stage = summary()
+        baseline_high = summary(completion_rate=0.93, fall_rate=0.05)
+        candidate_stage = summary(
+            completion_rate=0.96,
+            fall_rate=0.02,
+            mean_max_lateral_deviation_m=0.06,
+            mean_final_lateral_position_m=-0.01,
+            mean_right_swing_length_m=0.28,
+            mean_action_rate_rms=0.06,
+            mean_action_accel_rms=0.04,
+        )
+        candidate_high = summary(
+            completion_rate=0.94,
+            fall_rate=0.04,
+            mean_max_lateral_deviation_m=0.075,
+            mean_right_swing_length_m=0.27,
+            mean_action_rate_rms=0.07,
+            mean_action_accel_rms=0.045,
+        )
+        accepted = gate.decide(
+            baseline_stage,
+            candidate_stage,
+            baseline_high,
+            candidate_high,
+            2,
+        )
+        self.assertTrue(accepted["accepted"], accepted["reasons"])
+
+        regressed_high = dict(candidate_high)
+        regressed_high["completion_rate"] = 0.70
+        rejected = gate.decide(
+            baseline_stage,
+            candidate_stage,
+            baseline_high,
+            regressed_high,
+            2,
+        )
+        self.assertFalse(rejected["accepted"])
+        self.assertTrue(
+            any("10 cm completion regressed" in reason for reason in rejected["reasons"])
+        )
 
     def test_isaac_actor_mirror_is_an_involution(self):
         source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
