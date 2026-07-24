@@ -92,6 +92,7 @@ def train(args):
         or args.actor_reference_loss_coeff > 0.0
         or args.symmetrize_actor_reference
         or args.symmetry_loss_coeff > 0.0
+        or args.actor_policy_loss_scale != 1.0
         or args.actor_trainable_layers is not None
         or args.reward_scale_overrides is not None
         or args.observation_noise_level is not None
@@ -122,12 +123,19 @@ def train(args):
     for option_name in (
         "actor_reference_loss_coeff",
         "symmetry_loss_coeff",
+        "actor_policy_loss_scale",
     ):
         value = float(getattr(args, option_name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(
                 "--{} must be non-negative and finite".format(option_name)
             )
+    if args.actor_reference_mirror_blend < 0.0 or (
+        args.actor_reference_mirror_blend > 0.5
+    ):
+        raise ValueError(
+            "--actor_reference_mirror_blend must be inside [0.0, 0.5]"
+        )
     if (
         args.symmetrize_actor_reference
         and args.actor_reference_loss_coeff <= 0.0
@@ -311,20 +319,43 @@ def train(args):
             env if args.symmetrize_actor_reference else None
         )
         ppo_runner.alg.set_actor_reference(
-            coefficient, symmetry_env=reference_symmetry_env
+            coefficient,
+            symmetry_env=reference_symmetry_env,
+            mirror_blend=args.actor_reference_mirror_blend,
         )
         ppo_runner.alg_cfg["actor_reference_loss_coeff"] = coefficient
         ppo_runner.alg_cfg["symmetrize_actor_reference"] = bool(
             args.symmetrize_actor_reference
         )
+        ppo_runner.alg_cfg["actor_reference_mirror_blend"] = float(
+            args.actor_reference_mirror_blend
+        )
         print(
-            "Actor reference anchor: coefficient={:.4f} teacher={}".format(
+            "Actor reference anchor: coefficient={:.4f} teacher={} "
+            "mirror_blend={:.3f}".format(
                 coefficient,
                 (
-                    "left/right averaged"
+                    "left/right reflection-blended"
                     if args.symmetrize_actor_reference
                     else "raw checkpoint"
                 ),
+                (
+                    args.actor_reference_mirror_blend
+                    if args.symmetrize_actor_reference
+                    else 0.0
+                ),
+            )
+        )
+    if args.actor_policy_loss_scale != 1.0:
+        ppo_runner.alg.set_surrogate_loss_scale(
+            args.actor_policy_loss_scale
+        )
+        ppo_runner.alg_cfg["surrogate_loss_scale"] = float(
+            args.actor_policy_loss_scale
+        )
+        print(
+            "Actor PPO surrogate scale: {:.4f}".format(
+                args.actor_policy_loss_scale
             )
         )
     trainable_actor_layers = args.actor_trainable_layers
@@ -499,6 +530,24 @@ if __name__ == '__main__':
                 "help": (
                     "Average the frozen checkpoint teacher with its mirrored "
                     "action, removing checkpoint left/right bias."
+                ),
+            },
+            {
+                "name": "--actor_reference_mirror_blend",
+                "type": float,
+                "default": 0.5,
+                "help": (
+                    "Mirrored-teacher fraction in [0, 0.5]; 0.5 is exactly "
+                    "reflection equivariant."
+                ),
+            },
+            {
+                "name": "--actor_policy_loss_scale",
+                "type": float,
+                "default": 1.0,
+                "help": (
+                    "Scale PPO's Actor surrogate during guarded teacher "
+                    "distillation; the critic and auxiliary losses are unchanged."
                 ),
             },
             {

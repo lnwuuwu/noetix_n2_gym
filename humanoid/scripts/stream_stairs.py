@@ -26,6 +26,7 @@ import torch
 
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
 from humanoid.utils.helpers import parse_humanoid_args
+from humanoid.utils.policy_symmetry import make_reflection_blended_policy
 from humanoid.utils.task_registry import task_registry
 
 
@@ -231,6 +232,14 @@ def stream(args):
         load_optimizer=False,
     )
     policy = runner.get_inference_policy(device=env.device)
+    policy = make_reflection_blended_policy(
+        policy, env, args.policy_symmetry_blend
+    )
+    print(
+        "Policy reflection blend: {:.3f}".format(
+            args.policy_symmetry_blend
+        )
+    )
     obs = env.get_observations()
 
     # Camera-sensor poses are world-frame even though the sensor belongs to an
@@ -353,6 +362,14 @@ if __name__ == "__main__":
             "type": int,
             "default": 80,
             "help": "JPEG quality from 1 to 100.",
+        },
+        {
+            "name": "--policy_symmetry_blend",
+            "type": float,
+            "default": 0.0,
+            "help": (
+                "Inference-time mirrored-policy blend in [0, 0.5]."
+            ),
         },
     ]
     stream(parse_humanoid_args(extra_parameters))

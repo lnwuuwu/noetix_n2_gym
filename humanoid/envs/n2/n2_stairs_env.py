@@ -70,7 +70,9 @@ class N2StairsEnv(N2Env):
             "arm_shoulder_pitch_joint": 1.0,
             "arm_shoulder_roll_joint": -1.0,
             "arm_shoulder_yaw_joint": -1.0,
-            "arm_elbow_joint": -1.0,
+            # Both elbow axes are +Y in mirrored child frames.  URDF forward
+            # kinematics therefore maps q_L -> q_R, not q_L -> -q_R.
+            "arm_elbow_joint": 1.0,
             "leg_hip_yaw_joint": -1.0,
             "leg_hip_roll_joint": -1.0,
             "leg_hip_pitch_joint": 1.0,
@@ -1962,6 +1964,46 @@ class N2StairsEnv(N2Env):
         )
         return relative_y, inward_error, normalized_error, active
 
+    def _foot_lane_error_state(self):
+        """Return dense left/right foot error from the two stair lanes.
+
+        Crossover alone cannot see a foot that is too far outside its lane.
+        Penalising both feet against ``(+offset, -offset)`` also detects the
+        common-mode lane shift observed in the 9100 checkpoint while remaining
+        exactly invariant under left/right reflection.
+        """
+        relative_y = (
+            self.feet_pos[:, :, 1] - self.env_origins[:, 1].unsqueeze(1)
+        )
+        offset = max(float(self.cfg.env.foothold_lateral_offset), 1.0e-3)
+        targets = torch.tensor(
+            (offset, -offset),
+            dtype=relative_y.dtype,
+            device=relative_y.device,
+        ).unsqueeze(0)
+        normalized_error = torch.clamp(
+            (relative_y - targets) / offset,
+            min=-float(self.cfg.env.foothold_lateral_error_clip),
+            max=float(self.cfg.env.foothold_lateral_error_clip),
+        )
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        active = (
+            (
+                self.root_states[:, 0]
+                >= (
+                    stair_start_x
+                    - float(
+                        self.cfg.env.first_tread_target_activation_distance
+                    )
+                )
+            )
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return relative_y, normalized_error, active
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_desired_contacts()
@@ -3328,6 +3370,14 @@ class N2StairsEnv(N2Env):
     def _reward_stairs_foot_crossover(self):
         """Penalize either foot moving inward across its minimum half-width."""
         _, _, normalized_error, active = self._foot_crossover_state()
+        return (
+            torch.mean(torch.square(normalized_error), dim=1)
+            * active.float()
+        )
+
+    def _reward_stairs_foot_lane_error(self):
+        """Keep both feet on their own centered lateral stair lanes."""
+        _, normalized_error, active = self._foot_lane_error_state()
         return (
             torch.mean(torch.square(normalized_error), dim=1)
             * active.float()

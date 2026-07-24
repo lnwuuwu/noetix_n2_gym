@@ -1797,12 +1797,17 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("guarded model_9050.pt", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
         self.assertIn("N2_STABILITY_SOURCE_APPROVED=True", launcher)
-        self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=240", launcher)
+        self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=100", launcher)
         self.assertIn("require_approved_selection", launcher)
+        self.assertIn("run_reflection_preflight", launcher)
+        self.assertIn("ISAAC_STABILITY_CORRECTION_ABORT", launcher)
+        self.assertIn("N2_STABILITY_ACTOR_LAYERS=4", launcher)
+        self.assertIn("N2_STABILITY_POLICY_LOSS_SCALE=0.0", launcher)
         self.assertIn("N2_STABILITY_SYMMETRIZE_REFERENCE=True", launcher)
         self.assertIn("--symmetrize_actor_reference", launcher)
         self.assertIn("stairs_foot_crossover=-12", launcher)
-        self.assertIn("stairs_single_support_stability=-3", launcher)
+        self.assertIn("stairs_foot_lane_error=-8", launcher)
+        self.assertIn("stairs_single_support_stability=-4", launcher)
         self.assertIn(
             "bash humanoid/scripts/run_isaac_stairs_polish.sh view",
             launcher,
@@ -1874,6 +1879,8 @@ class SourceCompatibilityTests(unittest.TestCase):
                 "mean_double_flight_fraction": 0.04,
                 "mean_left_foot_inward_error_m": 0.004,
                 "mean_right_foot_inward_error_m": 0.012,
+                "mean_left_foot_lateral_position_m": 0.09,
+                "mean_right_foot_lateral_position_m": -0.09,
                 "mean_right_swing_action_rate_rms": 0.68,
                 "mean_right_swing_action_accel_rms": 0.48,
                 "mean_left_swing_action_rate_rms": 0.74,
@@ -1937,7 +1944,22 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertFalse(rejected["eligible"])
         self.assertTrue(
             any(
-                "right-foot inward error increased" in reason
+                "combined foot inward error increased" in reason
+                for reason in rejected["reasons"]
+            )
+        )
+
+        lane_shift = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        for values in lane_shift.values():
+            values["mean_left_foot_lateral_position_m"] = 0.01
+            values["mean_right_foot_lateral_position_m"] = -0.17
+        rejected = tournament.compare(baseline, lane_shift, episodes=64)
+        self.assertFalse(rejected["eligible"])
+        self.assertTrue(
+            any(
+                "foot-lane center error increased" in reason
                 for reason in rejected["reasons"]
             )
         )
@@ -2052,6 +2074,28 @@ class SourceCompatibilityTests(unittest.TestCase):
             ),
         )
         instance._build_mirror_layout(joint_order)
+
+        # These signs are physical, not merely an involution.  URDF FK maps
+        # both elbow coordinates with the same sign while hip roll changes
+        # sign under sagittal reflection.
+        self.assertEqual(
+            instance.mirror_action_sign[joint_order.index(
+                "L_arm_elbow_joint"
+            )].item(),
+            1.0,
+        )
+        self.assertEqual(
+            instance.mirror_action_sign[joint_order.index(
+                "R_arm_elbow_joint"
+            )].item(),
+            1.0,
+        )
+        self.assertEqual(
+            instance.mirror_action_sign[joint_order.index(
+                "L_leg_hip_roll_joint"
+            )].item(),
+            -1.0,
+        )
 
         actions = torch.randn(7, 18)
         observations = torch.randn(7, 410)
@@ -2191,6 +2235,37 @@ class SourceCompatibilityTests(unittest.TestCase):
                 atol=1.0e-7,
                 rtol=1.0e-6,
             )
+        )
+
+    def test_inference_reflection_blend_is_exact_at_one_half(self):
+        from humanoid.utils.policy_symmetry import (
+            make_reflection_blended_policy,
+        )
+
+        class MirrorEnvironment:
+            @staticmethod
+            def mirror_observations(observations):
+                return observations[:, [1, 0, 3, 2]]
+
+            @staticmethod
+            def mirror_actions(actions):
+                return actions[:, [1, 0]]
+
+        weight = torch.tensor(
+            [[1.0, -0.5], [0.3, 1.2], [-0.7, 0.2], [0.9, -1.0]]
+        )
+
+        def asymmetric_policy(observations):
+            return observations @ weight
+
+        mirror = MirrorEnvironment()
+        policy = make_reflection_blended_policy(
+            asymmetric_policy, mirror, 0.5
+        )
+        observations = torch.randn(13, 4)
+        torch.testing.assert_close(
+            policy(mirror.mirror_observations(observations)),
+            mirror.mirror_actions(policy(observations)),
         )
 
     def test_randomized_surface_properties_stay_two_dimensional(self):

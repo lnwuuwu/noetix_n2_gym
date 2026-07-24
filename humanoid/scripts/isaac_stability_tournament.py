@@ -154,6 +154,50 @@ def aggregate(rows):
         )
         for level in LEVELS
     )
+    foot_inward = left_inward + right_inward
+    # A centered gait has y_left ~= +offset and y_right ~= -offset.  The
+    # previous gate watched only right-foot crossover, but the measured
+    # failure is a common rightward foot-lane shift: the left foot approaches
+    # the centerline while the right foot stays far outside it.
+    foot_lane_center = sum(
+        LEVEL_WEIGHTS[level]
+        * abs(
+            0.5
+            * (
+                optional_float(
+                    rows[level],
+                    "mean_left_foot_lateral_position_m",
+                    0.0,
+                )
+                + optional_float(
+                    rows[level],
+                    "mean_right_foot_lateral_position_m",
+                    0.0,
+                )
+            )
+        )
+        for level in LEVELS
+    )
+    foot_lane_half_width_error = sum(
+        LEVEL_WEIGHTS[level]
+        * abs(
+            0.5
+            * (
+                optional_float(
+                    rows[level],
+                    "mean_left_foot_lateral_position_m",
+                    0.09,
+                )
+                - optional_float(
+                    rows[level],
+                    "mean_right_foot_lateral_position_m",
+                    -0.09,
+                )
+            )
+            - 0.09
+        )
+        for level in LEVELS
+    )
     right_swing_motion = sum(
         LEVEL_WEIGHTS[level]
         * phase_action_motion(rows[level], "right")
@@ -189,8 +233,9 @@ def aggregate(rows):
         + max_lateral
         + 0.25 * yaw
         + 0.5 * double_flight
-        + 8.0 * right_inward
-        + 4.0 * left_inward
+        + 8.0 * foot_inward
+        + 8.0 * foot_lane_center
+        + 2.0 * foot_lane_half_width_error
         + 0.5 * phase_motion_imbalance
         + 0.5 * left_swing_body_motion
         + 0.5 * phase_body_imbalance
@@ -210,6 +255,9 @@ def aggregate(rows):
         "actor_symmetry_error": actor_symmetry_error,
         "left_foot_inward": left_inward,
         "right_foot_inward": right_inward,
+        "foot_inward": foot_inward,
+        "foot_lane_center": foot_lane_center,
+        "foot_lane_half_width_error": foot_lane_half_width_error,
         "right_swing_action_motion": right_swing_motion,
         "left_swing_action_motion": left_swing_motion,
         "phase_action_imbalance": phase_motion_imbalance,
@@ -362,13 +410,22 @@ def compare(baseline_rows, candidate_rows, episodes=None):
                 baseline["signed_lateral"], candidate["signed_lateral"]
             )
         )
-    if candidate["right_foot_inward"] > (
-        baseline["right_foot_inward"] + 0.004
+    if candidate["foot_inward"] > (
+        baseline["foot_inward"] + 0.004
     ):
         reasons.append(
-            "right-foot inward error increased {:.4f} -> {:.4f}".format(
-                baseline["right_foot_inward"],
-                candidate["right_foot_inward"],
+            "combined foot inward error increased {:.4f} -> {:.4f}".format(
+                baseline["foot_inward"],
+                candidate["foot_inward"],
+            )
+        )
+    if candidate["foot_lane_center"] > (
+        baseline["foot_lane_center"] + 0.004
+    ):
+        reasons.append(
+            "foot-lane center error increased {:.4f} -> {:.4f}".format(
+                baseline["foot_lane_center"],
+                candidate["foot_lane_center"],
             )
         )
     if candidate["left_swing_action_motion"] > (
@@ -412,9 +469,11 @@ def compare(baseline_rows, candidate_rows, episodes=None):
             baseline["signed_lateral"] - candidate["signed_lateral"]
         ),
         "max_lateral": baseline["max_lateral"] - candidate["max_lateral"],
-        "right_foot_inward": (
-            baseline["right_foot_inward"]
-            - candidate["right_foot_inward"]
+        "foot_inward": (
+            baseline["foot_inward"] - candidate["foot_inward"]
+        ),
+        "foot_lane_center": (
+            baseline["foot_lane_center"] - candidate["foot_lane_center"]
         ),
         "right_support_motion": (
             baseline["left_swing_action_motion"]
@@ -443,7 +502,8 @@ def compare(baseline_rows, candidate_rows, episodes=None):
             improvements["stride_imbalance"] >= 0.002,
             improvements["signed_lateral"] >= 0.002,
             improvements["max_lateral"] >= 0.002,
-            improvements["right_foot_inward"] >= 0.001,
+            improvements["foot_inward"] >= 0.001,
+            improvements["foot_lane_center"] >= 0.001,
             improvements["right_support_motion"] >= 0.005,
             improvements["phase_action_imbalance"] >= 0.005,
             improvements["right_support_body_motion"] >= 0.005,

@@ -553,6 +553,7 @@ class N2StairsWalkCfg(N2StairsCfg):
             stairs_foothold_lateral = 0.0
             stairs_foothold_lateral_error = 0.0
             stairs_foot_crossover = 0.0
+            stairs_foot_lane_error = 0.0
             stairs_single_support_stability = 0.0
             stairs_swing_trajectory = 5.0
             stairs_swing_trajectory_error = -6.0

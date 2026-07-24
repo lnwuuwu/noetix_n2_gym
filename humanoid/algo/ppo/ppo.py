@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,6 +105,8 @@ class PPO:
         self.actor_reference = None
         self.actor_reference_loss_coeff = 0.0
         self.actor_reference_symmetry_env = None
+        self.actor_reference_mirror_blend = 0.5
+        self.surrogate_loss_scale = 1.0
 
     def set_symmetry_config(self, symmetry_cfg):
         """Configure an optional exact actor-reflection consistency loss."""
@@ -128,17 +131,30 @@ class PPO:
                 raise ValueError("Symmetry loss coefficients cannot be negative")
         self.symmetry = symmetry_cfg
 
-    def set_actor_reference(self, loss_coefficient, symmetry_env=None):
-        """Freeze the loaded Actor as an optional reflection-symmetric teacher.
+    def set_surrogate_loss_scale(self, scale):
+        """Scale the policy-gradient term during guarded Actor distillation."""
+        scale = float(scale)
+        if not math.isfinite(scale) or scale < 0.0:
+            raise ValueError("Surrogate loss scale must be finite and non-negative")
+        self.surrogate_loss_scale = scale
+
+    def set_actor_reference(
+        self,
+        loss_coefficient,
+        symmetry_env=None,
+        mirror_blend=0.5,
+    ):
+        """Freeze the loaded Actor as an optional reflection-blended teacher.
 
         A raw checkpoint teacher preserves every left/right bias in that
         checkpoint.  When ``symmetry_env`` is supplied, the target instead
-        averages the teacher action with the mirrored teacher action:
+        blends the teacher action with the mirrored teacher action:
 
-        ``0.5 * (T(o) + M_a(T(M_o(o))))``.
+        ``(1-b) * T(o) + b * M_a(T(M_o(o)))``.
 
-        The resulting target is exactly reflection equivariant while still
-        retaining the checkpoint's state-dependent climbing behaviour.
+        ``b=0.5`` is exactly reflection equivariant.  Smaller blends support
+        a preflight-tested conservative correction that retains more of the
+        checkpoint's climbing behaviour.
         """
         loss_coefficient = float(loss_coefficient)
         if loss_coefficient < 0.0:
@@ -152,8 +168,12 @@ class PPO:
             raise ValueError(
                 "Symmetric Actor reference requires observation/action mirrors"
             )
+        mirror_blend = float(mirror_blend)
+        if not 0.0 <= mirror_blend <= 0.5:
+            raise ValueError("Actor reference mirror blend must be in [0, 0.5]")
         self.actor_reference_loss_coeff = loss_coefficient
         self.actor_reference_symmetry_env = symmetry_env
+        self.actor_reference_mirror_blend = mirror_blend
         if loss_coefficient == 0.0:
             self.actor_reference = None
             self.actor_reference_symmetry_env = None
@@ -176,7 +196,8 @@ class PPO:
             )
             mirrored = self.actor_reference(mirrored_observations)
             reflected_back = symmetry_env.mirror_actions(mirrored)
-            return 0.5 * (direct + reflected_back)
+            blend = self.actor_reference_mirror_blend
+            return torch.lerp(direct, reflected_back, blend)
 
     def init_storage(
         self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, actions_shape
@@ -461,7 +482,7 @@ class PPO:
 
             # PPO objective plus exact N2 sagittal-reflection consistency.
             loss = (
-                surrogate_loss
+                self.surrogate_loss_scale * surrogate_loss
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch.mean()
                 + symmetry_loss

@@ -27,12 +27,15 @@ LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-2.0e-6}"
 ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.08}"
 REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.10}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
+REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
 SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
+POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.10}"
 REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.08,dof_acc=-3e-7,stairs_lateral_drift=-16,stairs_heading_alignment=4,stairs_stride_symmetry=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
+CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_stairs_stability"
@@ -40,17 +43,20 @@ PID_FILE="${LAUNCHER_DIR}/n2_stability_continuous_s${TRAIN_SEED}.pid"
 ACTIVE_LOG_FILE="${LAUNCHER_DIR}/n2_stability_continuous_s${TRAIN_SEED}.logpath"
 WORK_ROOT="${LAUNCHER_DIR}/stability_continuous_s${TRAIN_SEED}"
 RESULT_DIR="${LAUNCHER_DIR}/stability_selected_s${TRAIN_SEED}"
+SELECTED_BLEND_FILE="${RESULT_DIR}/selected_policy_blend.txt"
 
 mkdir -p "${LAUNCHER_DIR}" "${WORK_ROOT}" "${RESULT_DIR}"
 
 CHILD_PID=""
 TRAINED_RUN=""
 TARGET_ITERATION=""
+PREFLIGHT_EVALUATION=""
 
 usage() {
-    echo "Usage: $0 smoke|pilot|long|correct|final|status|log|stop|view"
+    echo "Usage: $0 smoke|pilot|long|diagnose|correct|final|status|log|stop|view"
     echo "pilot: one 75-iteration run; long: one 250-iteration run."
-    echo "correct/final: 240-iteration symmetric gait correction from the approved model."
+    echo "diagnose: zero-training mirrored-policy safety/style preflight."
+    echo "correct/final: preflight-gated 100-iteration full-Actor distillation."
     echo "The guarded model_9050.pt is selected automatically."
     echo "Set N2_STABILITY_INIT_CHECKPOINT only to override it."
 }
@@ -225,6 +231,8 @@ train_trajectory() {
         "--actor_trainable_layers=${ACTOR_LAYERS}" \
         "--actor_reference_loss_coeff=${REFERENCE_COEFF}" \
         "${reference_options[@]}" \
+        "--actor_reference_mirror_blend=${REFERENCE_MIRROR_BLEND}" \
+        "--actor_policy_loss_scale=${POLICY_LOSS_SCALE}" \
         "--symmetry_loss_coeff=${SYMMETRY_COEFF}" \
         "--observation_noise_level=${OBSERVATION_NOISE}" \
         "--reward_scale_overrides=${REWARD_OVERRIDES}" \
@@ -242,6 +250,7 @@ evaluate_checkpoint() {
     local output="$2"
     local env_count="$3"
     local eval_seed="$4"
+    local reflection_blend="${5:-0.0}"
     local iteration
     local run
     iteration="$(checkpoint_iteration "${checkpoint}")"
@@ -259,6 +268,7 @@ evaluate_checkpoint() {
         --terrain_levels=0,1,2,3,4 \
         "--command_speed=${COMMAND_SPEED}" \
         --episodes_per_env=1 \
+        "--policy_symmetry_blend=${reflection_blend}" \
         "--output=${output}"
 }
 
@@ -289,6 +299,60 @@ run_tournament() {
     run_child "${command[@]}"
 }
 
+run_reflection_preflight() {
+    # Select a safe mirrored-policy blend before spending time training.
+    local timestamp
+    local work_dir
+    local baseline_csv
+    local blend
+    local candidate_csv
+    local decision_json
+    local winner_name
+    local selected_blend
+    local candidate_specs=()
+
+    timestamp="$(date +%m%d_%H-%M-%S)"
+    work_dir="${WORK_ROOT}/reflection_preflight_${timestamp}"
+    mkdir -p "${work_dir}"
+    baseline_csv="${work_dir}/blend_0.00.csv"
+    echo "ISAAC_SYMMETRY_PREFLIGHT checkpoint=${INIT_CHECKPOINT}"
+    evaluate_checkpoint \
+        "${INIT_CHECKPOINT}" "${baseline_csv}" "${EVAL_ENVS}" \
+        "${TRAIN_SEED}" 0.0
+    for blend in 0.05 0.10 0.20 0.35 0.50; do
+        candidate_csv="${work_dir}/blend_${blend}.csv"
+        echo "ISAAC_SYMMETRY_BLEND_SCREEN blend=${blend}"
+        evaluate_checkpoint \
+            "${INIT_CHECKPOINT}" "${candidate_csv}" "${EVAL_ENVS}" \
+            "${TRAIN_SEED}" "${blend}"
+        candidate_specs+=(
+            "blend_${blend}|${candidate_csv}|${INIT_CHECKPOINT}"
+        )
+    done
+    decision_json="${work_dir}/reflection_blend_decision.json"
+    run_tournament \
+        "${baseline_csv}" "${INIT_CHECKPOINT}" "${decision_json}" \
+        "${EVAL_ENVS}" "${candidate_specs[@]}"
+    winner_name="$(
+        decision_value "${decision_json}" 'd["winner"]["name"]'
+    )"
+    if [[ "${winner_name}" == "baseline" ]]; then
+        selected_blend="0.0"
+    elif [[ "${winner_name}" == blend_* ]]; then
+        selected_blend="${winner_name#blend_}"
+    else
+        echo "Unexpected reflection preflight winner: ${winner_name}" >&2
+        return 1
+    fi
+    PREFLIGHT_EVALUATION="$(
+        decision_value "${decision_json}" 'd["winner"]["evaluation"]'
+    )"
+    printf '%s\n' "${selected_blend}" > "${SELECTED_BLEND_FILE}"
+    cp -f "${decision_json}" "${RESULT_DIR}/reflection_blend_decision.json"
+    echo "N2_ISAAC_SYMMETRY_BLEND=${selected_blend}"
+    echo "N2_ISAAC_SYMMETRY_PREFLIGHT=${decision_json}"
+}
+
 run_continuous() {
     require_checkpoint
     require_positive_integer N2_STABILITY_TRAIN_ITERATIONS "${TRAIN_ITERATIONS}"
@@ -299,6 +363,20 @@ run_continuous() {
 
     trap terminate_driver TERM INT
     trap cleanup_driver EXIT
+
+    if [[ "${CORRECTION_PREFLIGHT}" == "True" ]]; then
+        run_reflection_preflight
+        REFERENCE_MIRROR_BLEND="$(<"${SELECTED_BLEND_FILE}")"
+        if [[ "${REFERENCE_MIRROR_BLEND}" == "0.0" ]]; then
+            echo "ISAAC_STABILITY_CORRECTION_ABORT no safe mirrored-policy correction passed the deterministic gate."
+            echo "No training was started; the approved checkpoint is unchanged."
+            return 0
+        fi
+        echo "ISAAC_STABILITY_DISTILL_TARGET mirror_blend=${REFERENCE_MIRROR_BLEND}"
+    elif [[ "${CORRECTION_PREFLIGHT}" != "False" ]]; then
+        echo "N2_STABILITY_CORRECTION_PREFLIGHT must be True or False." >&2
+        return 2
+    fi
 
     local timestamp
     local work_dir
@@ -321,6 +399,7 @@ run_continuous() {
     local candidate_count
     local expected_transitions
     local optimizer_updates
+    local effective_policy_blend="0.0"
     local candidate_specs=()
 
     timestamp="$(date +%m%d_%H-%M-%S)"
@@ -332,7 +411,7 @@ run_continuous() {
     optimizer_updates=$((TRAIN_ITERATIONS * 5 * 4))
 
     echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${INIT_CHECKPOINT}"
-    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX}"
+    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX}"
     echo "ISAAC_STABILITY_TRAINING_VOLUME transitions=${expected_transitions} optimizer_minibatch_updates=${optimizer_updates}"
     evaluate_checkpoint \
         "${INIT_CHECKPOINT}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
@@ -418,6 +497,14 @@ run_continuous() {
     fi
     if [[ "${improved}" == "True" ]]; then
         approved="True"
+        printf '%s\n' "0.0" > "${SELECTED_BLEND_FILE}"
+    elif [[ "${CORRECTION_PREFLIGHT}" == "True" ]]; then
+        effective_policy_blend="$(<"${SELECTED_BLEND_FILE}")"
+        if [[ -n "${PREFLIGHT_EVALUATION}" ]]; then
+            final_evaluation="${PREFLIGHT_EVALUATION}"
+        fi
+    else
+        printf '%s\n' "0.0" > "${SELECTED_BLEND_FILE}"
     fi
 
     selected_iteration="$(checkpoint_iteration "${selected_checkpoint}")"
@@ -435,6 +522,7 @@ run_continuous() {
         "evaluation=${RESULT_DIR}/evaluation_all_levels.csv" \
         "trained_run=${TRAINED_RUN}" \
         "screened_checkpoints=${candidate_count}" \
+        "policy_symmetry_blend=${effective_policy_blend}" \
         > "${RESULT_DIR}/search_summary.txt"
 
     echo "N2_ISAAC_STABILITY_IMPROVED=${improved}"
@@ -442,6 +530,7 @@ run_continuous() {
     echo "N2_ISAAC_STABILITY_CHECKPOINT=${selected_copy}"
     echo "N2_ISAAC_STABILITY_EVALUATION=${RESULT_DIR}/evaluation_all_levels.csv"
     echo "N2_ISAAC_STABILITY_TRAINED_RUN=${TRAINED_RUN}"
+    echo "N2_ISAAC_POLICY_SYMMETRY_BLEND=${effective_policy_blend}"
 }
 
 smoke_train() {
@@ -458,11 +547,17 @@ view_selected() {
         exit 2
     fi
     echo "Selected checkpoint: ${INIT_CHECKPOINT}"
+    local policy_blend="0.0"
+    if [[ -f "${SELECTED_BLEND_FILE}" ]]; then
+        policy_blend="$(<"${SELECTED_BLEND_FILE}")"
+    fi
+    echo "Policy reflection blend: ${policy_blend}"
     echo "Headless browser stream port: ${VIEW_PORT}"
     N2_VIEW_CHECKPOINT="${INIT_CHECKPOINT}" \
     N2_STREAM_PORT="${VIEW_PORT}" \
     N2_DEVICE="${TRAIN_DEVICE}" \
     N2_SEED="${TRAIN_SEED}" \
+    N2_POLICY_SYMMETRY_BLEND="${policy_blend}" \
         bash humanoid/scripts/run_isaac_stairs_polish.sh view
 }
 
@@ -501,6 +596,14 @@ case "${MODE}" in
     long)
         launch_continuous long
         ;;
+    diagnose)
+        if active_pid >/dev/null; then
+            echo "The current training/holdout is still running." >&2
+            exit 2
+        fi
+        require_approved_selection
+        run_reflection_preflight
+        ;;
     correct|final)
         if active_pid >/dev/null; then
             echo "The current training/holdout is still running; do not start final refinement yet." >&2
@@ -510,18 +613,20 @@ case "${MODE}" in
         launch_continuous gait_correction \
             "N2_STABILITY_INIT_CHECKPOINT=${INIT_CHECKPOINT}" \
             N2_STABILITY_SOURCE_APPROVED=True \
-            N2_STABILITY_TRAIN_ITERATIONS=240 \
-            N2_STABILITY_CHECKPOINT_INTERVAL=20 \
+            N2_STABILITY_CORRECTION_PREFLIGHT=True \
+            N2_STABILITY_TRAIN_ITERATIONS=100 \
+            N2_STABILITY_CHECKPOINT_INTERVAL=10 \
             N2_STABILITY_EVAL_ENVS=128 \
             N2_STABILITY_HOLDOUT_ENVS=256 \
-            N2_STABILITY_LEARNING_RATE=1.5e-6 \
-            N2_STABILITY_ACTION_NOISE=0.06 \
-            N2_STABILITY_REFERENCE_COEFF=0.15 \
+            N2_STABILITY_LEARNING_RATE=1.0e-5 \
+            N2_STABILITY_ACTION_NOISE=0.04 \
+            N2_STABILITY_REFERENCE_COEFF=2.0 \
             N2_STABILITY_SYMMETRIZE_REFERENCE=True \
-            N2_STABILITY_SYMMETRY_COEFF=0.01 \
-            N2_STABILITY_ACTOR_LAYERS=3 \
-            N2_STABILITY_OBSERVATION_NOISE=0.05 \
-            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-6,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-2.5,stairs_foot_crossover=-12,stairs_single_support_stability=-3,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
+            N2_STABILITY_SYMMETRY_COEFF=0.0 \
+            N2_STABILITY_POLICY_LOSS_SCALE=0.0 \
+            N2_STABILITY_ACTOR_LAYERS=4 \
+            N2_STABILITY_OBSERVATION_NOISE=0.0 \
+            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-12,stairs_foot_lane_error=-8,stairs_single_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
         ;;
     _run)
         run_continuous

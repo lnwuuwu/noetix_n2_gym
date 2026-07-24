@@ -19,6 +19,7 @@ CAMERA_WIDTH="${N2_CAMERA_WIDTH:-960}"
 CAMERA_HEIGHT="${N2_CAMERA_HEIGHT:-540}"
 JPEG_QUALITY="${N2_JPEG_QUALITY:-80}"
 VIEW_CHECKPOINT="${N2_VIEW_CHECKPOINT:-}"
+POLICY_SYMMETRY_BLEND="${N2_POLICY_SYMMETRY_BLEND:-0.0}"
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
 PID_FILE="${LAUNCHER_DIR}/n2_stairs_polish_s${TRAIN_SEED}.pid"
 ACTIVE_LOG_FILE="${LAUNCHER_DIR}/n2_stairs_polish_s${TRAIN_SEED}.logpath"
@@ -78,7 +79,7 @@ run_train() {
     local log_path="${LAUNCHER_DIR}/${run_name}_${timestamp}.log"
     local command=(
         python -u humanoid/scripts/train.py
-        --task=n2_stairs_walk
+        "--task=n2_stairs_walk"
         --resume
         "--load_run=${CHECKPOINT_RUN}"
         "--checkpoint=${CHECKPOINT_ITERATION}"
@@ -89,8 +90,8 @@ run_train() {
         "--max_iterations=${target}"
         "--run_name=${run_name}"
         "--seed=${TRAIN_SEED}"
-        --fixed_terrain_level=4
-        --command_speed=0.18
+        "--fixed_terrain_level=4"
+        "--command_speed=0.18"
         --reset_optimizer
         "--learning_rate=${LEARNING_RATE}"
         --fixed_learning_rate
@@ -249,7 +250,8 @@ stream_checkpoint() {
         "--stream_port=${STREAM_PORT}" \
         "--camera_width=${CAMERA_WIDTH}" \
         "--camera_height=${CAMERA_HEIGHT}" \
-        "--jpeg_quality=${JPEG_QUALITY}"
+        "--jpeg_quality=${JPEG_QUALITY}" \
+        "--policy_symmetry_blend=${POLICY_SYMMETRY_BLEND}"
 }
 
 case "${MODE}" in

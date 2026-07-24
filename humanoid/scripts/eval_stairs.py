@@ -18,6 +18,7 @@ import torch
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
 from humanoid.utils.helpers import parse_humanoid_args
+from humanoid.utils.policy_symmetry import make_reflection_blended_policy
 from humanoid.utils.task_registry import task_registry
 
 
@@ -644,6 +645,14 @@ def evaluate(args):
         load_optimizer=False,
     )
     policy = runner.get_inference_policy(device=env.device)
+    policy = make_reflection_blended_policy(
+        policy, env, args.policy_symmetry_blend
+    )
+    print(
+        "Policy reflection blend: {:.3f}".format(
+            args.policy_symmetry_blend
+        )
+    )
 
     summaries = []
     for level in levels:
@@ -727,6 +736,7 @@ def evaluate(args):
                 "load_run": args.load_run,
                 "checkpoint": args.checkpoint,
                 "checkpoint_path": train_cfg.runner.resume_path,
+                "policy_symmetry_blend": args.policy_symmetry_blend,
                 "seed": train_cfg.seed,
                 "num_envs": args.num_envs,
                 "episodes_per_env": args.episodes_per_env,
@@ -770,6 +780,15 @@ if __name__ == "__main__":
             "type": str,
             "default": None,
             "help": "CSV output path; a JSON summary is written beside it.",
+        },
+        {
+            "name": "--policy_symmetry_blend",
+            "type": float,
+            "default": 0.0,
+            "help": (
+                "Inference-time mirrored-policy blend in [0, 0.5]. "
+                "Use 0.5 for an exactly reflection-equivariant diagnostic."
+            ),
         },
     ]
     evaluate(parse_humanoid_args(extra_parameters))
