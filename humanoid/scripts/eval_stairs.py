@@ -93,24 +93,87 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
     action_accel_square_sum = torch.zeros_like(action_rate_square_sum)
     action_rate_sample_count = torch.zeros_like(action_rate_square_sum)
     action_accel_sample_count = torch.zeros_like(action_rate_square_sum)
+    actor_symmetry_square_sum = torch.zeros_like(action_rate_square_sum)
+    actor_symmetry_sample_count = torch.zeros_like(action_rate_square_sum)
+    # Columns are [right swing / left support, left swing / right support].
+    # The second phase is the one reported as visibly unstable by the user.
+    phase_action_rate_square_sum = torch.zeros(
+        env.num_envs, 2, dtype=torch.float, device=env.device
+    )
+    phase_action_accel_square_sum = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
+    phase_action_rate_sample_count = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
+    phase_action_accel_sample_count = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
+    phase_roll_rate_square_sum = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
+    phase_lateral_velocity_square_sum = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
+    phase_body_sample_count = torch.zeros_like(
+        phase_action_rate_square_sum
+    )
 
     for _ in range(maximum_steps):
         env.commands[:, 0] = command_speed
         env.commands[:, 1:3] = 0.0
         with torch.inference_mode():
             actions = policy(obs.detach())
+            mirrored_observations = env.mirror_observations(obs.detach())
+            mirrored_policy_actions = policy(mirrored_observations)
+            reflected_actions = env.mirror_actions(
+                mirrored_policy_actions
+            )
+        actor_symmetry_square_sum += torch.mean(
+            torch.square(actions - reflected_actions), dim=1
+        )
+        actor_symmetry_sample_count += 1.0
         action_delta = actions - previous_actions
         action_accel = action_delta - previous_action_delta
+        action_rate_square = torch.mean(torch.square(action_delta), dim=1)
+        action_accel_square = torch.mean(torch.square(action_accel), dim=1)
         action_rate_square_sum += (
-            torch.mean(torch.square(action_delta), dim=1)
+            action_rate_square
             * has_previous_action.float()
         )
         action_accel_square_sum += (
-            torch.mean(torch.square(action_accel), dim=1)
+            action_accel_square
             * has_previous_delta.float()
         )
         action_rate_sample_count += has_previous_action.float()
         action_accel_sample_count += has_previous_delta.float()
+        desired_contacts = env.desired_contacts
+        phase_mask = torch.stack(
+            (
+                desired_contacts[:, 0] & ~desired_contacts[:, 1],
+                desired_contacts[:, 1] & ~desired_contacts[:, 0],
+            ),
+            dim=1,
+        )
+        phase_rate_mask = phase_mask & has_previous_action.unsqueeze(1)
+        phase_accel_mask = phase_mask & has_previous_delta.unsqueeze(1)
+        phase_action_rate_square_sum += (
+            action_rate_square.unsqueeze(1) * phase_rate_mask.float()
+        )
+        phase_action_accel_square_sum += (
+            action_accel_square.unsqueeze(1) * phase_accel_mask.float()
+        )
+        phase_action_rate_sample_count += phase_rate_mask.float()
+        phase_action_accel_sample_count += phase_accel_mask.float()
+        phase_roll_rate_square_sum += (
+            torch.square(env.base_ang_vel[:, 0]).unsqueeze(1)
+            * phase_mask.float()
+        )
+        phase_lateral_velocity_square_sum += (
+            torch.square(env.base_lin_vel[:, 1]).unsqueeze(1)
+            * phase_mask.float()
+        )
+        phase_body_sample_count += phase_mask.float()
         previous_actions[:] = actions
         previous_action_delta[:] = action_delta
         has_previous_delta |= has_previous_action
@@ -269,6 +332,26 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                                 env_id
                             ].item()
                         ),
+                        "mean_left_foot_inward_error_m": float(
+                            env.last_episode_mean_left_foot_inward_error[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_right_foot_inward_error_m": float(
+                            env.last_episode_mean_right_foot_inward_error[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_left_foot_lateral_position_m": float(
+                            env.last_episode_mean_left_foot_lateral_position[
+                                env_id
+                            ].item()
+                        ),
+                        "mean_right_foot_lateral_position_m": float(
+                            env.last_episode_mean_right_foot_lateral_position[
+                                env_id
+                            ].item()
+                        ),
                         "action_rate_rms": float(
                             torch.sqrt(
                                 action_rate_square_sum[env_id]
@@ -285,6 +368,87 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                                 )
                             ).item()
                         ),
+                        "actor_symmetry_error_rms": float(
+                            torch.sqrt(
+                                actor_symmetry_square_sum[env_id]
+                                / torch.clamp(
+                                    actor_symmetry_sample_count[env_id],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "right_swing_action_rate_rms": float(
+                            torch.sqrt(
+                                phase_action_rate_square_sum[env_id, 0]
+                                / torch.clamp(
+                                    phase_action_rate_sample_count[env_id, 0],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "right_swing_action_accel_rms": float(
+                            torch.sqrt(
+                                phase_action_accel_square_sum[env_id, 0]
+                                / torch.clamp(
+                                    phase_action_accel_sample_count[env_id, 0],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "left_swing_action_rate_rms": float(
+                            torch.sqrt(
+                                phase_action_rate_square_sum[env_id, 1]
+                                / torch.clamp(
+                                    phase_action_rate_sample_count[env_id, 1],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "left_swing_action_accel_rms": float(
+                            torch.sqrt(
+                                phase_action_accel_square_sum[env_id, 1]
+                                / torch.clamp(
+                                    phase_action_accel_sample_count[env_id, 1],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "right_swing_roll_rate_rms": float(
+                            torch.sqrt(
+                                phase_roll_rate_square_sum[env_id, 0]
+                                / torch.clamp(
+                                    phase_body_sample_count[env_id, 0],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "left_swing_roll_rate_rms": float(
+                            torch.sqrt(
+                                phase_roll_rate_square_sum[env_id, 1]
+                                / torch.clamp(
+                                    phase_body_sample_count[env_id, 1],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "right_swing_lateral_velocity_rms": float(
+                            torch.sqrt(
+                                phase_lateral_velocity_square_sum[env_id, 0]
+                                / torch.clamp(
+                                    phase_body_sample_count[env_id, 0],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
+                        "left_swing_lateral_velocity_rms": float(
+                            torch.sqrt(
+                                phase_lateral_velocity_square_sum[env_id, 1]
+                                / torch.clamp(
+                                    phase_body_sample_count[env_id, 1],
+                                    min=1.0,
+                                )
+                            ).item()
+                        ),
                     }
                 )
             episode_counts[selected_ids] += 1
@@ -296,6 +460,15 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
             action_accel_square_sum[termination_ids] = 0.0
             action_rate_sample_count[termination_ids] = 0.0
             action_accel_sample_count[termination_ids] = 0.0
+            actor_symmetry_square_sum[termination_ids] = 0.0
+            actor_symmetry_sample_count[termination_ids] = 0.0
+            phase_action_rate_square_sum[termination_ids] = 0.0
+            phase_action_accel_square_sum[termination_ids] = 0.0
+            phase_action_rate_sample_count[termination_ids] = 0.0
+            phase_action_accel_sample_count[termination_ids] = 0.0
+            phase_roll_rate_square_sum[termination_ids] = 0.0
+            phase_lateral_velocity_square_sum[termination_ids] = 0.0
+            phase_body_sample_count[termination_ids] = 0.0
 
         if torch.all(episode_counts >= episodes_per_env):
             break
@@ -372,8 +545,47 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         ),
         "mean_left_swing_length_m": mean("mean_left_swing_length_m"),
         "mean_right_swing_length_m": mean("mean_right_swing_length_m"),
+        "mean_left_foot_inward_error_m": mean(
+            "mean_left_foot_inward_error_m"
+        ),
+        "mean_right_foot_inward_error_m": mean(
+            "mean_right_foot_inward_error_m"
+        ),
+        "mean_left_foot_lateral_position_m": mean(
+            "mean_left_foot_lateral_position_m"
+        ),
+        "mean_right_foot_lateral_position_m": mean(
+            "mean_right_foot_lateral_position_m"
+        ),
         "mean_action_rate_rms": mean("action_rate_rms"),
         "mean_action_accel_rms": mean("action_accel_rms"),
+        "mean_actor_symmetry_error_rms": mean(
+            "actor_symmetry_error_rms"
+        ),
+        "mean_right_swing_action_rate_rms": mean(
+            "right_swing_action_rate_rms"
+        ),
+        "mean_right_swing_action_accel_rms": mean(
+            "right_swing_action_accel_rms"
+        ),
+        "mean_left_swing_action_rate_rms": mean(
+            "left_swing_action_rate_rms"
+        ),
+        "mean_left_swing_action_accel_rms": mean(
+            "left_swing_action_accel_rms"
+        ),
+        "mean_right_swing_roll_rate_rms": mean(
+            "right_swing_roll_rate_rms"
+        ),
+        "mean_left_swing_roll_rate_rms": mean(
+            "left_swing_roll_rate_rms"
+        ),
+        "mean_right_swing_lateral_velocity_rms": mean(
+            "right_swing_lateral_velocity_rms"
+        ),
+        "mean_left_swing_lateral_velocity_rms": mean(
+            "left_swing_lateral_velocity_rms"
+        ),
     }
 
 
@@ -467,9 +679,18 @@ def evaluate(args):
             "adv=L{mean_left_tread_advances:.2f}/R{mean_right_tread_advances:.2f} "
             "swing=L{mean_left_swing_length_m:.3f}/"
             "R{mean_right_swing_length_m:.3f}m "
+            "inward=L{mean_left_foot_inward_error_m:.3f}/"
+            "R{mean_right_foot_inward_error_m:.3f}m "
+            "foot_y=L{mean_left_foot_lateral_position_m:+.3f}/"
+            "R{mean_right_foot_lateral_position_m:+.3f}m "
             "final_y={mean_final_lateral_position_m:+.3f}m "
             "action_rate={mean_action_rate_rms:.3f} "
             "action_accel={mean_action_accel_rms:.3f} "
+            "symerr={mean_actor_symmetry_error_rms:.3f} "
+            "phase_accel=Rsw{mean_right_swing_action_accel_rms:.3f}/"
+            "Lsw{mean_left_swing_action_accel_rms:.3f} "
+            "phase_roll=Rsw{mean_right_swing_roll_rate_rms:.3f}/"
+            "Lsw{mean_left_swing_roll_rate_rms:.3f} "
             "arm={mean_arm_swing_match:.2f} "
             "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(

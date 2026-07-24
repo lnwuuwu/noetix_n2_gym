@@ -1797,8 +1797,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("guarded model_9050.pt", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
         self.assertIn("N2_STABILITY_SOURCE_APPROVED=True", launcher)
-        self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=200", launcher)
+        self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=240", launcher)
         self.assertIn("require_approved_selection", launcher)
+        self.assertIn("N2_STABILITY_SYMMETRIZE_REFERENCE=True", launcher)
+        self.assertIn("--symmetrize_actor_reference", launcher)
+        self.assertIn("stairs_foot_crossover=-12", launcher)
+        self.assertIn("stairs_single_support_stability=-3", launcher)
         self.assertIn(
             "bash humanoid/scripts/run_isaac_stairs_polish.sh view",
             launcher,
@@ -1820,6 +1824,13 @@ class SourceCompatibilityTests(unittest.TestCase):
             "mean_final_lateral_position_m",
             "mean_left_swing_length_m",
             "mean_right_swing_length_m",
+            "mean_left_foot_inward_error_m",
+            "mean_right_foot_inward_error_m",
+            "mean_left_swing_action_accel_rms",
+            "mean_right_swing_action_accel_rms",
+            "mean_left_swing_roll_rate_rms",
+            "mean_right_swing_roll_rate_rms",
+            "mean_actor_symmetry_error_rms",
         ):
             self.assertIn(metric, eval_source)
         self.assertIn(
@@ -1861,6 +1872,17 @@ class SourceCompatibilityTests(unittest.TestCase):
                 "mean_max_lateral_deviation_m": 0.09,
                 "mean_max_yaw_deviation_rad": 0.20,
                 "mean_double_flight_fraction": 0.04,
+                "mean_left_foot_inward_error_m": 0.004,
+                "mean_right_foot_inward_error_m": 0.012,
+                "mean_right_swing_action_rate_rms": 0.68,
+                "mean_right_swing_action_accel_rms": 0.48,
+                "mean_left_swing_action_rate_rms": 0.74,
+                "mean_left_swing_action_accel_rms": 0.55,
+                "mean_right_swing_roll_rate_rms": 0.10,
+                "mean_left_swing_roll_rate_rms": 0.16,
+                "mean_right_swing_lateral_velocity_rms": 0.04,
+                "mean_left_swing_lateral_velocity_rms": 0.07,
+                "mean_actor_symmetry_error_rms": 0.05,
             }
             values.update(overrides)
             return values
@@ -1873,6 +1895,12 @@ class SourceCompatibilityTests(unittest.TestCase):
                 mean_right_swing_length_m=0.17,
                 mean_final_lateral_position_m=0.02,
                 mean_max_lateral_deviation_m=0.08,
+                mean_right_foot_inward_error_m=0.008,
+                mean_left_swing_action_rate_rms=0.68,
+                mean_left_swing_action_accel_rms=0.48,
+                mean_left_swing_roll_rate_rms=0.12,
+                mean_left_swing_lateral_velocity_rms=0.05,
+                mean_actor_symmetry_error_rms=0.035,
             )
             for level in range(5)
         }
@@ -1894,6 +1922,22 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "10 cm completion regressed" in reason
+                for reason in rejected["reasons"]
+            )
+        )
+
+        inward_regression = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        for values in inward_regression.values():
+            values["mean_right_foot_inward_error_m"] = 0.020
+        rejected = tournament.compare(
+            baseline, inward_regression, episodes=64
+        )
+        self.assertFalse(rejected["eligible"])
+        self.assertTrue(
+            any(
+                "right-foot inward error increased" in reason
                 for reason in rejected["reasons"]
             )
         )
@@ -2026,6 +2070,62 @@ class SourceCompatibilityTests(unittest.TestCase):
             )
         )
 
+    def test_right_foot_inward_metric_uses_verified_world_y_sign(self):
+        source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        environment = nested_class(tree, "N2StairsEnv")
+        method = next(
+            node for node in environment.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_foot_crossover_state"
+        )
+        harness = ast.ClassDef(
+            name="LateralHarness",
+            bases=[],
+            keywords=[],
+            body=[method],
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[harness], type_ignores=[])
+        )
+        namespace = {"torch": torch}
+        exec(compile(module, str(source_path), "exec"), namespace)
+
+        instance = namespace["LateralHarness"]()
+        instance.cfg = types.SimpleNamespace(
+            env=types.SimpleNamespace(
+                foothold_min_half_width=0.055,
+                foothold_crossover_normalizer=0.055,
+                first_tread_target_activation_distance=0.30,
+            )
+        )
+        instance.feet_pos = torch.tensor(
+            [[[0.0, 0.080, 0.0], [0.0, -0.020, 0.0]]]
+        )
+        instance.env_origins = torch.zeros(1, 3)
+        instance.terrain_levels = torch.zeros(1, dtype=torch.long)
+        instance.terrain_types = torch.zeros(1, dtype=torch.long)
+        instance.stair_start_x = torch.tensor([[0.60]])
+        instance.root_states = torch.zeros(1, 13)
+        instance.root_states[:, 0] = 0.40
+        instance.root_states[:, 7] = 0.18
+        instance.projected_gravity = torch.tensor([[0.0, 0.0, -1.0]])
+
+        relative_y, inward, normalized, active = (
+            instance._foot_crossover_state()
+        )
+        torch.testing.assert_close(
+            relative_y, torch.tensor([[0.080, -0.020]])
+        )
+        torch.testing.assert_close(
+            inward, torch.tensor([[0.0, 0.035]])
+        )
+        torch.testing.assert_close(
+            normalized, torch.tensor([[0.0, 0.035 / 0.055]])
+        )
+        self.assertTrue(bool(active.item()))
+
     def test_actor_reference_is_an_independent_frozen_teacher(self):
         from humanoid.algo.ppo.actor_critic import ActorCritic
         from humanoid.algo.ppo.ppo import PPO
@@ -2054,6 +2154,44 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         for name, value in algorithm.actor_reference.state_dict().items():
             self.assertTrue(torch.equal(value, reference_before[name]))
+
+    def test_symmetrized_actor_reference_target_is_equivariant(self):
+        from humanoid.algo.ppo.actor_critic import ActorCritic
+        from humanoid.algo.ppo.ppo import PPO
+
+        class MirrorEnvironment:
+            @staticmethod
+            def mirror_observations(observations):
+                return observations[:, [1, 0, 3, 2]]
+
+            @staticmethod
+            def mirror_actions(actions):
+                return actions[:, [1, 0]]
+
+        policy = ActorCritic(
+            4,
+            3,
+            2,
+            actor_hidden_dims=[8],
+            critic_hidden_dims=[8],
+        )
+        algorithm = PPO(policy, device="cpu")
+        mirror = MirrorEnvironment()
+        algorithm.set_actor_reference(0.25, symmetry_env=mirror)
+
+        observations = torch.randn(11, 4)
+        target = algorithm._actor_reference_target(observations)
+        mirrored_target = algorithm._actor_reference_target(
+            mirror.mirror_observations(observations)
+        )
+        self.assertTrue(
+            torch.allclose(
+                mirrored_target,
+                mirror.mirror_actions(target),
+                atol=1.0e-7,
+                rtol=1.0e-6,
+            )
+        )
 
     def test_randomized_surface_properties_stay_two_dimensional(self):
         base_source = (

@@ -26,6 +26,7 @@ COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-2.0e-6}"
 ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.08}"
 REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.10}"
+SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.10}"
@@ -47,9 +48,9 @@ TRAINED_RUN=""
 TARGET_ITERATION=""
 
 usage() {
-    echo "Usage: $0 smoke|pilot|long|final|status|log|stop|view"
+    echo "Usage: $0 smoke|pilot|long|correct|final|status|log|stop|view"
     echo "pilot: one 75-iteration run; long: one 250-iteration run."
-    echo "final: refine a holdout-approved model for 200 more iterations."
+    echo "correct/final: 240-iteration symmetric gait correction from the approved model."
     echo "The guarded model_9050.pt is selected automatically."
     echo "Set N2_STABILITY_INIT_CHECKPOINT only to override it."
 }
@@ -187,11 +188,18 @@ train_trajectory() {
     local source_iteration
     local source_run
     local run_name
+    local reference_options=()
 
     source_iteration="$(checkpoint_iteration "${source_checkpoint}")"
     TARGET_ITERATION=$((source_iteration + extra_iterations))
     source_run="$(dirname "${source_checkpoint}")"
     run_name="stability_continuous_from_${source_iteration}_to_${TARGET_ITERATION}_s${TRAIN_SEED}"
+    if [[ "${SYMMETRIZE_REFERENCE}" == "True" ]]; then
+        reference_options+=(--symmetrize_actor_reference)
+    elif [[ "${SYMMETRIZE_REFERENCE}" != "False" ]]; then
+        echo "N2_STABILITY_SYMMETRIZE_REFERENCE must be True or False." >&2
+        return 2
+    fi
 
     echo "ISAAC_STABILITY_CONTINUOUS_TRAIN source=${source_iteration} target=${TARGET_ITERATION} iterations=${extra_iterations}"
     run_child python -u humanoid/scripts/train.py \
@@ -216,6 +224,7 @@ train_trajectory() {
         --freeze_action_noise \
         "--actor_trainable_layers=${ACTOR_LAYERS}" \
         "--actor_reference_loss_coeff=${REFERENCE_COEFF}" \
+        "${reference_options[@]}" \
         "--symmetry_loss_coeff=${SYMMETRY_COEFF}" \
         "--observation_noise_level=${OBSERVATION_NOISE}" \
         "--reward_scale_overrides=${REWARD_OVERRIDES}" \
@@ -323,7 +332,7 @@ run_continuous() {
     optimizer_updates=$((TRAIN_ITERATIONS * 5 * 4))
 
     echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${INIT_CHECKPOINT}"
-    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} reference=${REFERENCE_COEFF} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX}"
+    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX}"
     echo "ISAAC_STABILITY_TRAINING_VOLUME transitions=${expected_transitions} optimizer_minibatch_updates=${optimizer_updates}"
     evaluate_checkpoint \
         "${INIT_CHECKPOINT}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
@@ -492,24 +501,27 @@ case "${MODE}" in
     long)
         launch_continuous long
         ;;
-    final)
+    correct|final)
         if active_pid >/dev/null; then
             echo "The current training/holdout is still running; do not start final refinement yet." >&2
             exit 2
         fi
         require_approved_selection
-        launch_continuous final \
+        launch_continuous gait_correction \
             "N2_STABILITY_INIT_CHECKPOINT=${INIT_CHECKPOINT}" \
             N2_STABILITY_SOURCE_APPROVED=True \
-            N2_STABILITY_TRAIN_ITERATIONS=200 \
+            N2_STABILITY_TRAIN_ITERATIONS=240 \
             N2_STABILITY_CHECKPOINT_INTERVAL=20 \
             N2_STABILITY_EVAL_ENVS=128 \
             N2_STABILITY_HOLDOUT_ENVS=256 \
-            N2_STABILITY_LEARNING_RATE=8.0e-7 \
-            N2_STABILITY_ACTION_NOISE=0.05 \
-            N2_STABILITY_REFERENCE_COEFF=0.35 \
-            N2_STABILITY_SYMMETRY_COEFF=0.001 \
-            N2_STABILITY_ACTOR_LAYERS=2
+            N2_STABILITY_LEARNING_RATE=1.5e-6 \
+            N2_STABILITY_ACTION_NOISE=0.06 \
+            N2_STABILITY_REFERENCE_COEFF=0.15 \
+            N2_STABILITY_SYMMETRIZE_REFERENCE=True \
+            N2_STABILITY_SYMMETRY_COEFF=0.01 \
+            N2_STABILITY_ACTOR_LAYERS=3 \
+            N2_STABILITY_OBSERVATION_NOISE=0.05 \
+            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-6,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-2.5,stairs_foot_crossover=-12,stairs_single_support_stability=-3,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
         ;;
     _run)
         run_continuous

@@ -71,6 +71,44 @@ def action_motion(row):
     )
 
 
+def optional_float(row, key, fallback):
+    value = row.get(key, fallback)
+    return float(value)
+
+
+def phase_action_motion(row, swing_side):
+    """Return action motion during one swing/support half-cycle."""
+    return (
+        optional_float(
+            row,
+            "mean_{}_swing_action_rate_rms".format(swing_side),
+            row["mean_action_rate_rms"],
+        )
+        + 0.5
+        * optional_float(
+            row,
+            "mean_{}_swing_action_accel_rms".format(swing_side),
+            row["mean_action_accel_rms"],
+        )
+    )
+
+
+def phase_body_motion(row, swing_side):
+    """Return roll/lateral body motion during one support half-cycle."""
+    return (
+        optional_float(
+            row,
+            "mean_{}_swing_roll_rate_rms".format(swing_side),
+            0.0,
+        )
+        + optional_float(
+            row,
+            "mean_{}_swing_lateral_velocity_rms".format(swing_side),
+            0.0,
+        )
+    )
+
+
 def stride_imbalance(row):
     return abs(
         float(row["mean_left_swing_length_m"])
@@ -95,6 +133,55 @@ def aggregate(rows):
     max_lateral = weighted_mean(rows, "mean_max_lateral_deviation_m")
     yaw = weighted_mean(rows, "mean_max_yaw_deviation_rad")
     double_flight = weighted_mean(rows, "mean_double_flight_fraction")
+    actor_symmetry_error = sum(
+        LEVEL_WEIGHTS[level]
+        * optional_float(
+            rows[level], "mean_actor_symmetry_error_rms", 0.0
+        )
+        for level in LEVELS
+    )
+    left_inward = sum(
+        LEVEL_WEIGHTS[level]
+        * optional_float(
+            rows[level], "mean_left_foot_inward_error_m", 0.0
+        )
+        for level in LEVELS
+    )
+    right_inward = sum(
+        LEVEL_WEIGHTS[level]
+        * optional_float(
+            rows[level], "mean_right_foot_inward_error_m", 0.0
+        )
+        for level in LEVELS
+    )
+    right_swing_motion = sum(
+        LEVEL_WEIGHTS[level]
+        * phase_action_motion(rows[level], "right")
+        for level in LEVELS
+    )
+    # Left swing means the right foot is the sole scheduled support.  This is
+    # the phase in which the physical robot visibly shakes.
+    left_swing_motion = sum(
+        LEVEL_WEIGHTS[level]
+        * phase_action_motion(rows[level], "left")
+        for level in LEVELS
+    )
+    phase_motion_imbalance = abs(
+        left_swing_motion - right_swing_motion
+    )
+    right_swing_body_motion = sum(
+        LEVEL_WEIGHTS[level]
+        * phase_body_motion(rows[level], "right")
+        for level in LEVELS
+    )
+    left_swing_body_motion = sum(
+        LEVEL_WEIGHTS[level]
+        * phase_body_motion(rows[level], "left")
+        for level in LEVELS
+    )
+    phase_body_imbalance = abs(
+        left_swing_body_motion - right_swing_body_motion
+    )
     style_cost = (
         action
         + 4.0 * stride
@@ -102,6 +189,12 @@ def aggregate(rows):
         + max_lateral
         + 0.25 * yaw
         + 0.5 * double_flight
+        + 8.0 * right_inward
+        + 4.0 * left_inward
+        + 0.5 * phase_motion_imbalance
+        + 0.5 * left_swing_body_motion
+        + 0.5 * phase_body_imbalance
+        + actor_symmetry_error
     )
     return {
         "completion": weighted_mean(rows, "completion_rate"),
@@ -114,6 +207,15 @@ def aggregate(rows):
         "max_lateral": max_lateral,
         "yaw": yaw,
         "double_flight": double_flight,
+        "actor_symmetry_error": actor_symmetry_error,
+        "left_foot_inward": left_inward,
+        "right_foot_inward": right_inward,
+        "right_swing_action_motion": right_swing_motion,
+        "left_swing_action_motion": left_swing_motion,
+        "phase_action_imbalance": phase_motion_imbalance,
+        "right_swing_body_motion": right_swing_body_motion,
+        "left_swing_body_motion": left_swing_body_motion,
+        "phase_body_imbalance": phase_body_imbalance,
         "style_cost": style_cost,
     }
 
@@ -260,6 +362,44 @@ def compare(baseline_rows, candidate_rows, episodes=None):
                 baseline["signed_lateral"], candidate["signed_lateral"]
             )
         )
+    if candidate["right_foot_inward"] > (
+        baseline["right_foot_inward"] + 0.004
+    ):
+        reasons.append(
+            "right-foot inward error increased {:.4f} -> {:.4f}".format(
+                baseline["right_foot_inward"],
+                candidate["right_foot_inward"],
+            )
+        )
+    if candidate["left_swing_action_motion"] > (
+        baseline["left_swing_action_motion"] * 1.03 + 0.005
+    ):
+        reasons.append(
+            "right-support/left-swing action motion increased "
+            "{:.4f} -> {:.4f}".format(
+                baseline["left_swing_action_motion"],
+                candidate["left_swing_action_motion"],
+            )
+        )
+    if candidate["left_swing_body_motion"] > (
+        baseline["left_swing_body_motion"] * 1.05 + 0.005
+    ):
+        reasons.append(
+            "right-support/left-swing body motion increased "
+            "{:.4f} -> {:.4f}".format(
+                baseline["left_swing_body_motion"],
+                candidate["left_swing_body_motion"],
+            )
+        )
+    if candidate["actor_symmetry_error"] > (
+        baseline["actor_symmetry_error"] * 1.05 + 0.002
+    ):
+        reasons.append(
+            "Actor reflection error increased {:.4f} -> {:.4f}".format(
+                baseline["actor_symmetry_error"],
+                candidate["actor_symmetry_error"],
+            )
+        )
 
     improvements = {
         "action_motion": (
@@ -272,6 +412,30 @@ def compare(baseline_rows, candidate_rows, episodes=None):
             baseline["signed_lateral"] - candidate["signed_lateral"]
         ),
         "max_lateral": baseline["max_lateral"] - candidate["max_lateral"],
+        "right_foot_inward": (
+            baseline["right_foot_inward"]
+            - candidate["right_foot_inward"]
+        ),
+        "right_support_motion": (
+            baseline["left_swing_action_motion"]
+            - candidate["left_swing_action_motion"]
+        ),
+        "phase_action_imbalance": (
+            baseline["phase_action_imbalance"]
+            - candidate["phase_action_imbalance"]
+        ),
+        "right_support_body_motion": (
+            baseline["left_swing_body_motion"]
+            - candidate["left_swing_body_motion"]
+        ),
+        "phase_body_imbalance": (
+            baseline["phase_body_imbalance"]
+            - candidate["phase_body_imbalance"]
+        ),
+        "actor_symmetry_error": (
+            baseline["actor_symmetry_error"]
+            - candidate["actor_symmetry_error"]
+        ),
     }
     material_improvements = sum(
         (
@@ -279,6 +443,12 @@ def compare(baseline_rows, candidate_rows, episodes=None):
             improvements["stride_imbalance"] >= 0.002,
             improvements["signed_lateral"] >= 0.002,
             improvements["max_lateral"] >= 0.002,
+            improvements["right_foot_inward"] >= 0.001,
+            improvements["right_support_motion"] >= 0.005,
+            improvements["phase_action_imbalance"] >= 0.005,
+            improvements["right_support_body_motion"] >= 0.005,
+            improvements["phase_body_imbalance"] >= 0.005,
+            improvements["actor_symmetry_error"] >= 0.002,
         )
     )
     style_gain = baseline["style_cost"] - candidate["style_cost"]

@@ -531,6 +531,18 @@ class N2StairsEnv(N2Env):
         self.swing_forward_displacement_count = torch.zeros_like(
             self.last_swing_forward_displacement
         )
+        # Track each foot independently in world Y.  Pelvis-only corridor
+        # metrics cannot identify an inward right-foot placement that later
+        # pushes the whole robot to the left.
+        self.foot_lateral_inward_error_sum = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
+        self.foot_lateral_position_sum = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
+        self.foot_lateral_sample_count = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -667,6 +679,18 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_mean_right_swing_length = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_left_foot_inward_error = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_right_foot_inward_error = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_left_foot_lateral_position = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_mean_right_foot_lateral_position = torch.zeros_like(
             self.best_forward_progress
         )
 
@@ -1897,6 +1921,47 @@ class N2StairsEnv(N2Env):
 
         return score, normalized_error, active.float()
 
+    def _foot_crossover_state(self):
+        """Return per-foot inward error and a symmetric stair activity mask.
+
+        World ``+Y`` is the robot's left side (verified by the URDF hip
+        anchors).  The left foot therefore needs positive centerline
+        clearance and the right foot negative clearance.  Converting both to
+        a signed outward clearance makes this calculation exactly symmetric.
+        """
+        relative_y = (
+            self.feet_pos[:, :, 1] - self.env_origins[:, 1].unsqueeze(1)
+        )
+        outward_clearance = torch.stack(
+            (relative_y[:, 0], -relative_y[:, 1]), dim=1
+        )
+        minimum_half_width = float(
+            self.cfg.env.foothold_min_half_width
+        )
+        inward_error = torch.clamp(
+            minimum_half_width - outward_clearance, min=0.0
+        )
+        normalizer = max(
+            float(self.cfg.env.foothold_crossover_normalizer), 1.0e-3
+        )
+        normalized_error = torch.clamp(
+            inward_error / normalizer, min=0.0, max=2.0
+        )
+
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
+        active = (
+            near_stairs
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return relative_y, inward_error, normalized_error, active
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_desired_contacts()
@@ -1921,6 +1986,25 @@ class N2StairsEnv(N2Env):
             self.max_climb_height, current_climb_height
         )
         self._update_foot_step_progress()
+
+        if self.enforce_walk_gait:
+            (
+                foot_lateral_position,
+                foot_lateral_inward_error,
+                _,
+                lateral_placement_active,
+            ) = self._foot_crossover_state()
+            lateral_samples = (
+                self.stable_contacts
+                & lateral_placement_active.unsqueeze(1)
+            )
+            self.foot_lateral_inward_error_sum += (
+                foot_lateral_inward_error * lateral_samples.float()
+            )
+            self.foot_lateral_position_sum += (
+                foot_lateral_position * lateral_samples.float()
+            )
+            self.foot_lateral_sample_count += lateral_samples.float()
 
         lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
         yaw = self.base_euler_xyz[:, 2]
@@ -2395,6 +2479,22 @@ class N2StairsEnv(N2Env):
         ) * valid.float().unsqueeze(1)
         mean_left_swing_length = mean_swing_lengths[:, 0]
         mean_right_swing_length = mean_swing_lengths[:, 1]
+        mean_foot_inward_error = (
+            self.foot_lateral_inward_error_sum[env_ids]
+            / torch.clamp(
+                self.foot_lateral_sample_count[env_ids], min=1.0
+            )
+        ) * valid.float().unsqueeze(1)
+        mean_foot_lateral_position = (
+            self.foot_lateral_position_sum[env_ids]
+            / torch.clamp(
+                self.foot_lateral_sample_count[env_ids], min=1.0
+            )
+        ) * valid.float().unsqueeze(1)
+        mean_left_foot_inward_error = mean_foot_inward_error[:, 0]
+        mean_right_foot_inward_error = mean_foot_inward_error[:, 1]
+        mean_left_foot_lateral_position = mean_foot_lateral_position[:, 0]
+        mean_right_foot_lateral_position = mean_foot_lateral_position[:, 1]
 
         self.last_episode_success[env_ids] = success
         self.last_episode_completion[env_ids] = completion
@@ -2473,6 +2573,18 @@ class N2StairsEnv(N2Env):
         )
         self.last_episode_mean_right_swing_length[env_ids] = (
             mean_right_swing_length
+        )
+        self.last_episode_mean_left_foot_inward_error[env_ids] = (
+            mean_left_foot_inward_error
+        )
+        self.last_episode_mean_right_foot_inward_error[env_ids] = (
+            mean_right_foot_inward_error
+        )
+        self.last_episode_mean_left_foot_lateral_position[env_ids] = (
+            mean_left_foot_lateral_position
+        )
+        self.last_episode_mean_right_foot_lateral_position[env_ids] = (
+            mean_right_foot_lateral_position
         )
 
         super().reset_idx(env_ids)
@@ -2600,6 +2712,18 @@ class N2StairsEnv(N2Env):
                 "stairs_mean_right_swing_length": masked_mean(
                     mean_right_swing_length
                 ),
+                "stairs_mean_left_foot_inward_error": masked_mean(
+                    mean_left_foot_inward_error
+                ),
+                "stairs_mean_right_foot_inward_error": masked_mean(
+                    mean_right_foot_inward_error
+                ),
+                "stairs_mean_left_foot_lateral_position": masked_mean(
+                    mean_left_foot_lateral_position
+                ),
+                "stairs_mean_right_foot_lateral_position": masked_mean(
+                    mean_right_foot_lateral_position
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -2662,6 +2786,9 @@ class N2StairsEnv(N2Env):
         self.swing_displacement_valid[env_ids] = False
         self.swing_forward_displacement_sum[env_ids] = 0.0
         self.swing_forward_displacement_count[env_ids] = 0.0
+        self.foot_lateral_inward_error_sum[env_ids] = 0.0
+        self.foot_lateral_position_sum[env_ids] = 0.0
+        self.foot_lateral_sample_count[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.completion_buf[env_ids] = False
@@ -3197,6 +3324,32 @@ class N2StairsEnv(N2Env):
         """Penalize crossing or widening the scheduled swing foothold."""
         _, normalized_error, active = self._next_tread_lateral_target_state()
         return torch.square(normalized_error) * active
+
+    def _reward_stairs_foot_crossover(self):
+        """Penalize either foot moving inward across its minimum half-width."""
+        _, _, normalized_error, active = self._foot_crossover_state()
+        return (
+            torch.mean(torch.square(normalized_error), dim=1)
+            * active.float()
+        )
+
+    def _reward_stairs_single_support_stability(self):
+        """Suppress roll/lateral shaking while exactly one foot supports."""
+        support = self.stable_contacts & self.contacts
+        single_support = torch.sum(support.int(), dim=1) == 1
+        roll_tilt = self.projected_gravity[:, 1]
+        roll_rate = self.base_ang_vel[:, 0]
+        lateral_velocity = self.base_lin_vel[:, 1]
+        cost = (
+            torch.square(roll_tilt)
+            + float(self.cfg.env.single_support_roll_rate_scale)
+            * torch.square(roll_rate)
+            + float(self.cfg.env.single_support_lateral_velocity_scale)
+            * torch.square(lateral_velocity)
+        )
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return cost * (single_support & moving & upright).float()
 
     def _reward_stairs_single_support(self):
         """Prefer a moving single-support gait over dual-foot hopping."""

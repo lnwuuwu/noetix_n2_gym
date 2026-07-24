@@ -103,6 +103,7 @@ class PPO:
         self.set_symmetry_config(symmetry_cfg)
         self.actor_reference = None
         self.actor_reference_loss_coeff = 0.0
+        self.actor_reference_symmetry_env = None
 
     def set_symmetry_config(self, symmetry_cfg):
         """Configure an optional exact actor-reflection consistency loss."""
@@ -127,20 +128,55 @@ class PPO:
                 raise ValueError("Symmetry loss coefficients cannot be negative")
         self.symmetry = symmetry_cfg
 
-    def set_actor_reference(self, loss_coefficient):
-        """Freeze the loaded Actor as a teacher that limits policy drift."""
+    def set_actor_reference(self, loss_coefficient, symmetry_env=None):
+        """Freeze the loaded Actor as an optional reflection-symmetric teacher.
+
+        A raw checkpoint teacher preserves every left/right bias in that
+        checkpoint.  When ``symmetry_env`` is supplied, the target instead
+        averages the teacher action with the mirrored teacher action:
+
+        ``0.5 * (T(o) + M_a(T(M_o(o))))``.
+
+        The resulting target is exactly reflection equivariant while still
+        retaining the checkpoint's state-dependent climbing behaviour.
+        """
         loss_coefficient = float(loss_coefficient)
         if loss_coefficient < 0.0:
             raise ValueError(
                 "Actor reference loss coefficient cannot be negative"
             )
+        if symmetry_env is not None and not (
+            hasattr(symmetry_env, "mirror_observations")
+            and hasattr(symmetry_env, "mirror_actions")
+        ):
+            raise ValueError(
+                "Symmetric Actor reference requires observation/action mirrors"
+            )
         self.actor_reference_loss_coeff = loss_coefficient
+        self.actor_reference_symmetry_env = symmetry_env
         if loss_coefficient == 0.0:
             self.actor_reference = None
+            self.actor_reference_symmetry_env = None
             return
         self.actor_reference = copy.deepcopy(self.policy.actor).to(self.device)
         self.actor_reference.eval()
         self.actor_reference.requires_grad_(False)
+
+    def _actor_reference_target(self, observations):
+        """Return the frozen raw or left/right-averaged teacher target."""
+        if self.actor_reference is None:
+            return None
+        with torch.no_grad():
+            direct = self.actor_reference(observations)
+            if self.actor_reference_symmetry_env is None:
+                return direct
+            symmetry_env = self.actor_reference_symmetry_env
+            mirrored_observations = symmetry_env.mirror_observations(
+                observations
+            )
+            mirrored = self.actor_reference(mirrored_observations)
+            reflected_back = symmetry_env.mirror_actions(mirrored)
+            return 0.5 * (direct + reflected_back)
 
     def init_storage(
         self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, actions_shape
@@ -359,8 +395,7 @@ class PPO:
                     )
             actor_reference_loss = torch.zeros((), device=self.device)
             if self.actor_reference is not None:
-                with torch.no_grad():
-                    reference_mean = self.actor_reference(obs_batch)
+                reference_mean = self._actor_reference_target(obs_batch)
                 actor_reference_loss = (
                     self.actor_reference_loss_coeff
                     * F.mse_loss(self.policy.action_mean, reference_mean)

@@ -90,6 +90,7 @@ def train(args):
         or args.actor_head_only
         or args.freeze_action_noise
         or args.actor_reference_loss_coeff > 0.0
+        or args.symmetrize_actor_reference
         or args.symmetry_loss_coeff > 0.0
         or args.actor_trainable_layers is not None
         or args.reward_scale_overrides is not None
@@ -127,6 +128,19 @@ def train(args):
             raise ValueError(
                 "--{} must be non-negative and finite".format(option_name)
             )
+    if (
+        args.symmetrize_actor_reference
+        and args.actor_reference_loss_coeff <= 0.0
+    ):
+        raise ValueError(
+            "--symmetrize_actor_reference requires a positive "
+            "--actor_reference_loss_coeff"
+        )
+    if args.symmetrize_actor_reference and args.task != "n2_stairs_walk":
+        raise ValueError(
+            "--symmetrize_actor_reference currently supports "
+            "n2_stairs_walk only"
+        )
 
     # 根据任务名称和参数创建环境实例
     # env: 环境对象，用于模拟和交互
@@ -293,10 +307,25 @@ def train(args):
         print("Checkpoint save interval: {}".format(save_interval))
     if args.actor_reference_loss_coeff > 0.0:
         coefficient = float(args.actor_reference_loss_coeff)
-        ppo_runner.alg.set_actor_reference(coefficient)
+        reference_symmetry_env = (
+            env if args.symmetrize_actor_reference else None
+        )
+        ppo_runner.alg.set_actor_reference(
+            coefficient, symmetry_env=reference_symmetry_env
+        )
         ppo_runner.alg_cfg["actor_reference_loss_coeff"] = coefficient
+        ppo_runner.alg_cfg["symmetrize_actor_reference"] = bool(
+            args.symmetrize_actor_reference
+        )
         print(
-            "Actor reference anchor: coefficient={:.4f}".format(coefficient)
+            "Actor reference anchor: coefficient={:.4f} teacher={}".format(
+                coefficient,
+                (
+                    "left/right averaged"
+                    if args.symmetrize_actor_reference
+                    else "raw checkpoint"
+                ),
+            )
         )
     trainable_actor_layers = args.actor_trainable_layers
     if args.actor_head_only:
@@ -461,6 +490,15 @@ if __name__ == '__main__':
                 "help": (
                     "Penalize deterministic Actor drift from the checkpoint "
                     "loaded at startup."
+                ),
+            },
+            {
+                "name": "--symmetrize_actor_reference",
+                "action": "store_true",
+                "default": False,
+                "help": (
+                    "Average the frozen checkpoint teacher with its mirrored "
+                    "action, removing checkpoint left/right bias."
                 ),
             },
             {
