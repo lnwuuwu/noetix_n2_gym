@@ -273,12 +273,19 @@ def train(args):
     if args.motion_file:
         train_cfg_dict["amp"]["motion_files"] = [args.motion_file]
 
+    import os
+    from datetime import datetime
+    from humanoid import LEGGED_GYM_ROOT_DIR
+    
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
+    log_dir = os.path.join(log_root, datetime.now().strftime('%m%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+
     # Use AMPOnPolicyRunner explicitly
     from humanoid.algo.amp.amp_runner import AMPOnPolicyRunner
     ppo_runner = AMPOnPolicyRunner(
         env,
         train_cfg_dict,
-        log_dir=log_root,
+        log_dir=log_dir,
         device=args.rl_device
     )
 
