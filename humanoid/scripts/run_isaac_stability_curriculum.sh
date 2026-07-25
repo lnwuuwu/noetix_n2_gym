@@ -14,25 +14,25 @@ INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 # afterwards; training is not restarted from model_9050 for each candidate.
 TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-400}"
 CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"
-EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-128}"
+EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-256}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
 # The inherited policy learns a low-step shuffle on 2/4 cm stairs. Focus
 # adaptation on 6--10 cm while retaining three riser heights.
 TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
-# model_9050 already climbs.  Give the last two Actor layers enough freedom to
-# reshape the gait, while a moderate teacher anchor and conservative learning
-# rate protect the climbing skill.  The previous 4-iteration search used a
-# 5--10x smaller rate, a 25x stronger anchor, and only the output layer.
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-1.0e-6}"
+# model_9050 already climbs.  Give the last three Actor layers enough freedom
+# to reshape the gait, while a stronger teacher anchor and moderate learning
+# rate protect the climbing skill.  The 5e-5 rate allows meaningful updates
+# within 400 iterations (prior 1e-6 was too conservative for any change).
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-5.0e-5}"
 ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.05}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.20}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.50}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
 SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.006}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
-ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
+ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-3}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.05}"
 REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.16,action_smoothness=-0.12,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-10,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-10,stairs_foot_lane_error=-6,stairs_single_support_stability=-5,stairs_right_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"

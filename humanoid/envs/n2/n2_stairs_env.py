@@ -1722,11 +1722,15 @@ class N2StairsEnv(N2Env):
         foot_riser_collision = torch.gather(
             self._foot_riser_collision_per_foot(), 1, gather_scalar
         ).squeeze(1)
-        collision_free = (
-            (lower_leg_collision <= 0.0)
-            & (foot_riser_collision <= 0.0)
+        # Soft collision gate: smooth sigmoid avoids a non-differentiable
+        # reward cliff at the collision boundary while still suppressing
+        # the positive tracking score during riser impacts.
+        collision_severity = torch.clamp(
+            torch.maximum(lower_leg_collision, foot_riser_collision),
+            min=0.0, max=1.0,
         )
-        score *= collision_free.float()
+        collision_gate = 1.0 - collision_severity
+        score *= collision_gate
         return score, squared_error, target_active.float()
 
     def _swing_timeout_state(self):
@@ -3446,7 +3450,9 @@ class N2StairsEnv(N2Env):
             self.feet_pos[:, :, :2]
         )
         clearance = self.feet_pos[:, :, 2] - foot_ground_height
-        if self.include_gait_phase:
+        if self.enforce_walk_gait:
+            swing = self._physical_airborne_mask()
+        elif self.include_gait_phase:
             swing = ~self.desired_contacts & ~self.contacts
         else:
             swing = ~self.contacts
