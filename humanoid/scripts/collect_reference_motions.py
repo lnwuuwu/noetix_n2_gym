@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import isaacgym  # 必须在 torch 前导入
 import torch
 import numpy as np
 
