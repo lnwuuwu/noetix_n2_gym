@@ -237,6 +237,10 @@ class AMPOnPolicyRunner(OnPolicyRunner):
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
+                stop = time.time()
+                collection_time = stop - start
+                start = stop
+
                 # 计算 GAE 回报
                 if self.training_type == "rl":
                     self.alg.compute_returns(privileged_obs)
@@ -245,6 +249,7 @@ class AMPOnPolicyRunner(OnPolicyRunner):
             loss_dict = self.alg.update()
 
             stop = time.time()
+            learn_time = stop - start
             self.current_learning_iteration = it + 1
 
             # 日志
