@@ -72,7 +72,7 @@ def build_full_frame(env):
 
 def collect(args):
     # 延迟导入, 避免 import 时就初始化 Isaac
-    from humanoid.utils import task_registry
+    from humanoid.utils.task_registry import task_registry
     from humanoid.algo.ppo.on_policy_runner import OnPolicyRunner
 
     # 加载环境配置
