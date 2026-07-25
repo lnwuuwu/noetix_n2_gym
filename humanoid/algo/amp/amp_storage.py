@@ -110,6 +110,6 @@ class AMPRolloutStorage(RolloutStorage):
                     old_actions_log_prob[batch_idx],
                     old_mu[batch_idx],
                     old_sigma[batch_idx],
-                    (None,),  # placeholder for hidden states
+                    (None, None),  # placeholder for hidden states
                     None,     # placeholder for masks
                 )
