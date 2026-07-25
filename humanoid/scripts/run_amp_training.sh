@@ -93,6 +93,7 @@ run_training() {
 
     python -u humanoid/scripts/train_amp.py \
         --task=n2_stairs_walk \
+        --resume \
         --model_path="${CHECKPOINT}" \
         --motion_file="${MOTION_FILE}" \
         --headless \

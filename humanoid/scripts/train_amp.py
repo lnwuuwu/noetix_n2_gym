@@ -262,8 +262,9 @@ def train(args):
         name=args.task, args=args, env_cfg=env_cfg
     )
     
-    from humanoid.utils.helpers import class_to_dict
+    from humanoid.utils.helpers import class_to_dict, update_cfg_from_args
     _, train_cfg = task_registry.get_cfgs(name=args.task)
+    _, train_cfg = update_cfg_from_args(None, train_cfg, args)
     train_cfg_dict = class_to_dict(train_cfg)
 
     # Inject AMP arguments
