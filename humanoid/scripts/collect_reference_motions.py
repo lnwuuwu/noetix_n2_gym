@@ -27,6 +27,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from humanoid.envs import *
+from humanoid.utils.task_registry import task_registry
+
 
 def build_full_frame(env):
     """从环境中提取 62 维全帧, 与 MotionLoaderNing 格式一致。
@@ -71,8 +74,6 @@ def build_full_frame(env):
 
 
 def collect(args):
-    from humanoid.envs import *
-    from humanoid.utils.task_registry import task_registry
     from humanoid.algo.ppo.on_policy_runner import OnPolicyRunner
 
     # 加载环境配置
