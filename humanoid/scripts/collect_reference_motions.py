@@ -75,6 +75,7 @@ def build_full_frame(env):
 
 def collect(args):
     from humanoid.algo.ppo.on_policy_runner import OnPolicyRunner
+    from humanoid.utils.helpers import class_to_dict
 
     # 加载环境配置
     env_cfg, train_cfg = task_registry.get_cfgs(name="n2_stairs_walk")
@@ -86,7 +87,7 @@ def collect(args):
     )
 
     # 加载策略
-    train_cfg_dict = vars(train_cfg) if not isinstance(train_cfg, dict) else train_cfg
+    train_cfg_dict = class_to_dict(train_cfg)
     runner = OnPolicyRunner(env, train_cfg_dict, log_dir=None, device=env.device)
 
     # 加载 checkpoint
