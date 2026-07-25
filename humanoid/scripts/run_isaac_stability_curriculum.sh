@@ -18,23 +18,23 @@ EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-256}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
 # The inherited policy learns a low-step shuffle on 2/4 cm stairs. Focus
 # adaptation on 6--10 cm while retaining three riser heights.
-TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"
+TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,2,3,4,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
-# model_9050 already climbs.  Give the last three Actor layers enough freedom
-# to reshape the gait, while a stronger teacher anchor and moderate learning
-# rate protect the climbing skill.  The 5e-5 rate allows meaningful updates
-# within 400 iterations (prior 1e-6 was too conservative for any change).
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-5.0e-5}"
+# model_9050 already climbs.  Give the last two Actor layers enough freedom
+# to reshape the gait, while a strong teacher anchor and conservative learning
+# rate protect the climbing skill.  5e-6 is a 5x uplift from the original 1e-6
+# but avoids the catastrophic forgetting seen at 5e-5.
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-5.0e-6}"
 ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.05}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.50}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-1.0}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
 SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.006}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
-ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-3}"
+ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.05}"
-REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.16,action_smoothness=-0.12,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-10,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-10,stairs_foot_lane_error=-6,stairs_single_support_stability=-5,stairs_right_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
+REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.12,action_smoothness=-0.08,dof_acc=-4e-7,stairs_lateral_drift=-12,stairs_heading_alignment=4,stairs_stride_symmetry=-5,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-3,stairs_foot_crossover=-6,stairs_foot_lane_error=-4,stairs_single_support_stability=-3,stairs_right_support_stability=-2,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
