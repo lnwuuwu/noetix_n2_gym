@@ -91,11 +91,10 @@ run_training() {
     STYLE_ZERO_OVERRIDES+=",stairs_foot_lane_error=0,stairs_single_support_stability=0"
     STYLE_ZERO_OVERRIDES+=",stairs_right_support_stability=0"
 
-    python -u humanoid/scripts/train.py \
+    python -u humanoid/scripts/train_amp.py \
         --task=n2_stairs_walk \
-        --resume \
-        --load_run="$(dirname "${CHECKPOINT}")" \
-        --checkpoint="$(basename "${CHECKPOINT}" .pt | sed 's/model_//')" \
+        --model_path="${CHECKPOINT}" \
+        --motion_file="${MOTION_FILE}" \
         --headless \
         --sim_device=cuda:0 \
         --rl_device=cuda:0 \
