@@ -71,7 +71,7 @@ collect_motions() {
     echo ""
     echo "[AMP] Step 1: Collecting reference motions..."
     python -u humanoid/scripts/collect_reference_motions.py \
-        --checkpoint "${CHECKPOINT}" \
+        --model_path "${CHECKPOINT}" \
         --output "${MOTION_FILE}" \
         --num_envs "${COLLECT_ENVS}" \
         --num_steps "${COLLECT_STEPS}"

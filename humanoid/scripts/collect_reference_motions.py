@@ -90,8 +90,8 @@ def collect(args):
     runner = OnPolicyRunner(env, train_cfg_dict, log_dir=None, device=env.device)
 
     # 加载 checkpoint
-    print(f"Loading checkpoint: {args.checkpoint}")
-    loaded = runner.load(args.checkpoint)
+    print(f"Loading checkpoint: {args.model_path}")
+    loaded = runner.load(args.model_path)
     policy = runner.get_inference_policy(device=env.device)
 
     sim_dt = getattr(env, "dt", 0.02)
@@ -156,7 +156,7 @@ def collect(args):
 def main():
     parser = argparse.ArgumentParser(description="Collect reference motions for AMP")
     parser.add_argument(
-        "--checkpoint",
+        "--model_path",
         type=str,
         required=True,
         help="Path to policy checkpoint (model_best.pt)",
@@ -169,7 +169,12 @@ def main():
     )
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--num_steps", type=int, default=500)
-    args = parser.parse_args()
+    
+    args, unknown = parser.parse_known_args()
+    
+    # 隐藏自定义参数，避免后续 isaacgym 解析 sys.argv 时报错
+    sys.argv = [sys.argv[0]] + unknown
+    
     collect(args)
 
 
