@@ -16,6 +16,7 @@ from humanoid.utils.faststair_planner import (
 )
 from humanoid.utils.stairs_terrain import (
     classify_tread_transition,
+    next_swing_phase_offset,
     retained_swing_support_mask,
     same_tread_support_mask,
     select_height_indices,
@@ -1207,6 +1208,42 @@ class N2StairsEnv(N2Env):
             dim=1,
         )
 
+    def _synchronize_phase_to_next_swing(
+        self,
+        reset_mask,
+        next_swing_foot,
+    ):
+        """Make the next physical swing request visible in the Actor clock.
+
+        FastStair's planner target is privileged, but its gait clock is an
+        Actor observation.  Without touchdown synchronization, the hidden
+        last-advanced-foot state can request one leg while the visible phase
+        requests the other, giving identical observations contradictory
+        rewards.  A normal advance schedules the opposite foot.  After a
+        step-to join, the joining foot is scheduled again so it can advance
+        instead of handing the next tread back to the repeated lead.
+        """
+        if not bool(
+            getattr(self.cfg.env, "contact_phase_reset", False)
+        ):
+            return
+        frequency = torch.where(
+            self.episode_gait_frequency > 0.0,
+            self.episode_gait_frequency,
+            self._scheduled_gait_frequency(),
+        )
+        elapsed = self.episode_length_buf.float() * self.dt
+        synchronized_offset = next_swing_phase_offset(
+            elapsed,
+            frequency,
+            next_swing_foot,
+        )
+        self.gait_phase_offset[:] = torch.where(
+            reset_mask,
+            synchronized_offset,
+            self.gait_phase_offset,
+        )
+
     def _reshape_critic_feature(self, name, value, expected_width):
         """Return one privileged-observation component as an ``(N, F)`` matrix."""
         raw_shape = tuple(value.shape)
@@ -2156,6 +2193,21 @@ class N2StairsEnv(N2Env):
                 same_tread_join
             ]
 
+            # Keep the deployable phase observation aligned with the physical
+            # sequence that the transition classifier just accepted.  A
+            # step-to join retries the joining foot; any true advance requests
+            # the opposite foot next.
+            phase_reset = advanced | same_tread_join
+            next_swing_foot = torch.where(
+                advanced,
+                1 - candidate_foot,
+                candidate_foot,
+            )
+            self._synchronize_phase_to_next_swing(
+                phase_reset,
+                next_swing_foot,
+            )
+
             event_one_hot = torch.nn.functional.one_hot(
                 candidate_foot, num_classes=len(self.feet_indices)
             ).float()
@@ -2499,19 +2551,18 @@ class N2StairsEnv(N2Env):
         return expected_foot, active
 
     def _faststair_discovery_state(self, expected_foot=None):
-        """Return dense pre-liftoff state for the phase-scheduled swing leg.
+        """Return dense pre-liftoff state for the required next swing leg.
 
-        Unlike the strict swing transaction used for touchdown scoring, this
-        state deliberately becomes active while the scheduled foot is still
-        supported.  It therefore supplies a learnable path from a stationary
-        policy to lift-off without paying reward during double support, after
-        the staircase, or while the opposite leg is unsupported.
+        The required foot comes from the same physical alternation state as
+        the DCM planner.  Touchdown phase synchronization makes this target
+        observable to the Actor.  Unlike the strict swing transaction used for
+        touchdown scoring, this state becomes active while that foot is still
+        supported, supplying a learnable path to lift-off without rewarding
+        the repeated lead.
         """
         scheduled_swing_mask = ~self.desired_contacts
         if expected_foot is None:
-            expected_foot = torch.argmax(
-                scheduled_swing_mask.long(), dim=1
-            )
+            expected_foot, _ = self._next_tread_swing_state()
         gather_scalar = expected_foot.unsqueeze(1)
         scheduled = torch.gather(
             scheduled_swing_mask.long(), 1, gather_scalar
@@ -2992,6 +3043,11 @@ class N2StairsEnv(N2Env):
             self.max_climb_height, current_climb_height
         )
         self._update_foot_step_progress()
+        if bool(getattr(self.cfg.env, "contact_phase_reset", False)):
+            # The landing above may have changed the clock offset.  Refresh
+            # the contact request before planning and before observations are
+            # assembled, avoiding a one-frame stale left/right target.
+            self._update_desired_contacts()
         self._update_faststair_plan()
 
         if self.enforce_walk_gait:
@@ -4198,16 +4254,18 @@ class N2StairsEnv(N2Env):
         return squared_error * active
 
     def _reward_faststair_liftoff(self):
-        """Reward scheduled-foot clearance before strict flight is detected."""
+        """Reward required-foot clearance before strict flight is detected."""
+        expected_foot, _ = self._next_tread_swing_state()
         _, active, clearance_progress, _ = (
-            self._faststair_discovery_state()
+            self._faststair_discovery_state(expected_foot)
         )
         return clearance_progress * active.float()
 
     def _reward_faststair_swing_progress(self):
-        """Reward forward motion of a supported, scheduled swing attempt."""
+        """Reward forward motion of the required opposite-foot attempt."""
+        expected_foot, _ = self._next_tread_swing_state()
         _, active, clearance_progress, forward_progress = (
-            self._faststair_discovery_state()
+            self._faststair_discovery_state(expected_foot)
         )
         # A small velocity term starts exploration; most reward requires real
         # clearance so sliding a planted foot cannot become the optimum.

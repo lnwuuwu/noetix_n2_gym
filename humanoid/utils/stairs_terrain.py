@@ -191,6 +191,21 @@ def classify_tread_transition(
     )
 
 
+def next_swing_phase_offset(elapsed, gait_frequency, next_swing_foot):
+    """Align the observable clock with the requested next swing foot.
+
+    Foot indices are left=0 and right=1.  The configured contact clock assigns
+    right swing to phase ``(0.0, 0.5)`` and left swing to ``(0.5, 1.0)``.
+    Returning an offset instead of a phase lets the caller retain its normal
+    elapsed-time clock while synchronizing it after a physical touchdown.
+    NumPy arrays, Torch tensors, and scalar numeric inputs are all supported.
+    """
+    swing_start_phase = 0.5 * (1 - next_swing_foot)
+    return (
+        swing_start_phase - elapsed * gait_frequency
+    ) % 1.0
+
+
 def validate_stair_parameters(
     terrain_length: float,
     terrain_width: float,

@@ -678,6 +678,10 @@ class N2FastStairCfg(N2StairsWalkCfg):
         # step-to policy can collect the same reward as natural stair-over-stair
         # gait.
         faststair_follow_physical_swing = False
+        # A physical landing realigns the deployable clock so the next visible
+        # half-cycle requests the same opposite foot as the planner/rewards.
+        # After a step-to join, the joining foot is immediately retried.
+        contact_phase_reset = True
 
         # 70 deployable proprio/navigation values + a 9 x 5 elevation map.
         num_single_obs = 115
@@ -856,9 +860,13 @@ class N2FastStairCfg(N2StairsWalkCfg):
             stairs_same_tread_join = -4.0
             stairs_same_tread_support = -1.5
             stairs_skipped_tread = -3.0
-            stairs_stride_symmetry = -2.0
-            stairs_right_stride_excess = -2.0
-            stairs_right_stride_excess_continuous = -1.0
+            stairs_stride_symmetry = -1.0
+            # Do not shorten the right swing before natural alternation is
+            # established.  In the inherited step-to gait the long right
+            # displacement is usually a trailing join; penalizing it directly
+            # suppresses right-foot tread advances and amplifies the defect.
+            stairs_right_stride_excess = 0.0
+            stairs_right_stride_excess_continuous = 0.0
 
             # The DCM target and the dense lane terms agree on distinct left
             # and right lanes. These close the observed loophole where the

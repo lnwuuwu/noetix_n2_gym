@@ -633,6 +633,8 @@ def evaluate(args):
         raise ValueError("--episodes_per_env must be positive")
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    if args.contact_phase_reset:
+        env_cfg.env.contact_phase_reset = True
     if args.resume:
         checkpoint_path = resolve_checkpoint_path(args, train_cfg)
         policy_metadata = residual_metadata_from_checkpoint(
@@ -834,6 +836,15 @@ if __name__ == "__main__":
             "help": (
                 "Inference-time mirrored-policy blend in [0, 0.5]. "
                 "Use 0.5 for an exactly reflection-equivariant diagnostic."
+            ),
+        },
+        {
+            "name": "--contact_phase_reset",
+            "action": "store_true",
+            "default": False,
+            "help": (
+                "Synchronize the gait clock after physical stair landings. "
+                "Used to compare a legacy Actor fairly with FastStair."
             ),
         },
     ]

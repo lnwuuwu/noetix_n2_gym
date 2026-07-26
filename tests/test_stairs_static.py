@@ -217,6 +217,23 @@ class StairGeometryTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(top_platform_walk, [6, 6, 0, 1, 0])
 
+    def test_touchdown_phase_reset_exposes_the_requested_next_foot(self):
+        elapsed = np.asarray([0.37, 1.91])
+        frequency = np.asarray([0.30, 0.23])
+        # right=1 starts its swing at phase zero; left=0 starts at phase 0.5.
+        next_foot = np.asarray([1, 0])
+        offset = self.geometry.next_swing_phase_offset(
+            elapsed,
+            frequency,
+            next_foot,
+        )
+        synchronized_phase = np.mod(offset + elapsed * frequency, 1.0)
+        np.testing.assert_allclose(
+            synchronized_phase,
+            [0.0, 0.5],
+            atol=1.0e-12,
+        )
+
     def test_stable_contact_rising_edge_drives_one_landing(self):
         previous = np.asarray([[True, False]])
 
@@ -1143,6 +1160,7 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertFalse(
                 faststair_cfg.env.faststair_follow_physical_swing
             )
+            self.assertTrue(faststair_cfg.env.contact_phase_reset)
             self.assertEqual(faststair_cfg.env.num_single_obs, 115)
             self.assertEqual(faststair_cfg.env.num_observations, 575)
             self.assertEqual(faststair_cfg.env.num_privileged_obs, 217)
@@ -1601,20 +1619,29 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn('NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"', launcher)
         self.assertIn("SAFE_TRAIN_ENV_LIMIT=1024", launcher)
         self.assertIn(
-            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.14}"',
+            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"',
             launcher,
         )
         self.assertIn(
-            'STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.16}"',
+            'STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-${COMMAND_SPEED}}"',
             launcher,
         )
         self.assertIn(
-            'STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.08}"',
+            'STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.05}"',
+            launcher,
+        )
+        self.assertIn(
+            'STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"',
             launcher,
         )
         self.assertIn("stairs_curriculum_completion=10", launcher)
-        self.assertIn("stairs_alternating_tread=8", launcher)
-        self.assertIn("stairs_swing_timeout=-4", launcher)
+        self.assertIn("stairs_alternating_tread=10", launcher)
+        self.assertIn("stairs_right_stride_excess=0", launcher)
+        self.assertIn("stairs_right_stride_excess_continuous=0", launcher)
+        self.assertIn("stairs_swing_timeout=-3", launcher)
+        self.assertIn("FASTSTAIR_SIGNAL_ALIGNMENT", launcher)
+        self.assertIn("--contact_phase_reset", launcher)
+        self.assertNotIn("if (( start_stage <= 1 )); then", launcher)
         self.assertIn("STAGE1_MIX=", launcher)
         self.assertIn("STAGE2_MIX=", launcher)
         self.assertIn("STAGE3_MIX=", launcher)
@@ -1626,6 +1653,54 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("model_screen_best.pt", launcher)
         self.assertIn("selected_checkpoint.txt", launcher)
         self.assertIn("stability_selected_s*/model_best.pt", launcher)
+
+    def test_faststair_dense_rewards_follow_the_physical_next_foot(self):
+        tree = parse_tree("humanoid/envs/n2/n2_stairs_env.py")
+        environment = nested_class(tree, "N2StairsEnv")
+        for method_name in (
+            "_reward_faststair_liftoff",
+            "_reward_faststair_swing_progress",
+        ):
+            method = next(
+                node
+                for node in environment.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == method_name
+            )
+            next_foot_calls = [
+                node
+                for node in ast.walk(method)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_next_tread_swing_state"
+            ]
+            discovery_calls = [
+                node
+                for node in ast.walk(method)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_faststair_discovery_state"
+            ]
+            self.assertEqual(len(next_foot_calls), 1)
+            self.assertEqual(len(discovery_calls), 1)
+            self.assertEqual(len(discovery_calls[0].args), 1)
+            self.assertIsInstance(discovery_calls[0].args[0], ast.Name)
+            self.assertEqual(
+                discovery_calls[0].args[0].id,
+                "expected_foot",
+            )
+
+        stairs_source = (
+            ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        ).read_text()
+        self.assertIn(
+            "def _synchronize_phase_to_next_swing",
+            stairs_source,
+        )
+        self.assertIn(
+            "phase_reset = advanced | same_tread_join",
+            stairs_source,
+        )
 
     def test_play_has_no_one_meter_per_second_override(self):
         play_source = (ROOT / "humanoid" / "scripts" / "play.py").read_text()

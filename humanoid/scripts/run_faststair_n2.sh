@@ -21,28 +21,28 @@ VIEW_PORT="${N2_STREAM_PORT:-18080}"
 ALLOW_PHYSX_OVERSUBSCRIPTION="${N2_FASTSTAIR_ALLOW_PHYSX_OVERSUBSCRIPTION:-0}"
 SAFE_TRAIN_ENV_LIMIT=1024
 
-CHECKPOINT_INTERVAL="${N2_FASTSTAIR_CHECKPOINT_INTERVAL:-100}"
+CHECKPOINT_INTERVAL="${N2_FASTSTAIR_CHECKPOINT_INTERVAL:-50}"
 STAGE1_ITERATIONS="${N2_FASTSTAIR_STAGE1_ITERATIONS:-400}"
 STAGE2_ITERATIONS="${N2_FASTSTAIR_STAGE2_ITERATIONS:-600}"
 STAGE3_ITERATIONS="${N2_FASTSTAIR_STAGE3_ITERATIONS:-800}"
 STAGE1_MIX="${N2_FASTSTAIR_STAGE1_MIX:-0}"
 STAGE2_MIX="${N2_FASTSTAIR_STAGE2_MIX:-0,0,1,1,2,2}"
 STAGE3_MIX="${N2_FASTSTAIR_STAGE3_MIX:-1,2,2,3,3,4,4,4}"
-STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.14}"
-STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.16}"
+STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"
+STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-${COMMAND_SPEED}}"
 STAGE3_SPEED="${N2_FASTSTAIR_STAGE3_SPEED:-${COMMAND_SPEED}}"
 STAGE1_LEARNING_RATE="${N2_FASTSTAIR_STAGE1_LR:-1.0e-5}"
 STAGE2_LEARNING_RATE="${N2_FASTSTAIR_STAGE2_LR:-7.0e-6}"
 STAGE3_LEARNING_RATE="${N2_FASTSTAIR_STAGE3_LR:-5.0e-6}"
-STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.08}"
-STAGE2_NOISE="${N2_FASTSTAIR_STAGE2_NOISE:-0.06}"
+STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.05}"
+STAGE2_NOISE="${N2_FASTSTAIR_STAGE2_NOISE:-0.05}"
 STAGE3_NOISE="${N2_FASTSTAIR_STAGE3_NOISE:-0.05}"
-STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.010}"
+STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"
 STAGE2_REFERENCE="${N2_FASTSTAIR_STAGE2_REFERENCE:-0.010}"
 STAGE3_REFERENCE="${N2_FASTSTAIR_STAGE3_REFERENCE:-0.005}"
-STAGE1_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE1_REWARDS:-stairs_completion=2,stairs_curriculum_completion=10,faststair_liftoff=4,faststair_swing_progress=3,stairs_phase_contact=2,stairs_phase_contact_mismatch=-2,stairs_alternating_tread=8,stairs_repeated_lead=-6,stairs_same_tread_join=-5,stairs_same_tread_support=-2,stairs_skipped_tread=-5,stairs_sagittal_foot_phase=0.75,stairs_sagittal_foot_phase_error=-0.4,stairs_stride_symmetry=-3,stairs_right_stride_excess=-4,stairs_right_stride_excess_continuous=-2,stairs_swing_timeout=-4,stairs_foothold_lateral=0.5,stairs_foothold_lateral_error=-0.5,stairs_foot_crossover=-2,stairs_foot_lane_error=-0.5,stairs_single_support_stability=-0.5,stairs_right_support_stability=-0.75,action_rate=-0.10,action_smoothness=-0.10}"
-STAGE2_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE2_REWARDS:-faststair_foothold=8,faststair_foothold_error=-8,stairs_alternating_tread=6,stairs_repeated_lead=-4,stairs_same_tread_join=-6,stairs_same_tread_support=-2,stairs_sagittal_foot_phase=0.75,stairs_sagittal_foot_phase_error=-0.35,stairs_stride_symmetry=-3,stairs_right_stride_excess=-3,stairs_right_stride_excess_continuous=-1.5,stairs_foothold_lateral=0.75,stairs_foothold_lateral_error=-0.75,stairs_foot_crossover=-3,stairs_foot_lane_error=-1,stairs_single_support_stability=-1,stairs_right_support_stability=-1.5,action_rate=-0.12,action_smoothness=-0.12}"
-STAGE3_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE3_REWARDS:-faststair_foothold=10,faststair_foothold_error=-10,stairs_alternating_tread=8,stairs_repeated_lead=-6,stairs_same_tread_join=-8,stairs_same_tread_support=-4,stairs_sagittal_foot_phase=1,stairs_sagittal_foot_phase_error=-0.5,stairs_stride_symmetry=-4,stairs_right_stride_excess=-4,stairs_right_stride_excess_continuous=-2,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-1,stairs_foot_crossover=-4,stairs_foot_lane_error=-1.5,stairs_single_support_stability=-1.5,stairs_right_support_stability=-2.5,action_rate=-0.15,action_smoothness=-0.15}"
+STAGE1_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE1_REWARDS:-stairs_completion=2,stairs_curriculum_completion=10,faststair_liftoff=4,faststair_swing_progress=3,stairs_phase_contact=2,stairs_phase_contact_mismatch=-3,stairs_alternating_tread=10,stairs_repeated_lead=-8,stairs_same_tread_join=-6,stairs_same_tread_support=-2,stairs_skipped_tread=-5,stairs_sagittal_foot_phase=0.75,stairs_sagittal_foot_phase_error=-0.4,stairs_stride_symmetry=-1,stairs_right_stride_excess=0,stairs_right_stride_excess_continuous=0,stairs_swing_timeout=-3,stairs_foothold_lateral=0.5,stairs_foothold_lateral_error=-0.5,stairs_foot_crossover=-2,stairs_foot_lane_error=-0.75,stairs_single_support_stability=-0.5,stairs_right_support_stability=-0.75,action_rate=-0.10,action_smoothness=-0.10}"
+STAGE2_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE2_REWARDS:-faststair_foothold=8,faststair_foothold_error=-8,stairs_alternating_tread=8,stairs_repeated_lead=-6,stairs_same_tread_join=-6,stairs_same_tread_support=-2,stairs_sagittal_foot_phase=0.75,stairs_sagittal_foot_phase_error=-0.35,stairs_stride_symmetry=-2,stairs_right_stride_excess=0,stairs_right_stride_excess_continuous=0,stairs_foothold_lateral=0.75,stairs_foothold_lateral_error=-0.75,stairs_foot_crossover=-3,stairs_foot_lane_error=-1,stairs_single_support_stability=-1,stairs_right_support_stability=-1.5,action_rate=-0.12,action_smoothness=-0.12}"
+STAGE3_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE3_REWARDS:-faststair_foothold=10,faststair_foothold_error=-10,stairs_alternating_tread=10,stairs_repeated_lead=-8,stairs_same_tread_join=-8,stairs_same_tread_support=-4,stairs_sagittal_foot_phase=1,stairs_sagittal_foot_phase_error=-0.5,stairs_stride_symmetry=-2.5,stairs_right_stride_excess=0,stairs_right_stride_excess_continuous=0,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-1,stairs_foot_crossover=-4,stairs_foot_lane_error=-1.5,stairs_single_support_stability=-1.5,stairs_right_support_stability=-2.5,action_rate=-0.15,action_smoothness=-0.15}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/faststair_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_faststair"
@@ -188,6 +188,11 @@ evaluate_checkpoint() {
     local eval_seed="$5"
     local episodes="$6"
     local command_speed="$7"
+    local synchronize_phase="${8:-false}"
+    local extra_options=()
+    if [[ "${synchronize_phase}" == "true" ]]; then
+        extra_options+=(--contact_phase_reset)
+    fi
     local iteration
     iteration="$(checkpoint_iteration "${checkpoint}")"
     run_child python -u humanoid/scripts/eval_stairs.py \
@@ -203,6 +208,7 @@ evaluate_checkpoint() {
         --terrain_levels=0,1,2,3,4 \
         "--command_speed=${command_speed}" \
         "--episodes_per_env=${episodes}" \
+        "${extra_options[@]}" \
         "--output=${output}"
 }
 
@@ -246,12 +252,12 @@ bootstrap_preflight() {
     # seeds before a single stochastic rollout can enter PPO.
     evaluate_checkpoint \
         n2_faststair "${checkpoint}" "${candidate_evaluation}" \
-        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}"
+        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}" true
     baseline_numbered="$(materialize_numbered_checkpoint \
         "${baseline}" "${work_dir}")"
     evaluate_checkpoint \
         n2_stairs_walk "${baseline_numbered}" "${baseline_evaluation}" \
-        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}"
+        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}" true
     run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
         --preflight \
         "--baseline=${baseline_evaluation}" \
@@ -483,10 +489,13 @@ validate_resume_source() {
     local checkpoint="$1"
     local start_stage="$2"
     local work_dir="$3"
-    if (( start_stage <= 1 )); then
-        return 0
+    # A diagnostic screen-best alias is not an approved source.  Stage 1 used
+    # to skip this check entirely, which allowed a rejected repeated-lead
+    # checkpoint to consume another long run and regress further.
+    local prerequisite_stage=1
+    if (( start_stage > 1 )); then
+        prerequisite_stage=$((start_stage - 1))
     fi
-    local prerequisite_stage=$((start_stage - 1))
     local numbered
     numbered="$(materialize_numbered_checkpoint "${checkpoint}" "${work_dir}")"
     local evaluation="${work_dir}/resume_stage_${prerequisite_stage}.csv"
@@ -562,6 +571,7 @@ run_training() {
     echo "FASTSTAIR_PHYSX_GUARD envs=${NUM_ENVS}/${SAFE_TRAIN_ENV_LIMIT} max_gpu_contact_pairs=16777216 buffer_multiplier=8"
     echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 actor_bootstrap=True critic_bootstrap=False schedule=fixed"
     echo "FASTSTAIR_ANTI_CHEAT planner_forces_opposite_foot=True natural_gait_stage_gates=True"
+    echo "FASTSTAIR_SIGNAL_ALIGNMENT contact_phase_reset=True dense_reward_uses_expected_foot=True asymmetric_right_stride_penalty=False"
     echo "FASTSTAIR_BOOTSTRAP checkpoint=${baseline}"
     if [[ -n "${RESUME_CHECKPOINT}" ]]; then
         if [[ ! -f "${RESUME_CHECKPOINT}" ]]; then
