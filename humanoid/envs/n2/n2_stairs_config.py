@@ -672,15 +672,16 @@ class N2FastStairCfg(N2StairsWalkCfg):
         enable_faststair_planner = True
         include_faststair_planner_privileged = True
         faststair_planner_obs_dim = 8
-        # Recovery motions remain physically legal, but only the foot opposite
-        # the last advancing foot receives the next DCM foothold target. If the
-        # planner follows whichever leg happens to lift, a repeated-lead or
-        # step-to policy can collect the same reward as natural stair-over-stair
-        # gait.
+        # Use a stable paired sequence: right foot leads onto the first tread,
+        # the trailing foot joins it, then the established lead advances again.
+        # A naturally alternating recovery remains physically valid and can
+        # still pass the safety gate, but the planner never gives contradictory
+        # "next tread" targets to a trailing join.
+        faststair_gait_mode = "paired_step_to"
+        faststair_preferred_lead_foot = 1
         faststair_follow_physical_swing = False
         # A physical landing realigns the deployable clock so the next visible
-        # half-cycle requests the same opposite foot as the planner/rewards.
-        # After a step-to join, the joining foot is immediately retried.
+        # half-cycle requests the same foot as the paired-step state machine.
         contact_phase_reset = True
 
         # 70 deployable proprio/navigation values + a 9 x 5 elevation map.
@@ -691,22 +692,34 @@ class N2FastStairCfg(N2StairsWalkCfg):
         # actuator randomization(54) + contacts(2) + map(77) + planner(8).
         num_privileged_obs = 217
 
-        # Physical completion remains a separate diagnostic. "Success" now
-        # means a stable climb with genuine support-to-support alternation; it
-        # cannot be earned by hopping, repeatedly leading with one foot, or
-        # joining both feet on every tread.
+        # Physical completion remains a separate diagnostic. Strict success
+        # accepts either natural stair-over-stair gait or a verified
+        # lead-and-join sequence; hopping and advancing again before the
+        # trailing foot arrives are still rejected.
         success_min_phase_contact_match = 0.65
         success_max_double_flight_fraction = 0.08
         success_min_alternating_tread_count = 3
         success_min_alternating_tread_rate = 0.50
         success_max_same_tread_join_rate = 0.25
+        success_min_paired_lead_advances = 4
+        success_min_paired_trailing_joins = 3
+        success_min_paired_sequence_rate = 0.60
+        success_min_paired_join_coverage = 0.50
+        success_max_paired_premature_rate = 0.25
+        success_min_actual_sole_support_fraction = 0.78
         success_max_skipped_tread_rate = 0.20
         success_max_sagittal_foot_separation = 0.42
-        # Intermediate logging/promotion is intentionally less strict, giving
-        # PPO a dense route from the inherited step-to gait to final gait.
+        # Intermediate promotion is deliberately reachable from the inherited
+        # checkpoint while still requiring multiple complete lead/join pairs.
         curriculum_min_alternating_tread_count = 1
         curriculum_min_alternating_tread_rate = 0.20
         curriculum_max_same_tread_join_rate = 0.40
+        curriculum_min_paired_lead_advances = 2
+        curriculum_min_paired_trailing_joins = 1
+        curriculum_min_paired_sequence_rate = 0.45
+        curriculum_min_paired_join_coverage = 0.30
+        curriculum_max_paired_premature_rate = 0.40
+        curriculum_min_actual_sole_support_fraction = 0.70
         curriculum_max_skipped_tread_rate = 0.30
         curriculum_min_phase_contact_match = 0.55
         curriculum_max_double_flight_fraction = 0.12
@@ -716,10 +729,12 @@ class N2FastStairCfg(N2StairsWalkCfg):
         # A bootstrapped policy has already completed the legacy-to-tread clock
         # transition, so FastStair uses that clock immediately. The launcher
         # nevertheless raises command speed gradually (0.14 -> 0.16 -> 0.18
-        # m/s): the easy row first has to remove the inherited repeated-lead
-        # gait before harder terrain is allowed to demand faster placements.
+        # m/s): the easy row first has to learn complete lead/join pairs before
+        # harder terrain is allowed to demand faster placements.
         gait_frequency_transition_steps = 0
-        randomize_gait_phase = True
+        # Phase zero begins with right swing, matching the preferred first
+        # lead. Physical touchdowns then keep the clock synchronized.
+        randomize_gait_phase = False
 
         # GPU candidate set: 35 terrain-checked placements around the nominal
         # foot lane.  The 18 cm sole still retains at least 5 mm of tread edge
@@ -741,6 +756,9 @@ class N2FastStairCfg(N2StairsWalkCfg):
         faststair_min_edge_margin = 0.005
         faststair_preferred_edge_margin = 0.035
         faststair_target_update_fraction = 0.15
+        # RPL-style dense *actual* sole support measurement. Unlike the planned
+        # edge margin, this samples the landed foot pose every stable stance.
+        faststair_sole_support_height_tolerance = 0.012
 
         # DCM/VHIP search limits and dimensionless costs.  The nominal term
         # prevents foot-lane drift, while the DCM term moves the landing only
@@ -855,16 +873,19 @@ class N2FastStairCfg(N2StairsWalkCfg):
             stairs_sagittal_foot_phase = 0.50
             stairs_sagittal_foot_phase_error = -0.25
             stairs_foot_step_progress = 2.0
-            stairs_alternating_tread = 4.0
-            stairs_repeated_lead = -3.0
-            stairs_same_tread_join = -4.0
-            stairs_same_tread_support = -1.5
+            stairs_alternating_tread = 0.5
+            stairs_repeated_lead = 0.0
+            stairs_same_tread_join = 0.0
+            stairs_same_tread_support = 0.0
+            stairs_paired_lead_advance = 4.0
+            stairs_paired_trailing_join = 5.0
+            stairs_paired_sequence_error = -6.0
             stairs_skipped_tread = -3.0
-            stairs_stride_symmetry = -1.0
-            # Do not shorten the right swing before natural alternation is
-            # established.  In the inherited step-to gait the long right
-            # displacement is usually a trailing join; penalizing it directly
-            # suppresses right-foot tread advances and amplifies the defect.
+            stairs_stride_symmetry = -0.5
+            stairs_sole_support_error = -2.0
+            # Do not add a one-sided stride target. The paired state machine
+            # supplies the asymmetry explicitly while lane, sole-support, and
+            # stability objectives remain left/right symmetric.
             stairs_right_stride_excess = 0.0
             stairs_right_stride_excess_continuous = 0.0
 

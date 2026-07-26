@@ -217,6 +217,73 @@ class StairGeometryTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(top_platform_walk, [6, 6, 0, 1, 0])
 
+    def test_paired_classifier_accepts_right_lead_then_left_join(self):
+        previous_tread = 0
+        previous_foot = -1
+        previous_joined_tread = -1
+        counts = np.zeros(5, dtype=np.int64)
+        sequence = [
+            (tread, foot)
+            for tread in range(1, 7)
+            for foot in (1, 0)
+        ]
+        for tread, foot in sequence:
+            result = self.geometry.classify_paired_step_transition(
+                np.asarray([True]),
+                np.asarray([tread]),
+                np.asarray([foot]),
+                np.asarray([previous_tread]),
+                np.asarray([previous_foot]),
+                np.asarray([previous_joined_tread]),
+                np.asarray([1]),
+            )
+            flags = np.asarray([bool(value[0]) for value in result])
+            counts += flags.astype(np.int64)
+            if tread > previous_tread:
+                previous_tread = tread
+                previous_foot = foot
+            elif tread == previous_tread and foot != previous_foot:
+                previous_joined_tread = tread
+        # lead advances, trailing joins, errors, premature advances, switches
+        np.testing.assert_array_equal(counts, [6, 6, 0, 0, 0])
+
+        premature = self.geometry.classify_paired_step_transition(
+            np.asarray([True]),
+            np.asarray([2]),
+            np.asarray([0]),
+            np.asarray([1]),
+            np.asarray([1]),
+            np.asarray([-1]),
+            np.asarray([1]),
+        )
+        self.assertTrue(bool(premature[2][0]))
+        self.assertTrue(bool(premature[3][0]))
+
+    def test_paired_sagittal_reference_leads_then_joins(self):
+        phase = np.asarray([0.0, 0.25, 0.5, 0.75, 1.0])
+        target = self.geometry.paired_sagittal_separation_target(
+            phase,
+            0.30,
+        )
+        np.testing.assert_allclose(
+            target,
+            [0.0, 0.15, 0.30, 0.15, 0.0],
+            atol=1.0e-9,
+        )
+
+    def test_paired_completion_waits_for_the_final_join(self):
+        advanced = np.asarray([5, 6, 6, 6])
+        joined = np.asarray([5, 5, 6, 7])
+        terminal = self.geometry.paired_step_terminal_mask(
+            advanced,
+            joined,
+            6,
+        )
+        np.testing.assert_array_equal(
+            terminal,
+            [False, False, True, True],
+        )
+
     def test_touchdown_phase_reset_exposes_the_requested_next_foot(self):
         elapsed = np.asarray([0.37, 1.91])
         frequency = np.asarray([0.30, 0.23])
@@ -1161,6 +1228,15 @@ class StairConfigurationTests(unittest.TestCase):
                 faststair_cfg.env.faststair_follow_physical_swing
             )
             self.assertTrue(faststair_cfg.env.contact_phase_reset)
+            self.assertEqual(
+                faststair_cfg.env.faststair_gait_mode,
+                "paired_step_to",
+            )
+            self.assertEqual(
+                faststair_cfg.env.faststair_preferred_lead_foot,
+                1,
+            )
+            self.assertFalse(faststair_cfg.env.randomize_gait_phase)
             self.assertEqual(faststair_cfg.env.num_single_obs, 115)
             self.assertEqual(faststair_cfg.env.num_observations, 575)
             self.assertEqual(faststair_cfg.env.num_privileged_obs, 217)
@@ -1195,16 +1271,20 @@ class StairConfigurationTests(unittest.TestCase):
                 35,
             )
             self.assertGreaterEqual(
-                faststair_cfg.env.success_min_alternating_tread_count,
+                faststair_cfg.env.success_min_paired_lead_advances,
+                4,
+            )
+            self.assertGreaterEqual(
+                faststair_cfg.env.success_min_paired_trailing_joins,
                 3,
             )
             self.assertGreaterEqual(
-                faststair_cfg.env.success_min_alternating_tread_rate,
-                0.50,
+                faststair_cfg.env.success_min_paired_sequence_rate,
+                0.60,
             )
-            self.assertLessEqual(
-                faststair_cfg.env.success_max_same_tread_join_rate,
-                0.25,
+            self.assertGreaterEqual(
+                faststair_cfg.env.success_min_actual_sole_support_fraction,
+                0.78,
             )
             self.assertEqual(
                 faststair_train_cfg.runner.experiment_name,
@@ -1379,11 +1459,18 @@ class StairConfigurationTests(unittest.TestCase):
             faststair_scales["faststair_foothold_error"], 0.0
         )
         self.assertGreater(
-            faststair_scales["stairs_alternating_tread"], 0.0
+            faststair_scales["stairs_paired_lead_advance"], 0.0
         )
-        self.assertLess(faststair_scales["stairs_repeated_lead"], 0.0)
-        self.assertLess(faststair_scales["stairs_same_tread_join"], 0.0)
+        self.assertGreater(
+            faststair_scales["stairs_paired_trailing_join"], 0.0
+        )
+        self.assertLess(
+            faststair_scales["stairs_paired_sequence_error"], 0.0
+        )
+        self.assertEqual(faststair_scales["stairs_repeated_lead"], 0.0)
+        self.assertEqual(faststair_scales["stairs_same_tread_join"], 0.0)
         self.assertLess(faststair_scales["stairs_stride_symmetry"], 0.0)
+        self.assertLess(faststair_scales["stairs_sole_support_error"], 0.0)
         self.assertLess(
             faststair_scales["stairs_right_support_stability"], 0.0
         )
@@ -1619,11 +1706,11 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn('NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"', launcher)
         self.assertIn("SAFE_TRAIN_ENV_LIMIT=1024", launcher)
         self.assertIn(
-            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"',
+            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.14}"',
             launcher,
         )
         self.assertIn(
-            'STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-${COMMAND_SPEED}}"',
+            'STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.16}"',
             launcher,
         )
         self.assertIn(
@@ -1631,11 +1718,14 @@ class StairConfigurationTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
-            'STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"',
+            'STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.010}"',
             launcher,
         )
         self.assertIn("stairs_curriculum_completion=10", launcher)
-        self.assertIn("stairs_alternating_tread=10", launcher)
+        self.assertIn("stairs_paired_lead_advance=8", launcher)
+        self.assertIn("stairs_paired_trailing_join=10", launcher)
+        self.assertIn("stairs_paired_sequence_error=-8", launcher)
+        self.assertIn("stairs_sole_support_error=-3", launcher)
         self.assertIn("stairs_right_stride_excess=0", launcher)
         self.assertIn("stairs_right_stride_excess_continuous=0", launcher)
         self.assertIn("stairs_swing_timeout=-3", launcher)
@@ -1701,6 +1791,10 @@ class StairConfigurationTests(unittest.TestCase):
             "phase_reset = advanced | same_tread_join",
             stairs_source,
         )
+        self.assertIn(
+            "classify_paired_step_transition",
+            stairs_source,
+        )
 
     def test_play_has_no_one_meter_per_second_override(self):
         play_source = (ROOT / "humanoid" / "scripts" / "play.py").read_text()
@@ -1727,6 +1821,11 @@ class StairConfigurationTests(unittest.TestCase):
             "mean_alternating_tread_rate",
             "mean_repeated_lead_rate",
             "mean_same_tread_join_rate",
+            "mean_paired_lead_advances",
+            "mean_paired_trailing_joins",
+            "mean_paired_sequence_rate",
+            "mean_paired_join_coverage",
+            "mean_paired_premature_rate",
             "mean_skipped_tread_rate",
             "mean_max_sagittal_foot_separation_m",
             "mean_swing_knee_flexion_rad",
@@ -1741,6 +1840,7 @@ class StairConfigurationTests(unittest.TestCase):
             "mean_max_swing_duration",
             "mean_left_tread_advances",
             "mean_right_tread_advances",
+            "mean_actual_sole_support_fraction",
         ):
             self.assertIn(metric, eval_source)
 

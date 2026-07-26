@@ -35,12 +35,19 @@ FIELDS = (
     "mean_alternating_tread_rate",
     "mean_repeated_lead_rate",
     "mean_same_tread_join_rate",
+    "mean_paired_lead_advances",
+    "mean_paired_trailing_joins",
+    "mean_paired_sequence_rate",
+    "mean_paired_join_coverage",
+    "mean_paired_premature_rate",
+    "mean_paired_lead_switch_rate",
     "mean_left_tread_advances",
     "mean_right_tread_advances",
     "mean_left_swing_length_m",
     "mean_right_swing_length_m",
     "mean_left_swing_action_accel_rms",
     "mean_left_swing_roll_rate_rms",
+    "mean_actual_sole_support_fraction",
 )
 
 
@@ -65,16 +72,23 @@ def capable_rows():
             "mean_faststair_edge_margin_m": 0.02,
             "mean_phase_contact_match": 0.76,
             "mean_sagittal_foot_phase_match": 0.80,
-            "mean_alternating_tread_count": 3.2,
-            "mean_alternating_tread_rate": 0.55,
-            "mean_repeated_lead_rate": 0.05,
-            "mean_same_tread_join_rate": 0.15,
-            "mean_left_tread_advances": 2.8,
-            "mean_right_tread_advances": 2.7,
+            "mean_alternating_tread_count": 0.2,
+            "mean_alternating_tread_rate": 0.03,
+            "mean_repeated_lead_rate": 0.45,
+            "mean_same_tread_join_rate": 0.45,
+            "mean_paired_lead_advances": 4.5,
+            "mean_paired_trailing_joins": 4.0,
+            "mean_paired_sequence_rate": 0.90,
+            "mean_paired_join_coverage": 0.85,
+            "mean_paired_premature_rate": 0.05,
+            "mean_paired_lead_switch_rate": 0.02,
+            "mean_left_tread_advances": 0.2,
+            "mean_right_tread_advances": 4.5,
             "mean_left_swing_length_m": 0.17,
-            "mean_right_swing_length_m": 0.18,
+            "mean_right_swing_length_m": 0.28,
             "mean_left_swing_action_accel_rms": 0.50,
             "mean_left_swing_roll_rate_rms": 0.50,
+            "mean_actual_sole_support_fraction": 0.90,
         }
     return rows
 
@@ -133,40 +147,45 @@ class FastStairSelectorTests(unittest.TestCase):
         reasons = preflight_gate(candidate, baseline)
         self.assertTrue(any("2 cm completion" in reason for reason in reasons))
 
-    def test_step_to_policy_can_bootstrap_but_cannot_be_promoted(self):
-        baseline = capable_rows()
-        candidate = capable_rows()
-        candidate[0].update(
-            {
-                "mean_alternating_tread_count": 0.0,
-                "mean_alternating_tread_rate": 0.0,
-                "mean_same_tread_join_rate": 0.20,
-                "mean_left_tread_advances": 3.0,
-                "mean_right_tread_advances": 0.9,
-                "mean_left_swing_length_m": 0.17,
-                "mean_right_swing_length_m": 0.29,
-            }
-        )
-        self.assertEqual(preflight_gate(candidate, baseline), [])
-        reasons = stage_gate(candidate, 1)
-        self.assertTrue(any("alternating-tread count" in reason for reason in reasons))
-        self.assertTrue(any("each foot" in reason for reason in reasons))
-        self.assertTrue(any("tread-advance imbalance" in reason for reason in reasons))
+    def test_verified_lead_and_join_policy_can_be_promoted(self):
+        rows = capable_rows()
+        self.assertEqual(stage_gate(rows, 1), [])
+        self.assertEqual(stage_gate(rows, 2), [])
+        self.assertEqual(absolute_gate(rows), [])
 
-    def test_physical_climb_with_step_to_gait_cannot_be_final_best(self):
+    def test_unpaired_repeated_lead_shortcut_cannot_be_final_best(self):
         rows = capable_rows()
         for level in (3, 4):
-            rows[level]["success_rate"] = 0.0
-            rows[level]["mean_alternating_tread_count"] = 0.2
-            rows[level]["mean_alternating_tread_rate"] = 0.02
-            rows[level]["mean_same_tread_join_rate"] = 0.34
-            rows[level]["mean_left_swing_length_m"] = 0.11
-            rows[level]["mean_right_swing_length_m"] = 0.23
+            rows[level]["mean_paired_trailing_joins"] = 0.2
+            rows[level]["mean_paired_sequence_rate"] = 0.30
+            rows[level]["mean_paired_join_coverage"] = 0.05
+            rows[level]["mean_paired_premature_rate"] = 0.80
         reasons = absolute_gate(rows)
-        self.assertTrue(any("natural-gait success" in reason for reason in reasons))
-        self.assertTrue(any("alternating-tread count" in reason for reason in reasons))
-        self.assertTrue(any("same-tread join" in reason for reason in reasons))
-        self.assertTrue(any("swing-length imbalance" in reason for reason in reasons))
+        self.assertTrue(
+            any("verified lead/join sequence" in reason for reason in reasons)
+        )
+
+    def test_natural_alternating_policy_is_still_accepted(self):
+        rows = capable_rows()
+        for row in rows.values():
+            row.update(
+                {
+                    "mean_alternating_tread_count": 3.2,
+                    "mean_alternating_tread_rate": 0.55,
+                    "mean_repeated_lead_rate": 0.05,
+                    "mean_same_tread_join_rate": 0.15,
+                    "mean_paired_lead_advances": 0.0,
+                    "mean_paired_trailing_joins": 0.0,
+                    "mean_paired_sequence_rate": 0.0,
+                    "mean_paired_join_coverage": 0.0,
+                    "mean_paired_premature_rate": 0.0,
+                    "mean_left_tread_advances": 2.8,
+                    "mean_right_tread_advances": 2.7,
+                    "mean_left_swing_length_m": 0.17,
+                    "mean_right_swing_length_m": 0.18,
+                }
+            )
+        self.assertEqual(absolute_gate(rows), [])
 
     def test_stage_two_requires_six_centimeter_capability(self):
         rows = capable_rows()

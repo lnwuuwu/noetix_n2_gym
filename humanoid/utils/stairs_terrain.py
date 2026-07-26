@@ -32,6 +32,30 @@ def _smootherstep01(value):
     return value**3 * (10.0 - 15.0 * value + 6.0 * value**2)
 
 
+def paired_sagittal_separation_target(phase, amplitude):
+    """Return a C2 right-lead, left-join foot-separation reference.
+
+    At phase zero both feet are together. The right foot smoothly moves one
+    nominal tread ahead by phase 0.5, then the left foot closes the gap by the
+    next phase zero. ``phase`` may be a NumPy array or Torch tensor.
+    """
+    distance_from_lead_touchdown = abs(2.0 * phase - 1.0)
+    return amplitude * (
+        1.0 - _smootherstep01(distance_from_lead_touchdown)
+    )
+
+
+def paired_step_terminal_mask(
+    last_advanced_tread,
+    last_joined_tread,
+    num_steps,
+):
+    """Require the trailing foot to close the final lead-foot advance."""
+    reached_final_tread = last_advanced_tread >= num_steps
+    joined_final_tread = last_joined_tread >= last_advanced_tread
+    return reached_final_tread & joined_final_tread
+
+
 def smooth_swing_trajectory(
     start,
     landing,
@@ -188,6 +212,85 @@ def classify_tread_transition(
         repeated_lead,
         same_tread_join,
         skipped_tread,
+    )
+
+
+def classify_paired_step_transition(
+    valid_landing,
+    candidate_tread,
+    candidate_foot,
+    previous_tread,
+    previous_foot,
+    previous_joined_tread,
+    preferred_lead_foot,
+):
+    """Classify a stable lead-and-join (step-to) stair sequence.
+
+    A valid pair consists of the lead foot advancing exactly one tread and the
+    trailing foot subsequently joining that same tread.  The configured lead
+    foot is required only for the first riser.  Afterwards the physically
+    established lead is retained, which lets the controller recover from one
+    wrong-foot landing without making all later targets contradictory.
+
+    The returned values are ``lead_advance``, ``trailing_join``,
+    ``sequence_error``, ``premature_advance``, and ``lead_switch``.  Inputs may
+    be NumPy arrays, Torch tensors, or compatible scalar values.
+    """
+    (
+        advanced,
+        _,
+        _,
+        same_tread_join,
+        _,
+    ) = classify_tread_transition(
+        valid_landing,
+        candidate_tread,
+        candidate_foot,
+        previous_tread,
+        previous_foot,
+        previous_joined_tread,
+    )
+    sequential = candidate_tread == (previous_tread + 1)
+    first_advance = previous_foot < 0
+    previous_pair_complete = (
+        (previous_tread == 0)
+        | (previous_joined_tread >= previous_tread)
+    )
+    expected_lead_match = (
+        first_advance & (candidate_foot == preferred_lead_foot)
+    ) | (
+        ~first_advance & (candidate_foot == previous_foot)
+    )
+    lead_advance = (
+        advanced
+        & sequential
+        & previous_pair_complete
+        & expected_lead_match
+    )
+    trailing_join = (
+        same_tread_join
+        & (previous_foot >= 0)
+        & (candidate_foot != previous_foot)
+    )
+    transition = advanced | same_tread_join
+    sequence_error = transition & ~(lead_advance | trailing_join)
+    premature_advance = (
+        advanced
+        & (previous_tread > 0)
+        & (previous_joined_tread < previous_tread)
+    )
+    lead_switch = (
+        advanced
+        & sequential
+        & (previous_foot >= 0)
+        & (candidate_foot != previous_foot)
+    )
+    return (
+        lead_advance,
+        trailing_join,
+        sequence_error,
+        premature_advance,
+        lead_switch,
     )
 
 

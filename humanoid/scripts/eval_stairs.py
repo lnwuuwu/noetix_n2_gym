@@ -265,6 +265,36 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                                 env_id
                             ].item()
                         ),
+                        "paired_lead_advances": float(
+                            env.last_episode_paired_lead_advances[
+                                env_id
+                            ].item()
+                        ),
+                        "paired_trailing_joins": float(
+                            env.last_episode_paired_trailing_joins[
+                                env_id
+                            ].item()
+                        ),
+                        "paired_sequence_rate": float(
+                            env.last_episode_paired_sequence_rate[
+                                env_id
+                            ].item()
+                        ),
+                        "paired_join_coverage": float(
+                            env.last_episode_paired_join_coverage[
+                                env_id
+                            ].item()
+                        ),
+                        "paired_premature_rate": float(
+                            env.last_episode_paired_premature_rate[
+                                env_id
+                            ].item()
+                        ),
+                        "paired_lead_switch_rate": float(
+                            env.last_episode_paired_lead_switch_rate[
+                                env_id
+                            ].item()
+                        ),
                         "skipped_tread_rate": float(
                             env.last_episode_skipped_tread_rate[env_id].item()
                         ),
@@ -370,6 +400,11 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                         ),
                         "faststair_edge_margin_m": float(
                             env.last_episode_faststair_edge_margin[
+                                env_id
+                            ].item()
+                        ),
+                        "actual_sole_support_fraction": float(
+                            env.last_episode_actual_sole_support_fraction[
                                 env_id
                             ].item()
                         ),
@@ -537,6 +572,14 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "mean_alternating_tread_rate": mean("alternating_tread_rate"),
         "mean_repeated_lead_rate": mean("repeated_lead_rate"),
         "mean_same_tread_join_rate": mean("same_tread_join_rate"),
+        "mean_paired_lead_advances": mean("paired_lead_advances"),
+        "mean_paired_trailing_joins": mean("paired_trailing_joins"),
+        "mean_paired_sequence_rate": mean("paired_sequence_rate"),
+        "mean_paired_join_coverage": mean("paired_join_coverage"),
+        "mean_paired_premature_rate": mean("paired_premature_rate"),
+        "mean_paired_lead_switch_rate": mean(
+            "paired_lead_switch_rate"
+        ),
         "mean_skipped_tread_rate": mean("skipped_tread_rate"),
         "mean_max_sagittal_foot_separation_m": mean(
             "max_sagittal_foot_separation_m"
@@ -586,6 +629,9 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         ),
         "mean_faststair_edge_margin_m": mean(
             "faststair_edge_margin_m"
+        ),
+        "mean_actual_sole_support_fraction": mean(
+            "actual_sole_support_fraction"
         ),
         "mean_action_rate_rms": mean("action_rate_rms"),
         "mean_action_accel_rms": mean("action_accel_rms"),
@@ -720,6 +766,11 @@ def evaluate(args):
             "flight={mean_double_flight_fraction:.1%} "
             "alternate={mean_alternating_tread_rate:.1%} "
             "join={mean_same_tread_join_rate:.1%} "
+            "pair=L{mean_paired_lead_advances:.2f}/"
+            "J{mean_paired_trailing_joins:.2f} "
+            "pair_rate={mean_paired_sequence_rate:.1%} "
+            "pair_cover={mean_paired_join_coverage:.1%} "
+            "premature={mean_paired_premature_rate:.1%} "
             "step-to={mean_same_tread_support_fraction:.1%} "
             "shin={mean_lower_leg_collision_fraction:.1%} "
             "riser={mean_foot_riser_collision_fraction:.1%} "
@@ -748,6 +799,7 @@ def evaluate(args):
             "plan_valid={mean_faststair_planner_valid_fraction:.1%} "
             "plan_err={mean_faststair_foothold_error_m:.3f}m "
             "edge={mean_faststair_edge_margin_m:.3f}m "
+            "sole={mean_actual_sole_support_fraction:.1%} "
             "arm={mean_arm_swing_match:.2f} "
             "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(

@@ -15,8 +15,11 @@ from humanoid.utils.faststair_planner import (
     rectangular_search_offsets,
 )
 from humanoid.utils.stairs_terrain import (
+    classify_paired_step_transition,
     classify_tread_transition,
     next_swing_phase_offset,
+    paired_sagittal_separation_target,
+    paired_step_terminal_mask,
     retained_swing_support_mask,
     same_tread_support_mask,
     select_height_indices,
@@ -341,6 +344,28 @@ class N2StairsEnv(N2Env):
         self.enable_faststair_planner = bool(
             getattr(self.cfg.env, "enable_faststair_planner", False)
         )
+        self.faststair_gait_mode = str(
+            getattr(self.cfg.env, "faststair_gait_mode", "alternating")
+        )
+        self.faststair_paired_step = (
+            self.faststair_gait_mode == "paired_step_to"
+        )
+        self.faststair_preferred_lead_foot = int(
+            getattr(self.cfg.env, "faststair_preferred_lead_foot", 1)
+        )
+        if self.faststair_gait_mode not in (
+            "alternating",
+            "paired_step_to",
+        ):
+            raise ValueError(
+                "Unsupported FastStair gait mode: {}".format(
+                    self.faststair_gait_mode
+                )
+            )
+        if self.faststair_preferred_lead_foot not in (0, 1):
+            raise ValueError(
+                "faststair_preferred_lead_foot must be 0 (left) or 1 (right)"
+            )
         self.include_faststair_planner_privileged = bool(
             getattr(
                 self.cfg.env,
@@ -555,6 +580,23 @@ class N2StairsEnv(N2Env):
                 (-faststair_half_length, faststair_half_width),
                 (faststair_half_length, -faststair_half_width),
                 (faststair_half_length, faststair_half_width),
+            ),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.faststair_sole_offsets = torch.tensor(
+            tuple(
+                (x, y)
+                for x in (
+                    -faststair_half_length,
+                    0.0,
+                    faststair_half_length,
+                )
+                for y in (
+                    -faststair_half_width,
+                    0.0,
+                    faststair_half_width,
+                )
             ),
             dtype=torch.float,
             device=self.device,
@@ -775,6 +817,15 @@ class N2StairsEnv(N2Env):
         self.same_tread_join_event = torch.zeros_like(
             self.best_forward_progress
         )
+        self.paired_lead_advance_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_trailing_join_event = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_sequence_error_event = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.skipped_tread_event = torch.zeros_like(
             self.best_forward_progress
         )
@@ -788,6 +839,21 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.same_tread_join_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_lead_advance_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_trailing_join_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_sequence_error_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_premature_advance_count = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.paired_lead_switch_count = torch.zeros_like(
             self.best_forward_progress
         )
         self.skipped_tread_count = torch.zeros_like(
@@ -919,6 +985,18 @@ class N2StairsEnv(N2Env):
         self.foot_lateral_sample_count = torch.zeros_like(
             self.last_swing_forward_displacement
         )
+        self.sole_support_fraction = torch.ones_like(
+            self.last_swing_forward_displacement
+        )
+        self.sole_support_active = torch.zeros_like(
+            self.swing_displacement_valid
+        )
+        self.sole_support_fraction_sum = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
+        self.sole_support_sample_count = torch.zeros_like(
+            self.last_swing_forward_displacement
+        )
         self.top_reached_buf = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -1006,6 +1084,24 @@ class N2StairsEnv(N2Env):
         self.last_episode_same_tread_join_rate = torch.zeros_like(
             self.best_forward_progress
         )
+        self.last_episode_paired_lead_advances = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_paired_trailing_joins = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_paired_sequence_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_paired_join_coverage = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_paired_premature_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_paired_lead_switch_rate = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.last_episode_skipped_tread_rate = torch.zeros_like(
             self.best_forward_progress
         )
@@ -1076,6 +1172,9 @@ class N2StairsEnv(N2Env):
             self.best_forward_progress
         )
         self.last_episode_faststair_edge_margin = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_actual_sole_support_fraction = torch.zeros_like(
             self.best_forward_progress
         )
 
@@ -1219,9 +1318,8 @@ class N2StairsEnv(N2Env):
         Actor observation.  Without touchdown synchronization, the hidden
         last-advanced-foot state can request one leg while the visible phase
         requests the other, giving identical observations contradictory
-        rewards.  A normal advance schedules the opposite foot.  After a
-        step-to join, the joining foot is scheduled again so it can advance
-        instead of handing the next tread back to the repeated lead.
+        rewards. In paired mode, a lead advance schedules the trailing join;
+        that join then schedules the established lead for the next tread.
         """
         if not bool(
             getattr(self.cfg.env, "contact_phase_reset", False)
@@ -1295,11 +1393,7 @@ class N2StairsEnv(N2Env):
         types = self.terrain_types
         stair_start_x = self.stair_start_x[levels, types]
         _, _, step_height = self._current_stair_targets()
-        next_tread = torch.clamp(
-            self.last_advanced_tread + 1,
-            min=1,
-            max=int(self.cfg.terrain.num_steps),
-        )
+        _, next_tread, _ = self._faststair_step_target_state()
         landing_x = stair_start_x + (
             next_tread.float() - 0.5
         ) * float(self.cfg.terrain.step_width)
@@ -1340,10 +1434,11 @@ class N2StairsEnv(N2Env):
             stair_start_x
             - float(self.cfg.env.first_tread_target_activation_distance)
         )
+        _, _, sequence_unfinished = self._faststair_step_target_state()
         target_active = (
             (scheduled_swing | transaction_active)
             & near_stairs
-            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+            & sequence_unfinished
         )
         normalizers = torch.tensor(
             [
@@ -1586,17 +1681,129 @@ class N2StairsEnv(N2Env):
         py = torch.clamp(points[..., 1], 0, self.height_samples.shape[1] - 1)
         return self.height_samples[px, py] * self.terrain.cfg.vertical_scale
 
+    def _faststair_step_target_state(self):
+        """Return expected foot, target tread, and unfinished-sequence mask."""
+        maximum_tread = int(self.cfg.terrain.num_steps)
+        if not self.faststair_paired_step:
+            target_tread = torch.clamp(
+                self.last_advanced_tread + 1,
+                min=1,
+                max=maximum_tread,
+            )
+            expected_foot = torch.where(
+                self.last_advanced_foot < 0,
+                torch.full_like(
+                    self.last_advanced_foot,
+                    self.faststair_preferred_lead_foot,
+                ),
+                torch.clamp(
+                    1 - self.last_advanced_foot,
+                    min=0,
+                    max=1,
+                ),
+            )
+            return (
+                expected_foot,
+                target_tread,
+                self.last_advanced_tread < maximum_tread,
+            )
+
+        has_leader = self.last_advanced_foot >= 0
+        leader = torch.where(
+            has_leader,
+            self.last_advanced_foot,
+            torch.full_like(
+                self.last_advanced_foot,
+                self.faststair_preferred_lead_foot,
+            ),
+        )
+        waiting_for_join = (
+            has_leader
+            & (self.last_advanced_tread > 0)
+            & (self.last_joined_tread < self.last_advanced_tread)
+        )
+        expected_foot = torch.where(
+            waiting_for_join,
+            1 - leader,
+            leader,
+        )
+        target_tread = torch.where(
+            waiting_for_join,
+            self.last_advanced_tread,
+            self.last_advanced_tread + 1,
+        )
+        target_tread = torch.clamp(
+            target_tread,
+            min=1,
+            max=maximum_tread,
+        )
+        unfinished = (
+            (self.last_advanced_tread < maximum_tread)
+            | waiting_for_join
+        )
+        return expected_foot, target_tread, unfinished
+
+    def _actual_sole_support_state(self):
+        """Measure how much of each landed sole is on its accepted tread."""
+        feet_quat = self.feet_quat.reshape(-1, 4)
+        _, _, foot_yaw = get_euler_xyz(feet_quat)
+        foot_yaw = torch.atan2(
+            torch.sin(foot_yaw), torch.cos(foot_yaw)
+        ).reshape(self.num_envs, len(self.feet_indices))
+        cosine = torch.cos(foot_yaw).unsqueeze(2)
+        sine = torch.sin(foot_yaw).unsqueeze(2)
+        local_x = self.faststair_sole_offsets[:, 0].view(1, 1, -1)
+        local_y = self.faststair_sole_offsets[:, 1].view(1, 1, -1)
+        sample_x = (
+            self.feet_pos[:, :, 0].unsqueeze(2)
+            + cosine * local_x
+            - sine * local_y
+        )
+        sample_y = (
+            self.feet_pos[:, :, 1].unsqueeze(2)
+            + sine * local_x
+            + cosine * local_y
+        )
+        sample_xy = torch.stack((sample_x, sample_y), dim=3)
+        terrain_height = self._sample_terrain_height_xy(sample_xy)
+        _, _, step_height = self._current_stair_targets()
+        accepted_surface_height = (
+            self.env_origins[:, 2].view(-1, 1, 1)
+            + self.current_foot_tread.float().unsqueeze(2)
+            * step_height.view(-1, 1, 1)
+        )
+        tolerance = float(
+            getattr(
+                self.cfg.env,
+                "faststair_sole_support_height_tolerance",
+                0.012,
+            )
+        )
+        supported_sample = (
+            torch.abs(terrain_height - accepted_surface_height) <= tolerance
+        )
+        coverage = torch.mean(supported_sample.float(), dim=2)
+        stair_start_x = self.stair_start_x[
+            self.terrain_levels, self.terrain_types
+        ]
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
+        active = (
+            self.stable_contacts
+            & (self.current_foot_tread > 0)
+            & near_stairs.unsqueeze(1)
+        )
+        return coverage, active
+
     def _faststair_nominal_landing(self, expected_foot):
-        """Return the center of the next tread in each foot's nominal lane."""
+        """Return the center of the state machine's target tread and foot lane."""
         levels = self.terrain_levels
         types = self.terrain_types
         stair_start_x = self.stair_start_x[levels, types]
         _, _, step_height = self._current_stair_targets()
-        next_tread = torch.clamp(
-            self.last_advanced_tread + 1,
-            min=1,
-            max=int(self.cfg.terrain.num_steps),
-        )
+        _, next_tread, _ = self._faststair_step_target_state()
         landing_x = stair_start_x + (
             next_tread.float() - 0.5
         ) * float(self.cfg.terrain.step_width)
@@ -1899,7 +2106,7 @@ class N2StairsEnv(N2Env):
         )
 
     def _update_foot_step_progress(self):
-        """Track stable landings and strict stair-over-stair alternation."""
+        """Track stable landings and the configured physical step sequence."""
         self.swing_displacement_event.zero_()
         foot_surface_height_world = self._sample_terrain_height_xy(
             self.feet_pos[:, :, :2]
@@ -1988,15 +2195,16 @@ class N2StairsEnv(N2Env):
         self.alternating_tread_event[:] = 0.0
         self.repeated_lead_event[:] = 0.0
         self.same_tread_join_event[:] = 0.0
+        self.paired_lead_advance_event[:] = 0.0
+        self.paired_trailing_join_event[:] = 0.0
+        self.paired_sequence_error_event[:] = 0.0
         self.skipped_tread_event[:] = 0.0
         confirmed_landing = torch.zeros_like(self.contacts)
 
         if self.enforce_walk_gait:
             # Quantize the supporting surface into the configured stair row.
-            # A true stair-over-stair sequence advances one tread at a time
-            # and changes the advancing foot on every new tread. Merely
-            # joining the lead foot on its tread is explicitly classified as
-            # step-to gait, even if the open-loop contact phase looks valid.
+            # The shared transition tracker records natural alternating
+            # advances as well as explicit lead-and-join pairs.
             _, _, step_height = self._current_stair_targets()
             tread_index = torch.round(
                 foot_surface_height
@@ -2155,6 +2363,7 @@ class N2StairsEnv(N2Env):
 
             previous_tread = self.last_advanced_tread.clone()
             previous_foot = self.last_advanced_foot.clone()
+            previous_joined_tread = self.last_joined_tread.clone()
             (
                 advanced,
                 alternating_advance,
@@ -2167,21 +2376,68 @@ class N2StairsEnv(N2Env):
                 candidate_foot,
                 previous_tread,
                 previous_foot,
-                self.last_joined_tread,
+                previous_joined_tread,
             )
             # Physical state must progress after a valid one-foot touchdown
             # even if a brief double-flight means it was not a rewarded
             # support-to-support transition.
             alternating_advance &= has_natural_landing
+            if self.faststair_paired_step:
+                (
+                    paired_lead_advance,
+                    paired_trailing_join,
+                    paired_sequence_error,
+                    paired_premature_advance,
+                    paired_lead_switch,
+                ) = classify_paired_step_transition(
+                    has_physical_landing,
+                    candidate_tread,
+                    candidate_foot,
+                    previous_tread,
+                    previous_foot,
+                    previous_joined_tread,
+                    torch.full_like(
+                        candidate_foot,
+                        self.faststair_preferred_lead_foot,
+                    ),
+                )
+                paired_transition = advanced | same_tread_join
+                paired_lead_advance &= has_natural_landing
+                paired_trailing_join &= has_natural_landing
+                paired_sequence_error |= (
+                    paired_transition & ~has_natural_landing
+                )
+            else:
+                paired_lead_advance = torch.zeros_like(advanced)
+                paired_trailing_join = torch.zeros_like(advanced)
+                paired_sequence_error = torch.zeros_like(advanced)
+                paired_premature_advance = torch.zeros_like(advanced)
+                paired_lead_switch = torch.zeros_like(advanced)
 
             self.alternating_tread_event[:] = alternating_advance.float()
             self.repeated_lead_event[:] = repeated_lead.float()
             self.same_tread_join_event[:] = same_tread_join.float()
+            self.paired_lead_advance_event[:] = (
+                paired_lead_advance.float()
+            )
+            self.paired_trailing_join_event[:] = (
+                paired_trailing_join.float()
+            )
+            self.paired_sequence_error_event[:] = (
+                paired_sequence_error.float()
+            )
             self.skipped_tread_event[:] = skipped_tread.float()
             self.tread_advance_count += advanced.float()
             self.alternating_tread_count += alternating_advance.float()
             self.repeated_lead_count += repeated_lead.float()
             self.same_tread_join_count += same_tread_join.float()
+            self.paired_lead_advance_count += paired_lead_advance.float()
+            self.paired_trailing_join_count += paired_trailing_join.float()
+            self.paired_sequence_error_count += paired_sequence_error.float()
+            self.paired_premature_advance_count += (
+                paired_premature_advance.float()
+            )
+            self.paired_lead_switch_count += paired_lead_switch.float()
             self.skipped_tread_count += skipped_tread.float()
             self.left_tread_advance_count += (
                 advanced & (candidate_foot == 0)
@@ -2194,15 +2450,18 @@ class N2StairsEnv(N2Env):
             ]
 
             # Keep the deployable phase observation aligned with the physical
-            # sequence that the transition classifier just accepted.  A
-            # step-to join retries the joining foot; any true advance requests
-            # the opposite foot next.
+            # sequence that the transition classifier just accepted.
             phase_reset = advanced | same_tread_join
-            next_swing_foot = torch.where(
-                advanced,
-                1 - candidate_foot,
-                candidate_foot,
-            )
+            if self.faststair_paired_step:
+                # Advance -> trailing foot joins. Join -> established lead
+                # advances. Both are the foot opposite the one just landed.
+                next_swing_foot = 1 - candidate_foot
+            else:
+                next_swing_foot = torch.where(
+                    advanced,
+                    1 - candidate_foot,
+                    candidate_foot,
+                )
             self._synchronize_phase_to_next_swing(
                 phase_reset,
                 next_swing_foot,
@@ -2213,7 +2472,9 @@ class N2StairsEnv(N2Env):
             ).float()
             self.foot_contact_height_delta[:] = (
                 event_one_hot
-                * alternating_advance.unsqueeze(1).float()
+                * (
+                    alternating_advance | paired_lead_advance
+                ).unsqueeze(1).float()
                 * step_height.unsqueeze(1)
             )
 
@@ -2451,17 +2712,24 @@ class N2StairsEnv(N2Env):
     def _sagittal_foot_phase_state(self):
         """Return dense right-minus-left foot-order tracking quantities.
 
-        Just after phase zero the right leg starts swing behind the left leg.
-        It crosses the stance leg near phase 0.25 and lands ahead near phase
-        0.5. The cosine reference mirrors this trajectory for left swing in
-        the second half-cycle, directly distinguishing stair-over-stair motion
-        from a step-to gait that repeatedly brings both feet together.
+        Natural gait uses the legacy alternating cosine reference. Paired
+        FastStair gait starts with both feet together, moves the right lead one
+        tread ahead by phase 0.5, then asks the left trailing foot to close the
+        gap by the next phase zero.
         """
         phase = self._get_gait_phase()
         amplitude = max(
             float(self.cfg.env.sagittal_foot_phase_amplitude), 1.0e-3
         )
-        target_separation = -amplitude * torch.cos(2.0 * torch.pi * phase)
+        if self.faststair_paired_step:
+            target_separation = paired_sagittal_separation_target(
+                phase,
+                amplitude,
+            )
+        else:
+            target_separation = (
+                -amplitude * torch.cos(2.0 * torch.pi * phase)
+            )
         actual_separation = (
             self.feet_pos[:, 1, 0] - self.feet_pos[:, 0, 0]
         )
@@ -2490,7 +2758,11 @@ class N2StairsEnv(N2Env):
         initial_expected_foot = torch.where(
             has_physical_swing, physical_foot, scheduled_foot
         )
-        if bool(
+        if self.faststair_paired_step:
+            expected_foot, _, sequence_unfinished = (
+                self._faststair_step_target_state()
+            )
+        elif bool(
             getattr(
                 self.cfg.env,
                 "faststair_follow_physical_swing",
@@ -2507,6 +2779,11 @@ class N2StairsEnv(N2Env):
                 self.last_advanced_foot < 0,
                 initial_expected_foot,
                 torch.clamp(1 - self.last_advanced_foot, min=0, max=1),
+            )
+        if not self.faststair_paired_step:
+            sequence_unfinished = (
+                self.last_advanced_tread
+                < int(self.cfg.terrain.num_steps)
             )
         scheduled_swing = torch.gather(
             scheduled_swing_mask.long(),
@@ -2539,7 +2816,7 @@ class N2StairsEnv(N2Env):
             getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
         )
         active = (
-            (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+            sequence_unfinished
             & (scheduled_swing | expected_in_flight)
             & actually_airborne
             & opposite_supported
@@ -2553,12 +2830,11 @@ class N2StairsEnv(N2Env):
     def _faststair_discovery_state(self, expected_foot=None):
         """Return dense pre-liftoff state for the required next swing leg.
 
-        The required foot comes from the same physical alternation state as
-        the DCM planner.  Touchdown phase synchronization makes this target
-        observable to the Actor.  Unlike the strict swing transaction used for
+        The required foot comes from the same physical sequence state as the
+        DCM planner. Touchdown phase synchronization makes this target
+        observable to the Actor. Unlike the strict swing transaction used for
         touchdown scoring, this state becomes active while that foot is still
-        supported, supplying a learnable path to lift-off without rewarding
-        the repeated lead.
+        supported, supplying a learnable path to lift-off.
         """
         scheduled_swing_mask = ~self.desired_contacts
         if expected_foot is None:
@@ -2583,14 +2859,12 @@ class N2StairsEnv(N2Env):
         grace_steps = int(
             getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
         )
+        _, _, sequence_unfinished = self._faststair_step_target_state()
         active = (
             scheduled
             & opposite_supported
             & near_stairs
-            & (
-                self.last_advanced_tread
-                < int(self.cfg.terrain.num_steps)
-            )
+            & sequence_unfinished
             & (self.episode_length_buf > grace_steps)
             & (-self.projected_gravity[:, 2] > 0.80)
         )
@@ -2858,21 +3132,11 @@ class N2StairsEnv(N2Env):
         return penalty, mean_abs, sample_count
 
     def _next_tread_foot_target_state(self):
-        """Target the center of the next riser with the opposite swing foot.
-
-        This target activates only after the first stair has been reached, so
-        it cannot make the robot reach across the flat approach platform. A
-        step-to landing leaves the target one full tread ahead and therefore
-        keeps a dense correction signal until that foot actually advances.
-        """
+        """Target the center of the paired state's next landing tread."""
         levels = self.terrain_levels
         types = self.terrain_types
         stair_start_x = self.stair_start_x[levels, types]
-        next_tread = torch.clamp(
-            self.last_advanced_tread + 1,
-            min=1,
-            max=int(self.cfg.terrain.num_steps),
-        )
+        _, next_tread, _ = self._faststair_step_target_state()
         step_width = max(float(self.cfg.terrain.step_width), 1.0e-3)
         target_x = stair_start_x + (
             next_tread.float() - 0.5
@@ -3019,6 +3283,50 @@ class N2StairsEnv(N2Env):
         )
         return relative_y, normalized_error, active
 
+    def _paired_step_quality(self, index):
+        """Return paired-sequence rate, join coverage, and error rates."""
+        sequence_denominator = torch.clamp(
+            self.tread_advance_count[index]
+            + self.same_tread_join_count[index],
+            min=1.0,
+        )
+        lead_advances = self.paired_lead_advance_count[index]
+        trailing_joins = self.paired_trailing_join_count[index]
+        sequence_rate = (
+            lead_advances + trailing_joins
+        ) / sequence_denominator
+        join_coverage = trailing_joins / torch.clamp(
+            lead_advances, min=1.0
+        )
+        advance_denominator = torch.clamp(
+            self.tread_advance_count[index], min=1.0
+        )
+        premature_rate = (
+            self.paired_premature_advance_count[index]
+            / advance_denominator
+        )
+        lead_switch_rate = (
+            self.paired_lead_switch_count[index]
+            / advance_denominator
+        )
+        return (
+            lead_advances,
+            trailing_joins,
+            sequence_rate,
+            join_coverage,
+            premature_rate,
+            lead_switch_rate,
+        )
+
+    def _mean_actual_sole_support(self, index):
+        """Return mean sampled sole coverage over stable stair contacts."""
+        return torch.sum(
+            self.sole_support_fraction_sum[index], dim=1
+        ) / torch.clamp(
+            torch.sum(self.sole_support_sample_count[index], dim=1),
+            min=1.0,
+        )
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_desired_contacts()
@@ -3068,6 +3376,17 @@ class N2StairsEnv(N2Env):
                 foot_lateral_position * lateral_samples.float()
             )
             self.foot_lateral_sample_count += lateral_samples.float()
+            (
+                self.sole_support_fraction,
+                self.sole_support_active,
+            ) = self._actual_sole_support_state()
+            self.sole_support_fraction_sum += (
+                self.sole_support_fraction
+                * self.sole_support_active.float()
+            )
+            self.sole_support_sample_count += (
+                self.sole_support_active.float()
+            )
 
         lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
         absolute_lateral_position = torch.abs(lateral_position)
@@ -3183,7 +3502,7 @@ class N2StairsEnv(N2Env):
         if self.enforce_walk_gait:
             self.completion_stable_time += self.dt
             self.completion_stable_time *= physical_stable_top.float()
-            self.completion_buf[:] = physical_stable_top & (
+            physical_completion_ready = physical_stable_top & (
                 self.completion_stable_time
                 >= float(self.cfg.env.completion_dwell_s)
             )
@@ -3251,13 +3570,95 @@ class N2StairsEnv(N2Env):
                     self.cfg.env.success_max_sagittal_foot_separation
                 )
             )
+            if self.faststair_paired_step:
+                (
+                    paired_lead_advances,
+                    paired_trailing_joins,
+                    paired_sequence_rate,
+                    paired_join_coverage,
+                    paired_premature_rate,
+                    _,
+                ) = self._paired_step_quality(slice(None))
+                paired_step_sequence = (
+                    paired_lead_advances
+                    >= float(
+                        self.cfg.env.success_min_paired_lead_advances
+                    )
+                ) & (
+                    paired_trailing_joins
+                    >= float(
+                        self.cfg.env.success_min_paired_trailing_joins
+                    )
+                ) & (
+                    paired_sequence_rate
+                    >= float(
+                        self.cfg.env.success_min_paired_sequence_rate
+                    )
+                ) & (
+                    paired_join_coverage
+                    >= float(
+                        self.cfg.env.success_min_paired_join_coverage
+                    )
+                ) & (
+                    paired_premature_rate
+                    <= float(
+                        self.cfg.env.success_max_paired_premature_rate
+                    )
+                ) & (
+                    skipped_tread_rate
+                    <= float(self.cfg.env.success_max_skipped_tread_rate)
+                ) & (
+                    self.max_sagittal_foot_separation
+                    <= float(
+                        self.cfg.env.success_max_sagittal_foot_separation
+                    )
+                )
+                paired_terminal_complete = paired_step_terminal_mask(
+                    self.last_advanced_tread,
+                    self.last_joined_tread,
+                    int(self.cfg.terrain.num_steps),
+                )
+                paired_step_sequence &= paired_terminal_complete
+                accepted_step_sequence = (
+                    natural_step_sequence | paired_step_sequence
+                )
+                actual_sole_support = self._mean_actual_sole_support(
+                    slice(None)
+                )
+                support_consistent = (
+                    actual_sole_support
+                    >= float(
+                        self.cfg.env
+                        .success_min_actual_sole_support_fraction
+                    )
+                )
+                # A FastStair rollout may not terminate just because the base
+                # crossed the top plane.  A natural stair-over-stair sequence
+                # is already complete when its final lead lands; a step-to
+                # sequence must keep running until the trailing foot joins the
+                # lead on the final tread.  Quality thresholds remain separate
+                # so the looser curriculum gate can still promote learning.
+                physical_sequence_complete = (
+                    natural_step_sequence | paired_terminal_complete
+                )
+                self.completion_buf[:] = (
+                    physical_completion_ready
+                    & physical_sequence_complete
+                )
+            else:
+                accepted_step_sequence = natural_step_sequence
+                support_consistent = torch.ones_like(
+                    accepted_step_sequence
+                )
+                self.completion_buf[:] = physical_completion_ready
             stable_top &= (
                 centered
                 & facing_forward
                 & command_consistent
                 & path_consistent
                 & gait_consistent
-                & natural_step_sequence
+                & accepted_step_sequence
+                & support_consistent
             )
             self.top_stable_time += self.dt
             self.top_stable_time *= stable_top.float()
@@ -3342,11 +3743,8 @@ class N2StairsEnv(N2Env):
             self.double_flight_step_count[index] / episode_steps
         )
 
-        return (
-            self.completion_buf[index]
-            & ~self.fall_event_buf[index]
-            & ~self.path_failure_buf[index]
-            & (
+        natural_sequence = (
+            (
                 self.alternating_tread_count[index]
                 >= float(
                     self.cfg.env.curriculum_min_alternating_tread_count
@@ -3374,6 +3772,84 @@ class N2StairsEnv(N2Env):
                     self.cfg.env.curriculum_max_double_flight_fraction
                 )
             )
+        )
+        if self.faststair_paired_step:
+            (
+                paired_lead_advances,
+                paired_trailing_joins,
+                paired_sequence_rate,
+                paired_join_coverage,
+                paired_premature_rate,
+                _,
+            ) = self._paired_step_quality(index)
+            paired_sequence = (
+                (
+                    paired_lead_advances
+                    >= float(
+                        self.cfg.env.curriculum_min_paired_lead_advances
+                    )
+                )
+                & (
+                    paired_trailing_joins
+                    >= float(
+                        self.cfg.env.curriculum_min_paired_trailing_joins
+                    )
+                )
+                & (
+                    paired_sequence_rate
+                    >= float(
+                        self.cfg.env.curriculum_min_paired_sequence_rate
+                    )
+                )
+                & (
+                    paired_join_coverage
+                    >= float(
+                        self.cfg.env.curriculum_min_paired_join_coverage
+                    )
+                )
+                & (
+                    paired_premature_rate
+                    <= float(
+                        self.cfg.env.curriculum_max_paired_premature_rate
+                    )
+                )
+                & (
+                    skipped_tread_rate
+                    <= float(self.cfg.env.curriculum_max_skipped_tread_rate)
+                )
+                & (
+                    phase_match
+                    >= float(self.cfg.env.curriculum_min_phase_contact_match)
+                )
+                & (
+                    double_flight_fraction
+                    <= float(
+                        self.cfg.env.curriculum_max_double_flight_fraction
+                    )
+                )
+            )
+            paired_sequence &= paired_step_terminal_mask(
+                self.last_advanced_tread[index],
+                self.last_joined_tread[index],
+                int(self.cfg.terrain.num_steps),
+            )
+            accepted_sequence = natural_sequence | paired_sequence
+            support_consistent = (
+                self._mean_actual_sole_support(index)
+                >= float(
+                    self.cfg.env
+                    .curriculum_min_actual_sole_support_fraction
+                )
+            )
+        else:
+            accepted_sequence = natural_sequence
+            support_consistent = torch.ones_like(accepted_sequence)
+        return (
+            self.completion_buf[index]
+            & ~self.fall_event_buf[index]
+            & ~self.path_failure_buf[index]
+            & accepted_sequence
+            & support_consistent
         )
 
     def _update_terrain_curriculum(self, env_ids):
@@ -3497,6 +3973,20 @@ class N2StairsEnv(N2Env):
             self.same_tread_join_count[env_ids]
             / tread_sequence_denominator
         ) * valid.float()
+        (
+            paired_lead_advances,
+            paired_trailing_joins,
+            paired_sequence_rate,
+            paired_join_coverage,
+            paired_premature_rate,
+            paired_lead_switch_rate,
+        ) = self._paired_step_quality(env_ids)
+        paired_lead_advances *= valid.float()
+        paired_trailing_joins *= valid.float()
+        paired_sequence_rate *= valid.float()
+        paired_join_coverage *= valid.float()
+        paired_premature_rate *= valid.float()
+        paired_lead_switch_rate *= valid.float()
         skipped_tread_rate = (
             self.skipped_tread_count[env_ids]
             / tread_sequence_denominator
@@ -3589,6 +4079,9 @@ class N2StairsEnv(N2Env):
                 self.faststair_touchdown_count[env_ids], min=1.0
             )
         ) * valid.float()
+        actual_sole_support_fraction = (
+            self._mean_actual_sole_support(env_ids) * valid.float()
+        )
 
         self.last_episode_success[env_ids] = success
         self.last_episode_completion[env_ids] = completion
@@ -3626,6 +4119,24 @@ class N2StairsEnv(N2Env):
         self.last_episode_repeated_lead_rate[env_ids] = repeated_lead_rate
         self.last_episode_same_tread_join_rate[env_ids] = (
             same_tread_join_rate
+        )
+        self.last_episode_paired_lead_advances[env_ids] = (
+            paired_lead_advances
+        )
+        self.last_episode_paired_trailing_joins[env_ids] = (
+            paired_trailing_joins
+        )
+        self.last_episode_paired_sequence_rate[env_ids] = (
+            paired_sequence_rate
+        )
+        self.last_episode_paired_join_coverage[env_ids] = (
+            paired_join_coverage
+        )
+        self.last_episode_paired_premature_rate[env_ids] = (
+            paired_premature_rate
+        )
+        self.last_episode_paired_lead_switch_rate[env_ids] = (
+            paired_lead_switch_rate
         )
         self.last_episode_skipped_tread_rate[env_ids] = skipped_tread_rate
         self.last_episode_max_sagittal_foot_separation[env_ids] = (
@@ -3688,6 +4199,9 @@ class N2StairsEnv(N2Env):
         )
         self.last_episode_faststair_edge_margin[env_ids] = (
             mean_faststair_edge_margin
+        )
+        self.last_episode_actual_sole_support_fraction[env_ids] = (
+            actual_sole_support_fraction
         )
 
         super().reset_idx(env_ids)
@@ -3760,6 +4274,24 @@ class N2StairsEnv(N2Env):
                 ),
                 "stairs_same_tread_join_rate": masked_mean(
                     same_tread_join_rate
+                ),
+                "stairs_paired_lead_advances": masked_mean(
+                    paired_lead_advances
+                ),
+                "stairs_paired_trailing_joins": masked_mean(
+                    paired_trailing_joins
+                ),
+                "stairs_paired_sequence_rate": masked_mean(
+                    paired_sequence_rate
+                ),
+                "stairs_paired_join_coverage": masked_mean(
+                    paired_join_coverage
+                ),
+                "stairs_paired_premature_rate": masked_mean(
+                    paired_premature_rate
+                ),
+                "stairs_paired_lead_switch_rate": masked_mean(
+                    paired_lead_switch_rate
                 ),
                 "stairs_skipped_tread_rate": masked_mean(
                     skipped_tread_rate
@@ -3836,6 +4368,9 @@ class N2StairsEnv(N2Env):
                 "faststair_edge_margin": masked_mean(
                     mean_faststair_edge_margin
                 ),
+                "faststair_actual_sole_support_fraction": masked_mean(
+                    actual_sole_support_fraction
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -3865,11 +4400,19 @@ class N2StairsEnv(N2Env):
         self.alternating_tread_event[env_ids] = 0.0
         self.repeated_lead_event[env_ids] = 0.0
         self.same_tread_join_event[env_ids] = 0.0
+        self.paired_lead_advance_event[env_ids] = 0.0
+        self.paired_trailing_join_event[env_ids] = 0.0
+        self.paired_sequence_error_event[env_ids] = 0.0
         self.skipped_tread_event[env_ids] = 0.0
         self.tread_advance_count[env_ids] = 0.0
         self.alternating_tread_count[env_ids] = 0.0
         self.repeated_lead_count[env_ids] = 0.0
         self.same_tread_join_count[env_ids] = 0.0
+        self.paired_lead_advance_count[env_ids] = 0.0
+        self.paired_trailing_join_count[env_ids] = 0.0
+        self.paired_sequence_error_count[env_ids] = 0.0
+        self.paired_premature_advance_count[env_ids] = 0.0
+        self.paired_lead_switch_count[env_ids] = 0.0
         self.skipped_tread_count[env_ids] = 0.0
         self.top_stable_time[env_ids] = 0.0
         self.completion_stable_time[env_ids] = 0.0
@@ -3905,6 +4448,10 @@ class N2StairsEnv(N2Env):
         self.foot_lateral_inward_error_sum[env_ids] = 0.0
         self.foot_lateral_position_sum[env_ids] = 0.0
         self.foot_lateral_sample_count[env_ids] = 0.0
+        self.sole_support_fraction[env_ids] = 1.0
+        self.sole_support_active[env_ids] = False
+        self.sole_support_fraction_sum[env_ids] = 0.0
+        self.sole_support_sample_count[env_ids] = 0.0
         self.faststair_plan_target[env_ids] = 0.0
         self.faststair_plan_nominal[env_ids] = 0.0
         self.faststair_plan_dcm[env_ids] = 0.0
@@ -4123,7 +4670,7 @@ class N2StairsEnv(N2Env):
         return normalized_rise * moving_forward * upright * supported / self.dt
 
     def _reward_stairs_foot_step_progress(self):
-        """Reward one-shot, alternating landings on a newly higher tread."""
+        """Reward one-shot accepted lead landings on a newly higher tread."""
         _, _, step_height = self._current_stair_targets()
         normalized_rise = torch.clamp(
             self.foot_contact_height_delta
@@ -4145,8 +4692,36 @@ class N2StairsEnv(N2Env):
         return self.repeated_lead_event / self.dt
 
     def _reward_stairs_same_tread_join(self):
-        """Penalize the trailing foot joining the lead foot step-to style."""
+        """Legacy diagnostic reward for a trailing-foot same-tread join."""
         return self.same_tread_join_event / self.dt
+
+    def _reward_stairs_paired_lead_advance(self):
+        """Reward the established lead foot advancing one sequential tread."""
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return (
+            self.paired_lead_advance_event * upright.float() / self.dt
+        )
+
+    def _reward_stairs_paired_trailing_join(self):
+        """Reward the trailing foot completing the lead-and-join pair."""
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return (
+            self.paired_trailing_join_event * upright.float() / self.dt
+        )
+
+    def _reward_stairs_paired_sequence_error(self):
+        """Penalize skipped joins, wrong first leads, and unstable landings."""
+        return self.paired_sequence_error_event / self.dt
+
+    def _reward_stairs_sole_support_error(self):
+        """Penalize the unsupported fraction of each stable landed sole."""
+        active = self.sole_support_active.float()
+        active_count = torch.sum(active, dim=1)
+        error = torch.sum(
+            (1.0 - self.sole_support_fraction) * active,
+            dim=1,
+        ) / torch.clamp(active_count, min=1.0)
+        return error
 
     def _reward_stairs_skipped_tread(self):
         """Penalize reaching over a tread instead of climbing sequentially."""
@@ -4262,7 +4837,7 @@ class N2StairsEnv(N2Env):
         return clearance_progress * active.float()
 
     def _reward_faststair_swing_progress(self):
-        """Reward forward motion of the required opposite-foot attempt."""
+        """Reward forward motion of the paired state's required foot."""
         expected_foot, _ = self._next_tread_swing_state()
         _, active, clearance_progress, forward_progress = (
             self._faststair_discovery_state(expected_foot)

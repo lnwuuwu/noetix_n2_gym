@@ -135,6 +135,27 @@ def aggregate(rows):
         "repeated_lead": _weighted(
             rows, "mean_repeated_lead_rate"
         ),
+        "paired_lead_advances": _weighted(
+            rows, "mean_paired_lead_advances"
+        ),
+        "paired_trailing_joins": _weighted(
+            rows, "mean_paired_trailing_joins"
+        ),
+        "paired_sequence_rate": _weighted(
+            rows, "mean_paired_sequence_rate"
+        ),
+        "paired_join_coverage": _weighted(
+            rows, "mean_paired_join_coverage"
+        ),
+        "paired_premature_rate": _weighted(
+            rows, "mean_paired_premature_rate"
+        ),
+        "paired_lead_switch_rate": _weighted(
+            rows, "mean_paired_lead_switch_rate"
+        ),
+        "actual_sole_support": _weighted(
+            rows, "mean_actual_sole_support_fraction", 1.0
+        ),
         "phase_contact": _weighted(rows, "mean_phase_contact_match"),
         "sagittal_phase": _weighted(
             rows, "mean_sagittal_foot_phase_match"
@@ -164,8 +185,48 @@ def _mean_derived(rows, levels, function):
     return sum(function(rows[level]) for level in levels) / float(len(levels))
 
 
+def _natural_sequence_ok(
+    rows,
+    levels,
+    minimum_count,
+    minimum_rate,
+    maximum_join,
+):
+    return (
+        _mean_levels(rows, levels, "mean_alternating_tread_count")
+        >= minimum_count
+        and _mean_levels(rows, levels, "mean_alternating_tread_rate")
+        >= minimum_rate
+        and _mean_levels(rows, levels, "mean_same_tread_join_rate")
+        <= maximum_join
+    )
+
+
+def _paired_sequence_ok(
+    rows,
+    levels,
+    minimum_leads,
+    minimum_joins,
+    minimum_rate,
+    minimum_coverage,
+    maximum_premature,
+):
+    return (
+        _mean_levels(rows, levels, "mean_paired_lead_advances")
+        >= minimum_leads
+        and _mean_levels(rows, levels, "mean_paired_trailing_joins")
+        >= minimum_joins
+        and _mean_levels(rows, levels, "mean_paired_sequence_rate")
+        >= minimum_rate
+        and _mean_levels(rows, levels, "mean_paired_join_coverage")
+        >= minimum_coverage
+        and _mean_levels(rows, levels, "mean_paired_premature_rate")
+        <= maximum_premature
+    )
+
+
 def _gait_score(rows, levels):
-    """Dense ranking term for natural, balanced, non-shaking stair gait."""
+    """Rank either verified paired steps or natural alternating steps."""
     alternating_count = _mean_levels(
         rows, levels, "mean_alternating_tread_count"
     )
@@ -178,17 +239,47 @@ def _gait_score(rows, levels):
     repeated_lead = _mean_levels(
         rows, levels, "mean_repeated_lead_rate"
     )
-    advance_imbalance = _mean_derived(rows, levels, _advance_imbalance)
+    paired_leads = _mean_levels(
+        rows, levels, "mean_paired_lead_advances"
+    )
+    paired_joins = _mean_levels(
+        rows, levels, "mean_paired_trailing_joins"
+    )
+    paired_rate = _mean_levels(
+        rows, levels, "mean_paired_sequence_rate"
+    )
+    paired_coverage = _mean_levels(
+        rows, levels, "mean_paired_join_coverage"
+    )
+    paired_premature = _mean_levels(
+        rows, levels, "mean_paired_premature_rate"
+    )
+    sole_support = _mean_levels(
+        rows,
+        levels,
+        "mean_actual_sole_support_fraction",
+        1.0,
+    )
     swing_imbalance = _mean_derived(
         rows, levels, _swing_length_imbalance
     )
     support_shake = _mean_derived(rows, levels, _right_support_shake)
-    return (
+    natural_score = (
         1.50 * min(alternating_count / 3.0, 1.0)
         + 1.00 * alternating_rate
         - 1.25 * same_tread_join
         - 0.75 * repeated_lead
-        - 1.25 * advance_imbalance
+    )
+    paired_score = (
+        1.00 * min(paired_leads / 4.0, 1.0)
+        + 1.00 * min(paired_joins / 3.0, 1.0)
+        + 1.00 * paired_rate
+        + 0.75 * paired_coverage
+        - 1.50 * paired_premature
+    )
+    return (
+        max(natural_score, paired_score)
+        + 0.75 * sole_support
         - 0.75 * swing_imbalance / 0.10
         - 0.25 * support_shake
     )
@@ -266,6 +357,22 @@ def absolute_gate(rows):
     """Return reasons that prevent a model from becoming a saved best."""
     metrics = aggregate(rows)
     reasons = []
+    high_levels = (3, 4)
+    stable_high_stair_sequence = _natural_sequence_ok(
+        rows,
+        high_levels,
+        minimum_count=2.50,
+        minimum_rate=0.40,
+        maximum_join=0.25,
+    ) or _paired_sequence_ok(
+        rows,
+        high_levels,
+        minimum_leads=4.0,
+        minimum_joins=3.0,
+        minimum_rate=0.60,
+        minimum_coverage=0.50,
+        maximum_premature=0.25,
+    )
     checks = (
         (
             float(rows[4]["completion_rate"]) < 0.90,
@@ -273,7 +380,7 @@ def absolute_gate(rows):
         ),
         (
             _optional(rows[4], "success_rate") < 0.65,
-            "10 cm natural-gait success is below 65%",
+            "10 cm stable-gait success is below 65%",
         ),
         (
             float(rows[4]["fall_rate"]) > 0.05,
@@ -289,7 +396,7 @@ def absolute_gate(rows):
         ),
         (
             _optional(rows[3], "success_rate") < 0.65,
-            "8 cm natural-gait success is below 65%",
+            "8 cm stable-gait success is below 65%",
         ),
         (
             float(rows[2]["completion_rate"]) < 0.65,
@@ -328,64 +435,37 @@ def absolute_gate(rows):
             "planned foothold edge margin is below 5 mm",
         ),
         (
-            _mean_levels(
-                rows, (3, 4), "mean_alternating_tread_count"
-            )
-            < 2.50,
-            "8/10 cm alternating-tread count is below 2.50",
+            not stable_high_stair_sequence,
+            "8/10 cm has neither a verified lead/join sequence nor "
+            "a natural alternating sequence",
+        ),
+        (
+            _mean_derived(
+                rows, high_levels, _swing_length_imbalance
+            ) > 0.14,
+            "8/10 cm swing-length imbalance exceeds 0.14 m",
         ),
         (
             _mean_levels(
-                rows, (3, 4), "mean_alternating_tread_rate"
+                rows, high_levels, "mean_sagittal_foot_phase_match"
             )
-            < 0.40,
-            "8/10 cm alternating-tread rate is below 40%",
+            < 0.65,
+            "8/10 cm sagittal foot-phase match is below 65%",
         ),
         (
-            _mean_levels(
-                rows, (3, 4), "mean_same_tread_join_rate"
-            )
-            > 0.25,
-            "8/10 cm same-tread join rate exceeds 25%",
-        ),
-        (
-            _mean_levels(
-                rows, (3, 4), "mean_repeated_lead_rate"
-            )
-            > 0.25,
-            "8/10 cm repeated-lead rate exceeds 25%",
-        ),
-        (
-            min(
-                _optional(rows[level], "mean_left_tread_advances")
-                for level in (3, 4)
-            )
-            < 2.50
-            or min(
-                _optional(rows[level], "mean_right_tread_advances")
-                for level in (3, 4)
-            )
-            < 2.50,
-            "both feet must average at least 2.50 advances on 8/10 cm",
-        ),
-        (
-            _mean_derived(rows, (3, 4), _advance_imbalance) > 0.15,
-            "8/10 cm left/right tread-advance imbalance exceeds 15%",
-        ),
-        (
-            _mean_derived(rows, (3, 4), _swing_length_imbalance) > 0.08,
-            "8/10 cm swing-length imbalance exceeds 0.08 m",
-        ),
-        (
-            _mean_levels(
-                rows, (3, 4), "mean_sagittal_foot_phase_match"
-            )
-            < 0.72,
-            "8/10 cm sagittal foot-phase match is below 72%",
-        ),
-        (
-            _mean_derived(rows, (3, 4), _right_support_shake) > 0.72,
+            _mean_derived(rows, high_levels, _right_support_shake)
+            > 0.72,
             "8/10 cm right-support/left-swing shake exceeds 0.72",
+        ),
+        (
+            _mean_levels(
+                rows,
+                high_levels,
+                "mean_actual_sole_support_fraction",
+                1.0,
+            )
+            < 0.78,
+            "8/10 cm actual sole support is below 78%",
         ),
     )
     reasons.extend(reason for failed, reason in checks if failed)
@@ -475,50 +555,70 @@ def stage_gate(rows, stage):
     if stage == 1:
         row = rows[0]
         reasons.extend(_stage_one_safety_gate(rows))
+        stable_sequence = _natural_sequence_ok(
+            rows,
+            (0,),
+            minimum_count=1.0,
+            minimum_rate=0.15,
+            maximum_join=0.40,
+        ) or _paired_sequence_ok(
+            rows,
+            (0,),
+            minimum_leads=2.0,
+            minimum_joins=1.0,
+            minimum_rate=0.45,
+            minimum_coverage=0.30,
+            maximum_premature=0.40,
+        )
         checks = (
             (
-                _optional(row, "mean_alternating_tread_count") < 1.00,
-                "stage 1: 2 cm alternating-tread count is below 1.00",
+                not stable_sequence,
+                "stage 1: 2 cm has neither a verified lead/join "
+                "sequence nor a natural alternating sequence",
             ),
             (
-                _optional(row, "curriculum_completion_rate") < 0.20,
-                "stage 1: natural-gait curriculum completion is below 20%",
+                _optional(row, "curriculum_completion_rate") < 0.15,
+                "stage 1: stable-gait curriculum completion is below 15%",
             ),
             (
-                _optional(row, "mean_alternating_tread_rate") < 0.15,
-                "stage 1: 2 cm alternating-tread rate is below 15%",
+                _swing_length_imbalance(row) > 0.16,
+                "stage 1: swing-length imbalance exceeds 0.16 m",
             ),
             (
-                min(
-                    _optional(row, "mean_left_tread_advances"),
-                    _optional(row, "mean_right_tread_advances"),
+                _optional(row, "mean_sagittal_foot_phase_match") < 0.65,
+                "stage 1: sagittal foot-phase match is below 65%",
+            ),
+            (
+                _right_support_shake(row) > 0.65,
+                "stage 1: right-support/left-swing shake exceeds 0.65",
+            ),
+            (
+                _optional(
+                    row,
+                    "mean_actual_sole_support_fraction",
+                    1.0,
                 )
-                < 1.25,
-                "stage 1: each foot must average at least 1.25 advances",
-            ),
-            (
-                _advance_imbalance(row) > 0.40,
-                "stage 1: left/right tread-advance imbalance exceeds 40%",
-            ),
-            (
-                _optional(row, "mean_same_tread_join_rate") > 0.35,
-                "stage 1: same-tread join rate exceeds 35%",
-            ),
-            (
-                _swing_length_imbalance(row) > 0.14,
-                "stage 1: swing-length imbalance exceeds 0.14 m",
-            ),
-            (
-                _optional(row, "mean_sagittal_foot_phase_match") < 0.72,
-                "stage 1: sagittal foot-phase match is below 72%",
-            ),
-            (
-                _right_support_shake(row) > 0.62,
-                "stage 1: right-support/left-swing shake exceeds 0.62",
+                < 0.70,
+                "stage 1: actual sole support is below 70%",
             ),
         )
     elif stage == 2:
         levels = (0, 1, 2)
+        stable_sequence = _natural_sequence_ok(
+            rows,
+            (2,),
+            minimum_count=1.5,
+            minimum_rate=0.20,
+            maximum_join=0.40,
+        ) or _paired_sequence_ok(
+            rows,
+            (2,),
+            minimum_leads=3.0,
+            minimum_joins=2.0,
+            minimum_rate=0.55,
+            minimum_coverage=0.40,
+            maximum_premature=0.35,
+        )
         checks = (
             (
                 _optional(rows[2], "completion_rate") < 0.60,
@@ -554,49 +654,44 @@ def stage_gate(rows, stage):
                 "stage 2: planner validity is below 85%",
             ),
             (
+                not stable_sequence,
+                "stage 2: 6 cm has neither a verified lead/join "
+                "sequence nor a natural alternating sequence",
+            ),
+            (
+                _optional(rows[2], "curriculum_completion_rate") < 0.30,
+                "stage 2: 6 cm stable-gait curriculum completion is below 30%",
+            ),
+            (
+                _mean_levels(
+                    rows, levels, "mean_max_lateral_deviation_m"
+                )
+                > 0.14,
+                "stage 2: mean lateral deviation exceeds 0.14 m",
+            ),
+            (
+                _swing_length_imbalance(rows[2]) > 0.16,
+                "stage 2: 6 cm swing-length imbalance exceeds 0.16 m",
+            ),
+            (
                 _optional(
-                    rows[2], "mean_alternating_tread_count"
+                    rows[2], "mean_sagittal_foot_phase_match"
                 )
-                < 1.50,
-                "stage 2: 6 cm alternating-tread count is below 1.50",
+                < 0.65,
+                "stage 2: 6 cm sagittal foot-phase match is below 65%",
             ),
             (
-                _optional(rows[2], "curriculum_completion_rate") < 0.40,
-                "stage 2: 6 cm natural-gait curriculum completion is below 40%",
+                _right_support_shake(rows[2]) > 0.68,
+                "stage 2: 6 cm right-support/left-swing shake exceeds 0.68",
             ),
             (
-                _mean_levels(
-                    rows, levels, "mean_alternating_tread_rate"
+                _optional(
+                    rows[2],
+                    "mean_actual_sole_support_fraction",
+                    1.0,
                 )
-                < 0.20,
-                "stage 2: mean alternating-tread rate is below 20%",
-            ),
-            (
-                min(
-                    _optional(rows[2], "mean_left_tread_advances"),
-                    _optional(rows[2], "mean_right_tread_advances"),
-                )
-                < 2.00,
-                "stage 2: each foot must average 2.00 advances on 6 cm",
-            ),
-            (
-                _advance_imbalance(rows[2]) > 0.25,
-                "stage 2: 6 cm tread-advance imbalance exceeds 25%",
-            ),
-            (
-                _mean_levels(
-                    rows, levels, "mean_same_tread_join_rate"
-                )
-                > 0.32,
-                "stage 2: mean same-tread join rate exceeds 32%",
-            ),
-            (
-                _swing_length_imbalance(rows[2]) > 0.11,
-                "stage 2: 6 cm swing-length imbalance exceeds 0.11 m",
-            ),
-            (
-                _right_support_shake(rows[2]) > 0.66,
-                "stage 2: 6 cm right-support/left-swing shake exceeds 0.66",
+                < 0.74,
+                "stage 2: 6 cm actual sole support is below 74%",
             ),
         )
     else:
@@ -692,8 +787,10 @@ def select(args):
             "FASTSTAIR_CANDIDATE name={} eligible={} score={:+.4f} "
             "completion={:.1%} fall={:.1%} path={:.1%} lateral={:.3f}m "
             "plan_valid={:.1%} plan_error={:.3f}m edge={:.3f}m "
-            "alternate={:.1%} join={:.1%} advance_imbalance={:.1%} "
-            "swing_imbalance={:.3f}m support_shake={:.3f}".format(
+            "alternate={:.1%} pair=L{:.2f}/J{:.2f} "
+            "pair_rate={:.1%} pair_cover={:.1%} premature={:.1%} "
+            "sole={:.1%} swing_imbalance={:.3f}m "
+            "support_shake={:.3f}".format(
                 candidate["name"],
                 candidate["eligible"],
                 candidate["score"],
@@ -705,8 +802,12 @@ def select(args):
                 metrics["foothold_error"],
                 metrics["edge_margin"],
                 metrics["alternating_rate"],
-                metrics["same_tread_join"],
-                metrics["advance_imbalance"],
+                metrics["paired_lead_advances"],
+                metrics["paired_trailing_joins"],
+                metrics["paired_sequence_rate"],
+                metrics["paired_join_coverage"],
+                metrics["paired_premature_rate"],
+                metrics["actual_sole_support"],
                 metrics["swing_imbalance"],
                 metrics["right_support_shake"],
             )
