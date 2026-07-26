@@ -1592,6 +1592,10 @@ class N2StairsEnv(N2Env):
             return
 
         expected_foot, active = self._next_tread_swing_state()
+        _, discovery_active, _, _ = self._faststair_discovery_state(
+            expected_foot
+        )
+        request = active | discovery_active
         nominal, next_tread = self._faststair_nominal_landing(expected_foot)
         offsets = self.faststair_search_offsets
         candidate_count = offsets.shape[0]
@@ -1750,7 +1754,11 @@ class N2StairsEnv(N2Env):
         selected_edge_margin = torch.gather(
             edge_margin, 1, result.selected_index.unsqueeze(1)
         ).squeeze(1)
-        plan_valid = result.valid & active
+        # Plan and latch the target during the scheduled support phase, before
+        # the foot is physically airborne.  The old circular dependency
+        # required a random policy to discover lift-off before either planner
+        # validity or trajectory shaping became visible.
+        plan_valid = result.valid & request
         environment_ids = self.faststair_environment_ids
         previous_target = self.faststair_latched_target[
             environment_ids, expected_foot
@@ -1783,14 +1791,14 @@ class N2StairsEnv(N2Env):
         self.faststair_plan_predicted_dcm[:] = result.predicted_dcm
         self.faststair_plan_cost[:] = result.cost
         self.faststair_plan_valid[:] = plan_valid
-        self.faststair_plan_active[:] = active
+        self.faststair_plan_active[:] = request
         self.faststair_plan_expected_foot[:] = expected_foot
         self.faststair_plan_edge_margin[:] = torch.where(
             result.valid,
             selected_edge_margin,
             torch.zeros_like(selected_edge_margin),
         )
-        self.faststair_plan_request_count += active.float()
+        self.faststair_plan_request_count += request.float()
         self.faststair_plan_valid_count += plan_valid.float()
 
         latched_target = self.faststair_latched_target[
@@ -2485,6 +2493,88 @@ class N2StairsEnv(N2Env):
             & (-self.projected_gravity[:, 2] > 0.80)
         )
         return expected_foot, active
+
+    def _faststair_discovery_state(self, expected_foot=None):
+        """Return dense pre-liftoff state for the phase-scheduled swing leg.
+
+        Unlike the strict swing transaction used for touchdown scoring, this
+        state deliberately becomes active while the scheduled foot is still
+        supported.  It therefore supplies a learnable path from a stationary
+        policy to lift-off without paying reward during double support, after
+        the staircase, or while the opposite leg is unsupported.
+        """
+        scheduled_swing_mask = ~self.desired_contacts
+        if expected_foot is None:
+            expected_foot = torch.argmax(
+                scheduled_swing_mask.long(), dim=1
+            )
+        gather_scalar = expected_foot.unsqueeze(1)
+        scheduled = torch.gather(
+            scheduled_swing_mask.long(), 1, gather_scalar
+        ).squeeze(1).bool()
+        stance_foot = 1 - expected_foot
+        contact_filt = torch.logical_or(self.contacts, self.last_contacts)
+        opposite_supported = torch.gather(
+            contact_filt.long(), 1, stance_foot.unsqueeze(1)
+        ).squeeze(1).bool()
+
+        stair_start_x = self.stair_start_x[
+            self.terrain_levels, self.terrain_types
+        ]
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
+        grace_steps = int(
+            getattr(self.cfg.env, "gait_reward_grace_s", 0.0) / self.dt
+        )
+        active = (
+            scheduled
+            & opposite_supported
+            & near_stairs
+            & (
+                self.last_advanced_tread
+                < int(self.cfg.terrain.num_steps)
+            )
+            & (self.episode_length_buf > grace_steps)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+
+        _, _, step_height = self._current_stair_targets()
+        support_ankle_z = (
+            self.env_origins[:, 2].unsqueeze(1)
+            + self.current_foot_tread.float() * step_height.unsqueeze(1)
+            + self.foot_surface_offset
+        )
+        ankle_clearance = torch.gather(
+            self.feet_pos[:, :, 2] - support_ankle_z,
+            1,
+            gather_scalar,
+        ).squeeze(1)
+        target_clearance = torch.clamp(
+            step_height + float(self.cfg.rewards.swing_clearance_margin),
+            min=0.04,
+        )
+        clearance_progress = torch.clamp(
+            ankle_clearance / target_clearance,
+            min=0.0,
+            max=1.0,
+        )
+        forward_velocity = torch.gather(
+            self.feet_vel[:, :, 0], 1, gather_scalar
+        ).squeeze(1)
+        forward_progress = torch.clamp(
+            forward_velocity
+            / torch.clamp(self.commands[:, 0] + 0.05, min=0.12),
+            min=0.0,
+            max=1.0,
+        )
+        return (
+            expected_foot,
+            active,
+            clearance_progress,
+            forward_progress,
+        )
 
     def _nominal_swing_duration(self):
         """Return physical airborne time implied by the deployed gait clock."""
@@ -4102,6 +4192,23 @@ class N2StairsEnv(N2Env):
         """Penalize normalized error from the DCM-selected swing target."""
         _, squared_error, active = self._swing_trajectory_state()
         return squared_error * active
+
+    def _reward_faststair_liftoff(self):
+        """Reward scheduled-foot clearance before strict flight is detected."""
+        _, active, clearance_progress, _ = (
+            self._faststair_discovery_state()
+        )
+        return clearance_progress * active.float()
+
+    def _reward_faststair_swing_progress(self):
+        """Reward forward motion of a supported, scheduled swing attempt."""
+        _, active, clearance_progress, forward_progress = (
+            self._faststair_discovery_state()
+        )
+        # A small velocity term starts exploration; most reward requires real
+        # clearance so sliding a planted foot cannot become the optimum.
+        clearance_gate = 0.20 + 0.80 * clearance_progress
+        return forward_progress * clearance_gate * active.float()
 
     def _reward_stairs_swing_timeout(self):
         """Penalize leaving either leg suspended beyond its nominal swing."""

@@ -9,17 +9,21 @@ Isaac Gym：GPU 并行 DCM 落脚搜索、地形可行性约束、连续摆脚�
 holdout 的模型才会写入
 `logs/faststair_launcher/selected_s*/model_best.pt`。
 
-## 为什么从头训练
+## 为什么不再从随机策略训练
 
 旧 PPO Actor 每帧输入 82 维，5 帧共 410 维。FastStair Actor 使用
 70 维本体/导航信息和 9 x 5 地形图，每帧 115 维，5 帧共 575 维；
-Critic 还额外接收 DCM 规划信息。因此旧 `model_9440.pt` 等检查点
-不能安全地直接载入新网络。
+Critic 还额外接收 DCM 规划信息。启动器现在执行经过约束的
+Actor-only bootstrap：
 
-旧 PPO 模型仍然有两个用途：
+1. 每帧共同的 70 维输入和全部后续 Actor 层逐值复制；
+2. 旧 4 x 3 地形点映射到新 9 x 5 地形图中的最近点；
+3. 新增的 33 个地形输入权重置零；
+4. Critic 和优化器从零开始。
 
-1. 作为不会被覆盖的部署回退模型。
-2. 在相同 holdout seed 上作为 FastStair 候选的性能基准。
+这样初始 FastStair Actor 近似复现已批准 PPO 的爬楼动作，同时保留
+学习更宽地形图的能力。旧 PPO 还继续作为不会覆盖的部署回退模型和
+相同 holdout seed 上的性能基准。
 
 ## 当前实现范围
 
@@ -33,8 +37,11 @@ Critic 还额外接收 DCM 规划信息。因此旧 `model_9440.pt` 等检查点
 - Stage 2：加入更多 6/8 cm 与少量 10 cm。
 - Stage 3：以 8/10 cm 为主，完成目标楼梯专项训练。
 
-每阶段都评估中间检查点，并从该阶段评分最高的检查点继续，避免把
-阶段末尾已经退化的模型传给下一阶段。
+Stage 1 只训练 2 cm / 0.12 m/s；Stage 2 训练 2/4/6 cm /
+0.15 m/s；Stage 3 训练 4–10 cm / 0.18 m/s。每阶段都评估中间
+检查点，但只有至少一个模型通过该阶段的完成率、首步率、跌倒、
+路径和规划有效率门槛才会晋级。没有合格模型时立即停止，不再把
+“最不差的失败模型”传给下一阶段消耗 GPU。
 
 ## 服务器操作
 
@@ -56,6 +63,7 @@ test -f "$PPO_BEST"
 ```bash
 N2_SEED=46 \
 N2_DEVICE=cuda:0 \
+N2_FASTSTAIR_BASELINE_CHECKPOINT="$PPO_BEST" \
 bash humanoid/scripts/run_faststair_n2.sh smoke
 ```
 
@@ -75,8 +83,10 @@ N2_SEED=46 bash humanoid/scripts/run_faststair_n2.sh status
 N2_SEED=46 bash humanoid/scripts/run_faststair_n2.sh log
 ```
 
-默认训练量为 1200 + 1600 + 1200 = 4000 PPO iterations，4096 个并行
-环境，每 200 iterations 保存并筛选一次。显存不足时先将环境数降到
+默认训练量为 400 + 600 + 800 = 1800 PPO iterations，4096 个并行
+环境，每 100 iterations 保存并筛选一次。按此前服务器约
+3.3 秒/iteration 的吞吐，纯训练约 100 分钟；若 Stage 1 未达到
+晋级门槛，会在约 22 分钟训练加筛选后停止。显存不足时先将环境数降到
 2048，不要改变筛选和 holdout：
 
 ```bash
@@ -96,6 +106,13 @@ N2_FASTSTAIR_BEST=.../model_best.pt
 ```
 
 若出现：
+
+```text
+FASTSTAIR_STAGE_STOP stage=... reason=promotion_gate_failed
+```
+
+说明当前阶段没有任何合格检查点，后续阶段不会启动。若三阶段均晋级
+但最终独立留出集未批准，则会出现：
 
 ```text
 FASTSTAIR_HOLDOUT_APPROVED=False

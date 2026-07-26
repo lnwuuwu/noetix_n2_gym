@@ -95,7 +95,59 @@ def aggregate(rows):
     }
 
 
-def score(rows):
+def _mean_levels(rows, levels, key, default=0.0):
+    return sum(
+        _optional(rows[level], key, default) for level in levels
+    ) / float(len(levels))
+
+
+def score(rows, stage=0):
+    """Return a stage-aware ranking score.
+
+    Early stages deliberately rank the terrain rows that were trained instead
+    of allowing untrained 8/10 cm rows to dominate checkpoint selection.
+    """
+    if stage == 1:
+        row = rows[0]
+        action_motion = (
+            _optional(row, "mean_action_rate_rms")
+            + 0.5 * _optional(row, "mean_action_accel_rms")
+        )
+        return (
+            6.0 * _optional(row, "completion_rate")
+            + 1.0 * _optional(row, "first_step_rate")
+            - 4.0 * _optional(row, "fall_rate")
+            - 2.0 * _optional(row, "path_failure_rate")
+            - 1.5
+            * _optional(row, "mean_max_lateral_deviation_m")
+            / 0.10
+            - 0.25 * action_motion
+            + 0.75
+            * _optional(
+                row, "mean_faststair_planner_valid_fraction"
+            )
+        )
+    if stage == 2:
+        levels = (0, 1, 2)
+        completion = _mean_levels(rows, levels, "completion_rate")
+        fall = _mean_levels(rows, levels, "fall_rate")
+        path = _mean_levels(rows, levels, "path_failure_rate")
+        lateral = _mean_levels(
+            rows, levels, "mean_max_lateral_deviation_m"
+        )
+        planner_valid = _mean_levels(
+            rows,
+            levels,
+            "mean_faststair_planner_valid_fraction",
+        )
+        return (
+            5.0 * completion
+            + 2.0 * _optional(rows[2], "completion_rate")
+            - 4.0 * fall
+            - 2.0 * path
+            - 1.5 * lateral / 0.10
+            + 0.75 * planner_valid
+        )
     metrics = aggregate(rows)
     level4 = rows[4]
     return (
@@ -173,6 +225,90 @@ def absolute_gate(rows):
     return reasons
 
 
+def stage_gate(rows, stage):
+    """Return promotion blockers for an easy-to-hard training stage."""
+    stage = int(stage)
+    if stage == 3:
+        return absolute_gate(rows)
+    reasons = []
+    if stage == 1:
+        row = rows[0]
+        checks = (
+            (
+                _optional(row, "completion_rate") < 0.55,
+                "stage 1: 2 cm completion is below 55%",
+            ),
+            (
+                _optional(row, "first_step_rate") < 0.85,
+                "stage 1: 2 cm first-step rate is below 85%",
+            ),
+            (
+                _optional(row, "fall_rate") > 0.30,
+                "stage 1: 2 cm fall exceeds 30%",
+            ),
+            (
+                _optional(row, "path_failure_rate") > 0.25,
+                "stage 1: 2 cm path failure exceeds 25%",
+            ),
+            (
+                _optional(row, "mean_max_lateral_deviation_m") > 0.14,
+                "stage 1: 2 cm lateral deviation exceeds 0.14 m",
+            ),
+            (
+                _optional(
+                    row, "mean_faststair_planner_valid_fraction"
+                )
+                < 0.85,
+                "stage 1: planner validity is below 85%",
+            ),
+            (
+                _optional(row, "mean_faststair_edge_margin_m") < 0.003,
+                "stage 1: foothold edge margin is below 3 mm",
+            ),
+        )
+    elif stage == 2:
+        levels = (0, 1, 2)
+        checks = (
+            (
+                _optional(rows[2], "completion_rate") < 0.60,
+                "stage 2: 6 cm completion is below 60%",
+            ),
+            (
+                _mean_levels(rows, levels, "completion_rate") < 0.45,
+                "stage 2: mean 2/4/6 cm completion is below 45%",
+            ),
+            (
+                _optional(rows[1], "first_step_rate") < 0.65,
+                "stage 2: 4 cm first-step rate is below 65%",
+            ),
+            (
+                _optional(rows[2], "first_step_rate") < 0.90,
+                "stage 2: 6 cm first-step rate is below 90%",
+            ),
+            (
+                _mean_levels(rows, levels, "fall_rate") > 0.40,
+                "stage 2: mean 2/4/6 cm fall exceeds 40%",
+            ),
+            (
+                _mean_levels(rows, levels, "path_failure_rate") > 0.25,
+                "stage 2: mean 2/4/6 cm path failure exceeds 25%",
+            ),
+            (
+                _mean_levels(
+                    rows,
+                    levels,
+                    "mean_faststair_planner_valid_fraction",
+                )
+                < 0.85,
+                "stage 2: planner validity is below 85%",
+            ),
+        )
+    else:
+        raise ValueError("FastStair stage must be 1, 2, or 3")
+    reasons.extend(reason for failed, reason in checks if failed)
+    return reasons
+
+
 def relative_gate(baseline_rows, candidate_rows):
     """Prevent a new architecture from erasing the approved PPO baseline."""
     baseline = aggregate(baseline_rows)
@@ -238,13 +374,17 @@ def select(args):
     for value in args.candidate:
         candidate = parse_candidate(value)
         rows = load_evaluation(candidate["evaluation"])
-        reasons = absolute_gate(rows)
+        reasons = (
+            stage_gate(rows, args.stage)
+            if args.stage
+            else absolute_gate(rows)
+        )
         if baseline_rows is not None:
             reasons.extend(relative_gate(baseline_rows, rows))
         metrics = aggregate(rows)
         candidate.update(
             {
-                "score": score(rows),
+                "score": score(rows, args.stage),
                 "eligible": not reasons,
                 "reasons": reasons,
                 "metrics": metrics,
@@ -289,6 +429,7 @@ def select(args):
             )
         )
     decision = {
+        "stage": args.stage,
         "approved": winner is not None,
         "winner": winner,
         "screen_best": screen_best,
@@ -314,6 +455,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline")
     parser.add_argument("--baseline-checkpoint")
+    parser.add_argument(
+        "--stage",
+        type=int,
+        choices=(1, 2, 3),
+        default=0,
+        help=(
+            "Use the promotion gate and ranking for an intermediate stage; "
+            "omit for final holdout approval."
+        ),
+    )
     parser.add_argument(
         "--candidate",
         action="append",

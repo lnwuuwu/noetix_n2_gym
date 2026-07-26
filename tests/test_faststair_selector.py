@@ -8,12 +8,14 @@ from humanoid.scripts.select_faststair_checkpoint import (
     aggregate,
     load_evaluation,
     relative_gate,
+    stage_gate,
 )
 
 
 FIELDS = (
     "terrain_level",
     "completion_rate",
+    "first_step_rate",
     "fall_rate",
     "path_failure_rate",
     "mean_max_lateral_deviation_m",
@@ -33,6 +35,7 @@ def capable_rows():
         rows[level] = {
             "terrain_level": float(level),
             "completion_rate": 0.94 if level >= 3 else 0.80,
+            "first_step_rate": 0.98,
             "fall_rate": 0.02,
             "path_failure_rate": 0.02,
             "mean_max_lateral_deviation_m": 0.08,
@@ -74,6 +77,29 @@ class FastStairSelectorTests(unittest.TestCase):
         candidate[4]["completion_rate"] = 0.85
         reasons = relative_gate(baseline, candidate)
         self.assertTrue(any("10 cm completion" in reason for reason in reasons))
+
+    def test_stage_one_gate_rejects_standing_policy(self):
+        rows = capable_rows()
+        rows[0]["completion_rate"] = 0.0
+        rows[0]["first_step_rate"] = 0.0
+        rows[0]["mean_faststair_planner_valid_fraction"] = 0.0
+        reasons = stage_gate(rows, 1)
+        self.assertTrue(any("completion" in reason for reason in reasons))
+        self.assertTrue(any("first-step" in reason for reason in reasons))
+        self.assertTrue(any("planner validity" in reason for reason in reasons))
+
+    def test_stage_one_and_two_capable_policy_passes(self):
+        rows = capable_rows()
+        self.assertEqual(stage_gate(rows, 1), [])
+        self.assertEqual(stage_gate(rows, 2), [])
+
+    def test_stage_two_requires_six_centimeter_capability(self):
+        rows = capable_rows()
+        rows[2]["completion_rate"] = 0.20
+        rows[2]["first_step_rate"] = 0.40
+        reasons = stage_gate(rows, 2)
+        self.assertTrue(any("6 cm completion" in reason for reason in reasons))
+        self.assertTrue(any("6 cm first-step" in reason for reason in reasons))
 
     def test_csv_loader_and_weighted_aggregate(self):
         rows = capable_rows()

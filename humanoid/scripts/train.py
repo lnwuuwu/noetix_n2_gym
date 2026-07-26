@@ -21,6 +21,7 @@ import torch
 # Use the repository-specific name.  Isaac Gym exposes a different
 # zero-argument ``get_args`` in some Python 3.8 import orders.
 from humanoid.utils.helpers import parse_humanoid_args
+from humanoid.utils.policy_bootstrap import bootstrap_faststair_actor
 from humanoid.utils.residual_policy import (
     configure_residual_policy,
     residual_metadata,
@@ -108,7 +109,32 @@ def train(args):
     参数:
         args: 命令行参数对象，包含训练所需的各种配置
     """
-    resume_only_options = (
+    bootstrap_actor = args.bootstrap_actor_checkpoint is not None
+    if bootstrap_actor and args.resume:
+        raise ValueError(
+            "--bootstrap_actor_checkpoint and --resume are mutually exclusive"
+        )
+    if bootstrap_actor and args.task != "n2_faststair":
+        raise ValueError(
+            "--bootstrap_actor_checkpoint is only valid for n2_faststair"
+        )
+    if bootstrap_actor:
+        args.bootstrap_actor_checkpoint = os.path.abspath(
+            os.path.expanduser(args.bootstrap_actor_checkpoint)
+        )
+        if not os.path.isfile(args.bootstrap_actor_checkpoint):
+            raise FileNotFoundError(args.bootstrap_actor_checkpoint)
+    if bootstrap_actor and (
+        args.load_run is not None
+        or args.checkpoint is not None
+        or args.reset_optimizer
+        or args.residual_policy
+    ):
+        raise ValueError(
+            "Actor bootstrap starts a fresh FastStair run and cannot be "
+            "combined with resume/checkpoint/reset/residual options"
+        )
+    checkpoint_protected_options = (
         args.load_run is not None
         or args.checkpoint is not None
         or args.reset_optimizer
@@ -123,9 +149,10 @@ def train(args):
         or args.observation_noise_level is not None
         or args.residual_policy
     )
-    if resume_only_options and not args.resume:
+    if checkpoint_protected_options and not (args.resume or bootstrap_actor):
         raise ValueError(
-            "Checkpoint and protected fine-tuning options require --resume"
+            "Checkpoint and protected fine-tuning options require --resume "
+            "or --bootstrap_actor_checkpoint"
         )
     if args.actor_head_only and not args.reset_optimizer:
         raise ValueError(
@@ -389,7 +416,30 @@ def train(args):
         train_cfg=train_cfg_override,
         load_optimizer=not args.reset_optimizer,
     )
-    if args.resume and ppo_runner.current_learning_iteration <= 0:
+    if bootstrap_actor:
+        report = bootstrap_faststair_actor(
+            ppo_runner.alg.policy,
+            args.bootstrap_actor_checkpoint,
+        )
+        print(
+            "FastStair Actor bootstrap: source_iter={source_iteration} "
+            "obs={source_actor_obs}->{target_actor_obs} "
+            "shared={shared_per_frame}/frame "
+            "terrain={mapped_terrain_per_frame} mapped + "
+            "{new_terrain_per_frame} new/frame checkpoint={checkpoint}".format(
+                **report
+            )
+        )
+    verified_faststair_bootstrap = (
+        args.task == "n2_faststair"
+        and int(args.checkpoint if args.checkpoint is not None else -1) == 0
+        and ppo_runner.current_learning_iteration == 0
+    )
+    if (
+        args.resume
+        and ppo_runner.current_learning_iteration <= 0
+        and not verified_faststair_bootstrap
+    ):
         raise RuntimeError(
             "Resume requested but checkpoint iteration is not positive; "
             "refusing to silently train from zero."
@@ -561,6 +611,18 @@ def train(args):
                 args.residual_l2_coeff,
             )
         )
+
+    if bootstrap_actor and ppo_runner.log_dir is not None:
+        os.makedirs(ppo_runner.log_dir, exist_ok=True)
+        initial_checkpoint = os.path.join(
+            ppo_runner.log_dir, "model_0.pt"
+        )
+        ppo_runner.save(initial_checkpoint)
+        print(
+            "Saved Actor-bootstrapped pre-training checkpoint: {}".format(
+                initial_checkpoint
+            )
+        )
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.
@@ -604,6 +666,16 @@ if __name__ == '__main__':
     # 解析命令行参数
     args = parse_humanoid_args(
         [
+            {
+                "name": "--bootstrap_actor_checkpoint",
+                "type": str,
+                "default": None,
+                "help": (
+                    "Initialize a fresh n2_faststair Actor from an approved "
+                    "410-observation n2_stairs_walk checkpoint; the Critic "
+                    "and optimizer remain fresh."
+                ),
+            },
             {
                 "name": "--fixed_terrain_level",
                 "type": int,

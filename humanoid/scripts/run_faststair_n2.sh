@@ -10,17 +10,29 @@ DEVICE="${N2_DEVICE:-cuda:0}"
 NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-4096}"
 SCREEN_ENVS="${N2_FASTSTAIR_SCREEN_ENVS:-64}"
 HOLDOUT_ENVS="${N2_FASTSTAIR_HOLDOUT_ENVS:-128}"
-CHECKPOINT_INTERVAL="${N2_FASTSTAIR_CHECKPOINT_INTERVAL:-200}"
 COMMAND_SPEED="${N2_FASTSTAIR_COMMAND_SPEED:-0.18}"
 BASELINE_CHECKPOINT="${N2_FASTSTAIR_BASELINE_CHECKPOINT:-}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 
-STAGE1_ITERATIONS="${N2_FASTSTAIR_STAGE1_ITERATIONS:-1200}"
-STAGE2_ITERATIONS="${N2_FASTSTAIR_STAGE2_ITERATIONS:-1600}"
-STAGE3_ITERATIONS="${N2_FASTSTAIR_STAGE3_ITERATIONS:-1200}"
-STAGE1_MIX="${N2_FASTSTAIR_STAGE1_MIX:-0,0,0,1,1,2,2,3}"
-STAGE2_MIX="${N2_FASTSTAIR_STAGE2_MIX:-0,1,1,2,2,3,3,4}"
+CHECKPOINT_INTERVAL="${N2_FASTSTAIR_CHECKPOINT_INTERVAL:-100}"
+STAGE1_ITERATIONS="${N2_FASTSTAIR_STAGE1_ITERATIONS:-400}"
+STAGE2_ITERATIONS="${N2_FASTSTAIR_STAGE2_ITERATIONS:-600}"
+STAGE3_ITERATIONS="${N2_FASTSTAIR_STAGE3_ITERATIONS:-800}"
+STAGE1_MIX="${N2_FASTSTAIR_STAGE1_MIX:-0}"
+STAGE2_MIX="${N2_FASTSTAIR_STAGE2_MIX:-0,0,1,1,2,2}"
 STAGE3_MIX="${N2_FASTSTAIR_STAGE3_MIX:-1,2,2,3,3,4,4,4}"
+STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.12}"
+STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.15}"
+STAGE3_SPEED="${N2_FASTSTAIR_STAGE3_SPEED:-0.18}"
+STAGE1_LEARNING_RATE="${N2_FASTSTAIR_STAGE1_LR:-1.0e-5}"
+STAGE2_LEARNING_RATE="${N2_FASTSTAIR_STAGE2_LR:-7.0e-6}"
+STAGE3_LEARNING_RATE="${N2_FASTSTAIR_STAGE3_LR:-5.0e-6}"
+STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.12}"
+STAGE2_NOISE="${N2_FASTSTAIR_STAGE2_NOISE:-0.10}"
+STAGE3_NOISE="${N2_FASTSTAIR_STAGE3_NOISE:-0.08}"
+STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"
+STAGE2_REFERENCE="${N2_FASTSTAIR_STAGE2_REFERENCE:-0.010}"
+STAGE3_REFERENCE="${N2_FASTSTAIR_STAGE3_REFERENCE:-0.005}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/faststair_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_faststair"
@@ -36,11 +48,13 @@ TRAINED_RUN=""
 STAGE_SOURCE_ITERATION=""
 STAGE_TARGET_ITERATION=""
 SCREEN_BEST=""
+SCREEN_WINNER=""
+SCREEN_DECISION=""
 
 usage() {
     echo "Usage: $0 smoke|train|status|log|stop|view"
-    echo "train: from-scratch FastStair safety pretraining (easy -> mixed -> target)."
-    echo "The legacy PPO checkpoint is used only as the final safety benchmark."
+    echo "train: Actor-bootstrapped FastStair training (easy -> mixed -> target)."
+    echo "The approved legacy PPO checkpoint initializes the Actor and remains the holdout benchmark."
 }
 
 require_positive_integer() {
@@ -151,6 +165,7 @@ evaluate_checkpoint() {
     local env_count="$4"
     local eval_seed="$5"
     local episodes="$6"
+    local command_speed="$7"
     local iteration
     iteration="$(checkpoint_iteration "${checkpoint}")"
     run_child python -u humanoid/scripts/eval_stairs.py \
@@ -164,7 +179,7 @@ evaluate_checkpoint() {
         "--num_envs=${env_count}" \
         "--seed=${eval_seed}" \
         --terrain_levels=0,1,2,3,4 \
-        "--command_speed=${COMMAND_SPEED}" \
+        "--command_speed=${command_speed}" \
         "--episodes_per_env=${episodes}" \
         "--output=${output}"
 }
@@ -175,9 +190,14 @@ train_stage() {
     local extra_iterations="$3"
     local terrain_mix="$4"
     local run_name="$5"
+    local bootstrap_checkpoint="$6"
     local source_iteration=0
     local target_iteration
     local resume_options=()
+    local command_speed
+    local learning_rate
+    local action_noise
+    local reference_coefficient
 
     if [[ -n "${source}" ]]; then
         source_iteration="$(checkpoint_iteration "${source}")"
@@ -187,9 +207,37 @@ train_stage() {
             "--checkpoint=${source_iteration}"
             --reset_optimizer
         )
+    else
+        resume_options=(
+            "--bootstrap_actor_checkpoint=${bootstrap_checkpoint}"
+        )
     fi
+    case "${stage}" in
+        1)
+            command_speed="${STAGE1_SPEED}"
+            learning_rate="${STAGE1_LEARNING_RATE}"
+            action_noise="${STAGE1_NOISE}"
+            reference_coefficient="${STAGE1_REFERENCE}"
+            ;;
+        2)
+            command_speed="${STAGE2_SPEED}"
+            learning_rate="${STAGE2_LEARNING_RATE}"
+            action_noise="${STAGE2_NOISE}"
+            reference_coefficient="${STAGE2_REFERENCE}"
+            ;;
+        3)
+            command_speed="${STAGE3_SPEED}"
+            learning_rate="${STAGE3_LEARNING_RATE}"
+            action_noise="${STAGE3_NOISE}"
+            reference_coefficient="${STAGE3_REFERENCE}"
+            ;;
+        *)
+            echo "Unsupported FastStair stage: ${stage}" >&2
+            return 2
+            ;;
+    esac
     target_iteration=$((source_iteration + extra_iterations))
-    echo "FASTSTAIR_STAGE_TRAIN stage=${stage} source=${source_iteration} target=${target_iteration} mix=${terrain_mix}"
+    echo "FASTSTAIR_STAGE_TRAIN stage=${stage} source=${source_iteration} target=${target_iteration} mix=${terrain_mix} speed=${command_speed} lr=${learning_rate} noise=${action_noise} reference=${reference_coefficient}"
     run_child python -u humanoid/scripts/train.py \
         --task=n2_faststair \
         "${resume_options[@]}" \
@@ -202,7 +250,13 @@ train_stage() {
         --experiment_name=n2_faststair \
         "--run_name=${run_name}" \
         "--terrain_level_mix=${terrain_mix}" \
-        --learning_rate=3.0e-4 \
+        "--command_speed=${command_speed}" \
+        "--learning_rate=${learning_rate}" \
+        --fixed_learning_rate \
+        "--action_noise_std=${action_noise}" \
+        --freeze_action_noise \
+        "--actor_reference_loss_coeff=${reference_coefficient}" \
+        --actor_policy_loss_scale=0.50 \
         "--save_interval=${CHECKPOINT_INTERVAL}"
     local run_dir
     run_dir="$(latest_run_directory "${run_name}")"
@@ -221,6 +275,7 @@ screen_stage() {
     local source_iteration="$3"
     local target_iteration="$4"
     local stage_dir="$5"
+    local command_speed="$6"
     local candidate_args=()
     local checkpoint
     local iteration
@@ -228,7 +283,11 @@ screen_stage() {
     mkdir -p "${stage_dir}"
     while IFS= read -r checkpoint; do
         iteration="$(checkpoint_iteration "${checkpoint}")"
-        if (( iteration <= source_iteration || iteration > target_iteration )); then
+        if ((
+            ( stage == 1 && iteration < source_iteration )
+            || ( stage != 1 && iteration <= source_iteration )
+            || iteration > target_iteration
+        )); then
             continue
         fi
         if (( iteration != target_iteration && iteration % CHECKPOINT_INTERVAL != 0 )); then
@@ -238,7 +297,7 @@ screen_stage() {
         echo "FASTSTAIR_SCREEN stage=${stage} iteration=${iteration}"
         evaluate_checkpoint \
             n2_faststair "${checkpoint}" "${output}" \
-            "${SCREEN_ENVS}" "${SEED}" 1
+            "${SCREEN_ENVS}" "${SEED}" 1 "${command_speed}"
         candidate_args+=(
             --candidate
             "iter_${iteration}|${output}|${checkpoint}"
@@ -251,13 +310,26 @@ screen_stage() {
         return 1
     fi
     local decision="${stage_dir}/screen_decision.json"
+    SCREEN_DECISION="${decision}"
     run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
+        "--stage=${stage}" \
         "${candidate_args[@]}" \
-        "--output=${decision}"
+        "--output=${decision}" || return 2
     SCREEN_BEST="$(python -c \
         'import json,sys; print(json.load(open(sys.argv[1]))["screen_best"]["checkpoint"])' \
         "${decision}")"
-    echo "FASTSTAIR_SCREEN_BEST stage=${stage} checkpoint=${SCREEN_BEST}"
+    local approved
+    approved="$(python -c \
+        'import json,sys; print(str(json.load(open(sys.argv[1]))["approved"]).lower())' \
+        "${decision}")"
+    if [[ "${approved}" != "true" ]]; then
+        echo "FASTSTAIR_STAGE_GATE stage=${stage} passed=False diagnostic_best=${SCREEN_BEST}"
+        return 1
+    fi
+    SCREEN_WINNER="$(python -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["winner"]["checkpoint"])' \
+        "${decision}")"
+    echo "FASTSTAIR_STAGE_GATE stage=${stage} passed=True checkpoint=${SCREEN_WINNER}"
 }
 
 run_training() {
@@ -284,33 +356,69 @@ run_training() {
     local source_iteration
     local target_iteration
     local stage_best
+    local stage_speed
+    local baseline
+
+    baseline="$(resolve_baseline || true)"
+    if [[ -z "${baseline}" || ! -f "${baseline}" ]]; then
+        echo "FastStair requires an approved n2_stairs_walk checkpoint." >&2
+        echo "Set N2_FASTSTAIR_BASELINE_CHECKPOINT=/absolute/path/model_N.pt" >&2
+        return 2
+    fi
 
     echo "FASTSTAIR_START seed=${SEED} envs=${NUM_ENVS} planner=dcm_gpu task=n2_faststair"
-    echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 warm_start=False schedule=adaptive"
+    echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 actor_bootstrap=True critic_bootstrap=False schedule=fixed"
+    echo "FASTSTAIR_BOOTSTRAP checkpoint=${baseline}"
     for stage in 1 2 3; do
         case "${stage}" in
             1)
                 iterations="${STAGE1_ITERATIONS}"
                 mix="${STAGE1_MIX}"
+                stage_speed="${STAGE1_SPEED}"
                 ;;
             2)
                 iterations="${STAGE2_ITERATIONS}"
                 mix="${STAGE2_MIX}"
+                stage_speed="${STAGE2_SPEED}"
                 ;;
             3)
                 iterations="${STAGE3_ITERATIONS}"
                 mix="${STAGE3_MIX}"
+                stage_speed="${STAGE3_SPEED}"
                 ;;
         esac
         run_name="faststair_s${SEED}_stage${stage}_${timestamp}"
-        train_stage "${stage}" "${source}" "${iterations}" "${mix}" "${run_name}"
+        train_stage \
+            "${stage}" "${source}" "${iterations}" "${mix}" \
+            "${run_name}" "${baseline}"
         run_dir="${TRAINED_RUN}"
         source_iteration="${STAGE_SOURCE_ITERATION}"
         target_iteration="${STAGE_TARGET_ITERATION}"
-        screen_stage \
+        if ! screen_stage \
             "${stage}" "${run_dir}" "${source_iteration}" \
-            "${target_iteration}" "${work_dir}/stage_${stage}"
-        stage_best="${SCREEN_BEST}"
+            "${target_iteration}" "${work_dir}/stage_${stage}" \
+            "${stage_speed}"; then
+            if [[ -z "${SCREEN_BEST}" || ! -f "${SCREEN_BEST}" ]]; then
+                echo "FastStair screening failed before producing a diagnostic checkpoint." >&2
+                return 2
+            fi
+            cp -f "${SCREEN_BEST}" "${RESULT_DIR}/model_screen_best.pt"
+            cp -f "${SCREEN_DECISION}" \
+                "${RESULT_DIR}/stage_${stage}_screen_decision.json"
+            {
+                echo "new_approved=False"
+                echo "failure_stage=${stage}"
+                echo "selected=NONE"
+                echo "screen_best=${RESULT_DIR}/model_screen_best.pt"
+                echo "baseline=${baseline}"
+                echo "work_dir=${work_dir}"
+            } > "${RESULT_DIR}/search_summary.txt"
+            echo "FASTSTAIR_STAGE_STOP stage=${stage} reason=promotion_gate_failed"
+            echo "N2_FASTSTAIR_SCREEN_BEST=${RESULT_DIR}/model_screen_best.pt"
+            echo "No later stage or holdout was run; the approved PPO remains unchanged."
+            return 0
+        fi
+        stage_best="${SCREEN_WINNER}"
         if [[ ! -f "${stage_best}" ]]; then
             echo "Stage selector returned a missing checkpoint: ${stage_best}" >&2
             exit 1
@@ -324,11 +432,9 @@ run_training() {
     local candidate_holdout="${work_dir}/holdout_candidate.csv"
     evaluate_checkpoint \
         n2_faststair "${source}" "${candidate_holdout}" \
-        "${HOLDOUT_ENVS}" "${holdout_seed}" 2
+        "${HOLDOUT_ENVS}" "${holdout_seed}" 2 "${COMMAND_SPEED}"
 
     local selector_options=()
-    local baseline
-    baseline="$(resolve_baseline || true)"
     local baseline_holdout=""
     local baseline_numbered=""
     if [[ -n "${baseline}" && -f "${baseline}" ]]; then
@@ -338,7 +444,7 @@ run_training() {
         echo "FASTSTAIR_BASELINE checkpoint=${baseline}"
         evaluate_checkpoint \
             n2_stairs_walk "${baseline_numbered}" "${baseline_holdout}" \
-            "${HOLDOUT_ENVS}" "${holdout_seed}" 2
+            "${HOLDOUT_ENVS}" "${holdout_seed}" 2 "${COMMAND_SPEED}"
         selector_options=(
             "--baseline=${baseline_holdout}"
             "--baseline-checkpoint=${baseline}"
@@ -399,8 +505,15 @@ run_training() {
 }
 
 smoke() {
+    local baseline
+    baseline="$(resolve_baseline || true)"
+    if [[ -z "${baseline}" || ! -f "${baseline}" ]]; then
+        echo "Smoke test requires N2_FASTSTAIR_BASELINE_CHECKPOINT." >&2
+        exit 2
+    fi
     python -u humanoid/scripts/train.py \
         --task=n2_faststair \
+        "--bootstrap_actor_checkpoint=${baseline}" \
         --headless \
         "--sim_device=${DEVICE}" \
         "--rl_device=${DEVICE}" \
@@ -409,7 +522,14 @@ smoke() {
         --max_iterations=5 \
         --experiment_name=n2_faststair_smoke \
         --run_name=planner_smoke \
-        --terrain_level_mix=0,1,2,3,4 \
+        --terrain_level_mix=0 \
+        "--command_speed=${STAGE1_SPEED}" \
+        "--learning_rate=${STAGE1_LEARNING_RATE}" \
+        --fixed_learning_rate \
+        "--action_noise_std=${STAGE1_NOISE}" \
+        --freeze_action_noise \
+        "--actor_reference_loss_coeff=${STAGE1_REFERENCE}" \
+        --actor_policy_loss_scale=0.50 \
         --save_interval=5
 }
 

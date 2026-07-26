@@ -1162,7 +1162,7 @@ class StairConfigurationTests(unittest.TestCase):
             )
             self.assertEqual(
                 faststair_train_cfg.algorithm.schedule,
-                "adaptive",
+                "fixed",
             )
             with (
                 ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
@@ -1312,6 +1312,10 @@ class StairConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(faststair_missing, [])
         self.assertGreater(faststair_scales["faststair_foothold"], 0.0)
+        self.assertGreater(faststair_scales["faststair_liftoff"], 0.0)
+        self.assertGreater(
+            faststair_scales["faststair_swing_progress"], 0.0
+        )
         self.assertLess(
             faststair_scales["faststair_foothold_error"], 0.0
         )
@@ -1521,14 +1525,20 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn('"n2_faststair"', registration)
         self.assertIn("N2StairsEnv", registration)
 
-    def test_faststair_launcher_is_guarded_and_from_scratch(self):
+    def test_faststair_launcher_is_guarded_and_actor_bootstrapped(self):
         launcher = (
             ROOT / "humanoid" / "scripts" / "run_faststair_n2.sh"
         ).read_text()
         self.assertIn("--task=n2_faststair", launcher)
-        self.assertIn("warm_start=False", launcher)
-        self.assertIn("schedule=adaptive", launcher)
-        self.assertNotIn("--fixed_learning_rate", launcher)
+        self.assertIn("--bootstrap_actor_checkpoint", launcher)
+        self.assertIn("actor_bootstrap=True", launcher)
+        self.assertIn("critic_bootstrap=False", launcher)
+        self.assertIn("schedule=fixed", launcher)
+        self.assertIn("--fixed_learning_rate", launcher)
+        self.assertIn("--freeze_action_noise", launcher)
+        self.assertIn("--stage=${stage}", launcher)
+        self.assertIn("FASTSTAIR_STAGE_GATE", launcher)
+        self.assertIn("FASTSTAIR_STAGE_STOP", launcher)
         self.assertIn("STAGE1_MIX=", launcher)
         self.assertIn("STAGE2_MIX=", launcher)
         self.assertIn("STAGE3_MIX=", launcher)
