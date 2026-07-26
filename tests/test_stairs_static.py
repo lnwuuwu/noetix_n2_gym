@@ -376,8 +376,9 @@ class StairGeometryTests(unittest.TestCase):
         pending = np.asarray([[True, True], [True, True]])
         new_swing = np.asarray([[True, False], [False, False]])
         previous_valid = np.asarray([[False, True], [True, True]])
-        # A raw sensor dropout can still be stable after release hysteresis;
-        # only the genuinely lost right-side support invalidates its swing.
+        # The stance foot must be stable when a new swing starts. Once the
+        # transaction exists, a stable-filter loss caused by tangential motion
+        # does not erase it while force and clearance still say grounded.
         opposite_stable = np.asarray([[True, True], [True, False]])
         np.testing.assert_array_equal(
             self.geometry.retained_swing_support_mask(
@@ -387,11 +388,24 @@ class StairGeometryTests(unittest.TestCase):
                 opposite_stable,
                 np.asarray([[False, False], [False, False]]),
             ),
-            [[True, True], [True, False]],
+            [[True, True], [True, True]],
         )
 
-        # A true opposite-foot lift permanently invalidates that swing even
-        # while stable-contact release hysteresis is still retaining support.
+        # A newly starting transaction without opposite stable support remains
+        # invalid, even if the force/clearance measurement is still grounded.
+        np.testing.assert_array_equal(
+            self.geometry.retained_swing_support_mask(
+                np.asarray([[True, True]]),
+                np.asarray([[True, False]]),
+                np.asarray([[False, False]]),
+                np.asarray([[False, False]]),
+                np.asarray([[False, False]]),
+            ),
+            [[False, False]],
+        )
+
+        # A true opposite-foot lift permanently invalidates an existing swing
+        # even while contact hysteresis is still retaining stable support.
         np.testing.assert_array_equal(
             self.geometry.retained_swing_support_mask(
                 np.asarray([[True, True]]),
@@ -1580,6 +1594,10 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("FASTSTAIR_STAGE_STOP", launcher)
         self.assertIn("FASTSTAIR_BOOTSTRAP_GATE", launcher)
         self.assertIn("FASTSTAIR_TRAINING_ABORT", launcher)
+        self.assertIn("FASTSTAIR_RESCREEN_APPROVED", launcher)
+        self.assertIn("FASTSTAIR_RESUME_GATE", launcher)
+        self.assertIn("N2_FASTSTAIR_RESUME_CHECKPOINT", launcher)
+        self.assertIn("N2_FASTSTAIR_START_STAGE", launcher)
         self.assertIn('NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"', launcher)
         self.assertIn("SAFE_TRAIN_ENV_LIMIT=1024", launcher)
         self.assertIn(

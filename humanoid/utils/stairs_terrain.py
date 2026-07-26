@@ -89,18 +89,23 @@ def retained_swing_support_mask(
     opposite_stable_support,
     opposite_true_airborne,
 ):
-    """Keep swing support valid across brief raw-contact sensor dropouts.
+    """Keep a support-to-support swing valid until the stance foot lifts.
 
-    ``opposite_stable_support`` is expected to include the caller's contact
-    release hysteresis.  A real loss longer than that hysteresis still
-    invalidates the whole swing, while one noisy raw-contact frame no longer
-    erases an otherwise valid support-to-support transition.
+    The opposite foot must provide stable support when the swing transaction
+    starts.  Once started, a temporary failure of the *stable* contact filter
+    must not erase the whole transaction: tangential stance-foot motion can
+    exceed that filter's slip threshold even though the foot never leaves the
+    tread.  The independent force-and-clearance measurement is the physical
+    authority after lift-off, so only a genuinely airborne stance foot
+    permanently invalidates the transaction.
     """
-    opposite_support = opposite_stable_support & ~opposite_true_airborne
-    started_valid = (new_swing & opposite_support) | (
+    opposite_grounded = ~opposite_true_airborne
+    started_valid = (
+        new_swing & opposite_stable_support & opposite_grounded
+    ) | (
         ~new_swing & previous_valid
     )
-    return pending_swing & started_valid & opposite_support
+    return pending_swing & started_valid & opposite_grounded
 
 
 def true_airborne_mask(

@@ -2029,9 +2029,12 @@ class N2StairsEnv(N2Env):
             )
 
             # Natural gait additionally requires the opposite foot to have
-            # remained in real contact for the whole swing. A brief double
-            # flight can still synchronize physical target state, but cannot
-            # collect the alternating-tread reward.
+            # remained physically grounded for the whole swing and to be
+            # stably supporting at touchdown. The latched validity deliberately
+            # ignores intermediate failures of the stricter tangential-slip
+            # filter: those are stance-quality defects, not proof of a hop.
+            # True force-and-clearance flight still invalidates the transaction
+            # permanently, so hopping cannot collect the alternating reward.
             opposite_stable_now = torch.flip(stable_support, dims=[1])
             opposite_true_airborne = torch.flip(
                 true_airborne_now, dims=[1]
@@ -2199,8 +2202,9 @@ class N2StairsEnv(N2Env):
         # Latch a pending lift on the first support-loss frame, independently
         # of stable-contact release hysteresis. A separate force-and-clearance
         # measurement must later prove true flight before this transaction can
-        # advance a tread. Keep it alive through impact until a geometrically
-        # valid, confirmed touchdown clears it.
+        # advance a tread. The stance foot must be stable at transaction start,
+        # but intermediate tangential-slip filter failures do not erase a
+        # physically grounded step; only true opposite-foot flight does.
         raw_airborne = ~self.contacts
         foot_was_supported = previous_stable_support & self.last_contacts
         opposite_stable_now = torch.flip(stable_support, dims=[1])

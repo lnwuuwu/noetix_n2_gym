@@ -13,6 +13,10 @@ SCREEN_ENVS="${N2_FASTSTAIR_SCREEN_ENVS:-64}"
 HOLDOUT_ENVS="${N2_FASTSTAIR_HOLDOUT_ENVS:-128}"
 COMMAND_SPEED="${N2_FASTSTAIR_COMMAND_SPEED:-0.18}"
 BASELINE_CHECKPOINT="${N2_FASTSTAIR_BASELINE_CHECKPOINT:-}"
+RESUME_CHECKPOINT="${N2_FASTSTAIR_RESUME_CHECKPOINT:-}"
+RESCREEN_CHECKPOINT="${N2_FASTSTAIR_RESCREEN_CHECKPOINT:-}"
+RESCREEN_STAGE="${N2_FASTSTAIR_RESCREEN_STAGE:-1}"
+START_STAGE="${N2_FASTSTAIR_START_STAGE:-1}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 ALLOW_PHYSX_OVERSUBSCRIPTION="${N2_FASTSTAIR_ALLOW_PHYSX_OVERSUBSCRIPTION:-0}"
 SAFE_TRAIN_ENV_LIMIT=1024
@@ -59,8 +63,10 @@ SCREEN_DECISION=""
 BOOTSTRAP_SOURCE=""
 
 usage() {
-    echo "Usage: $0 smoke|train|status|log|stop|view"
+    echo "Usage: $0 smoke|rescreen|train|status|log|stop|view"
     echo "train: Actor-bootstrapped FastStair training (easy -> mixed -> target)."
+    echo "rescreen: re-evaluate one existing FastStair checkpoint after metric fixes."
+    echo "Set N2_FASTSTAIR_RESUME_CHECKPOINT and N2_FASTSTAIR_START_STAGE to continue an approved stage source without bootstrapping again."
     echo "The approved legacy PPO checkpoint initializes the Actor and remains the holdout benchmark."
 }
 
@@ -69,6 +75,15 @@ require_positive_integer() {
     local value="$2"
     if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
         echo "${name} must be a positive integer, received ${value}" >&2
+        exit 2
+    fi
+}
+
+require_training_stage() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "${value}" =~ ^[123]$ ]]; then
+        echo "${name} must be 1, 2, or 3; received ${value}" >&2
         exit 2
     fi
 }
@@ -420,6 +435,86 @@ screen_stage() {
     echo "FASTSTAIR_STAGE_GATE stage=${stage} passed=True checkpoint=${SCREEN_WINNER}"
 }
 
+rescreen_checkpoint() {
+    require_positive_integer N2_FASTSTAIR_SCREEN_ENVS "${SCREEN_ENVS}"
+    require_training_stage N2_FASTSTAIR_RESCREEN_STAGE "${RESCREEN_STAGE}"
+    local checkpoint="${RESCREEN_CHECKPOINT}"
+    if [[ -z "${checkpoint}" ]]; then
+        checkpoint="${RESULT_DIR}/model_screen_best.pt"
+    fi
+    if [[ ! -f "${checkpoint}" ]]; then
+        echo "FastStair rescreen checkpoint does not exist: ${checkpoint}" >&2
+        echo "Set N2_FASTSTAIR_RESCREEN_CHECKPOINT=/absolute/path/model_N.pt" >&2
+        return 2
+    fi
+
+    local timestamp
+    timestamp="$(date +%m%d_%H-%M-%S)"
+    local work_dir="${WORK_ROOT}/rescreen_${timestamp}"
+    mkdir -p "${work_dir}"
+    local numbered
+    numbered="$(materialize_numbered_checkpoint "${checkpoint}" "${work_dir}")"
+    local evaluation="${work_dir}/candidate.csv"
+    local decision="${work_dir}/decision.json"
+    local speed="${STAGE1_SPEED}"
+    case "${RESCREEN_STAGE}" in
+        2) speed="${STAGE2_SPEED}" ;;
+        3) speed="${STAGE3_SPEED}" ;;
+    esac
+
+    echo "FASTSTAIR_RESCREEN stage=${RESCREEN_STAGE} checkpoint=${checkpoint}"
+    evaluate_checkpoint \
+        n2_faststair "${numbered}" "${evaluation}" \
+        "${SCREEN_ENVS}" "${SEED}" 2 "${speed}"
+    run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
+        "--stage=${RESCREEN_STAGE}" \
+        --candidate "rescreen|${evaluation}|${checkpoint}" \
+        "--output=${decision}"
+    local approved
+    approved="$(python -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["approved"])' \
+        "${decision}")"
+    echo "FASTSTAIR_RESCREEN_APPROVED=${approved}"
+    echo "N2_FASTSTAIR_RESCREEN_EVALUATION=${evaluation}"
+    echo "N2_FASTSTAIR_RESCREEN_DECISION=${decision}"
+}
+
+validate_resume_source() {
+    local checkpoint="$1"
+    local start_stage="$2"
+    local work_dir="$3"
+    if (( start_stage <= 1 )); then
+        return 0
+    fi
+    local prerequisite_stage=$((start_stage - 1))
+    local numbered
+    numbered="$(materialize_numbered_checkpoint "${checkpoint}" "${work_dir}")"
+    local evaluation="${work_dir}/resume_stage_${prerequisite_stage}.csv"
+    local decision="${work_dir}/resume_stage_${prerequisite_stage}_decision.json"
+    local speed="${STAGE1_SPEED}"
+    case "${prerequisite_stage}" in
+        2) speed="${STAGE2_SPEED}" ;;
+    esac
+    echo "FASTSTAIR_RESUME_GATE stage=${prerequisite_stage} checkpoint=${checkpoint}"
+    evaluate_checkpoint \
+        n2_faststair "${numbered}" "${evaluation}" \
+        "${SCREEN_ENVS}" "${SEED}" 2 "${speed}"
+    run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
+        "--stage=${prerequisite_stage}" \
+        --candidate "resume_source|${evaluation}|${checkpoint}" \
+        "--output=${decision}"
+    local approved
+    approved="$(python -c \
+        'import json,sys; print(str(json.load(open(sys.argv[1]))["approved"]).lower())' \
+        "${decision}")"
+    if [[ "${approved}" != "true" ]]; then
+        echo "FASTSTAIR_RESUME_GATE passed=False decision=${decision}"
+        echo "Refusing to skip an unpassed curriculum stage."
+        return 1
+    fi
+    echo "FASTSTAIR_RESUME_GATE passed=True decision=${decision}"
+}
+
 run_training() {
     require_positive_integer N2_FASTSTAIR_NUM_ENVS "${NUM_ENVS}"
     require_positive_integer N2_FASTSTAIR_PREFLIGHT_ENVS "${PREFLIGHT_ENVS}"
@@ -429,6 +524,7 @@ run_training() {
     require_positive_integer N2_FASTSTAIR_STAGE1_ITERATIONS "${STAGE1_ITERATIONS}"
     require_positive_integer N2_FASTSTAIR_STAGE2_ITERATIONS "${STAGE2_ITERATIONS}"
     require_positive_integer N2_FASTSTAIR_STAGE3_ITERATIONS "${STAGE3_ITERATIONS}"
+    require_training_stage N2_FASTSTAIR_START_STAGE "${START_STAGE}"
     if (( NUM_ENVS > SAFE_TRAIN_ENV_LIMIT )) \
         && [[ "${ALLOW_PHYSX_OVERSUBSCRIPTION}" != "1" ]]; then
         echo "N2_FASTSTAIR_NUM_ENVS=${NUM_ENVS} exceeds the verified PhysX-safe limit ${SAFE_TRAIN_ENV_LIMIT}." >&2
@@ -467,13 +563,35 @@ run_training() {
     echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 actor_bootstrap=True critic_bootstrap=False schedule=fixed"
     echo "FASTSTAIR_ANTI_CHEAT planner_forces_opposite_foot=True natural_gait_stage_gates=True"
     echo "FASTSTAIR_BOOTSTRAP checkpoint=${baseline}"
-    if ! bootstrap_preflight "${baseline}" "${timestamp}" "${work_dir}"; then
-        echo "FASTSTAIR_TRAINING_ABORT reason=bootstrap_preflight_failed"
-        echo "No PPO rollout was started; the approved legacy policy is unchanged."
-        return 0
+    if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+        if [[ ! -f "${RESUME_CHECKPOINT}" ]]; then
+            echo "FastStair resume checkpoint does not exist: ${RESUME_CHECKPOINT}" >&2
+            return 2
+        fi
+        # TaskRegistry resumes by iteration (model_N.pt), not by an arbitrary
+        # alias such as model_screen_best.pt. Materialize the exact checkpoint
+        # under its numbered name so both forms are safe resume sources.
+        mkdir -p "${work_dir}/resume_source"
+        source="$(materialize_numbered_checkpoint \
+            "${RESUME_CHECKPOINT}" "${work_dir}/resume_source")"
+        echo "FASTSTAIR_RESUME checkpoint=${source} start_stage=${START_STAGE}"
+        if ! validate_resume_source "${source}" "${START_STAGE}" "${work_dir}"; then
+            echo "FASTSTAIR_TRAINING_ABORT reason=resume_stage_gate_failed"
+            return 0
+        fi
+    else
+        if (( START_STAGE != 1 )); then
+            echo "N2_FASTSTAIR_START_STAGE=${START_STAGE} requires N2_FASTSTAIR_RESUME_CHECKPOINT." >&2
+            return 2
+        fi
+        if ! bootstrap_preflight "${baseline}" "${timestamp}" "${work_dir}"; then
+            echo "FASTSTAIR_TRAINING_ABORT reason=bootstrap_preflight_failed"
+            echo "No PPO rollout was started; the approved legacy policy is unchanged."
+            return 0
+        fi
+        source="${BOOTSTRAP_SOURCE}"
     fi
-    source="${BOOTSTRAP_SOURCE}"
-    for stage in 1 2 3; do
+    for ((stage=START_STAGE; stage<=3; stage++)); do
         case "${stage}" in
             1)
                 iterations="${STAGE1_ITERATIONS}"
@@ -675,6 +793,9 @@ launch() {
 case "${MODE}" in
     smoke)
         smoke
+        ;;
+    rescreen)
+        rescreen_checkpoint
         ;;
     train)
         launch
