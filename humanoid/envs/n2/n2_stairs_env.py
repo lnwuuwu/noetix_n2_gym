@@ -9,6 +9,11 @@ from isaacgym.torch_utils import (
 import torch
 
 from humanoid.envs.n2.n2_env import N2Env
+from humanoid.utils.faststair_planner import (
+    DCMPlannerWeights,
+    dcm_foothold_search,
+    rectangular_search_offsets,
+)
 from humanoid.utils.stairs_terrain import (
     classify_tread_transition,
     retained_swing_support_mask,
@@ -332,6 +337,33 @@ class N2StairsEnv(N2Env):
         self.include_residual_targets = bool(
             getattr(self.cfg.env, "include_residual_targets", False)
         )
+        self.enable_faststair_planner = bool(
+            getattr(self.cfg.env, "enable_faststair_planner", False)
+        )
+        self.include_faststair_planner_privileged = bool(
+            getattr(
+                self.cfg.env,
+                "include_faststair_planner_privileged",
+                False,
+            )
+        )
+        self.faststair_planner_obs_dim = int(
+            getattr(self.cfg.env, "faststair_planner_obs_dim", 0)
+        )
+        if (
+            self.include_faststair_planner_privileged
+            and not self.enable_faststair_planner
+        ):
+            raise ValueError(
+                "FastStair privileged observations require the DCM planner"
+            )
+        if (
+            self.include_faststair_planner_privileged
+            and self.faststair_planner_obs_dim != 8
+        ):
+            raise ValueError(
+                "FastStair planner privileged observation width must be 8"
+            )
         self.residual_target_obs_dim = int(
             getattr(self.cfg.env, "residual_target_obs_dim", 0)
         )
@@ -446,6 +478,223 @@ class N2StairsEnv(N2Env):
         self.foot_surface_offset = torch.full(
             (self.num_envs, len(self.feet_indices)),
             float(getattr(self.cfg.env, "nominal_foot_surface_offset", 0.045)),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.faststair_plan_target = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device
+        )
+        self.faststair_plan_nominal = torch.zeros_like(
+            self.faststair_plan_target
+        )
+        self.faststair_plan_dcm = torch.zeros(
+            self.num_envs, 2, dtype=torch.float, device=self.device
+        )
+        self.faststair_plan_predicted_dcm = torch.zeros_like(
+            self.faststair_plan_dcm
+        )
+        self.faststair_plan_cost = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.faststair_plan_valid = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.faststair_plan_active = torch.zeros_like(
+            self.faststair_plan_valid
+        )
+        self.faststair_plan_expected_foot = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.faststair_plan_edge_margin = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.faststair_latched_target = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            3,
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.faststair_latched_valid = torch.zeros_like(
+            self.contacts
+        )
+        self.faststair_latched_edge_margin = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.faststair_plan_request_count = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.faststair_plan_valid_count = torch.zeros_like(
+            self.faststair_plan_request_count
+        )
+        self.faststair_touchdown_error_sum = torch.zeros_like(
+            self.faststair_plan_request_count
+        )
+        self.faststair_touchdown_edge_margin_sum = torch.zeros_like(
+            self.faststair_plan_request_count
+        )
+        self.faststair_touchdown_count = torch.zeros_like(
+            self.faststair_plan_request_count
+        )
+        self.faststair_environment_ids = torch.arange(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        faststair_half_length = float(
+            getattr(self.cfg.env, "faststair_foot_half_length", 0.09)
+        )
+        faststair_half_width = float(
+            getattr(self.cfg.env, "faststair_foot_half_width", 0.035)
+        )
+        self.faststair_footprint_offsets = torch.tensor(
+            (
+                (-faststair_half_length, -faststair_half_width),
+                (-faststair_half_length, faststair_half_width),
+                (faststair_half_length, -faststair_half_width),
+                (faststair_half_length, faststair_half_width),
+            ),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.faststair_target_obs_scale = torch.tensor(
+            (
+                float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_target_obs_scale_x",
+                        0.45,
+                    )
+                ),
+                float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_target_obs_scale_y",
+                        0.15,
+                    )
+                ),
+                float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_target_obs_scale_z",
+                        0.20,
+                    )
+                ),
+            ),
+            dtype=torch.float,
+            device=self.device,
+        )
+        if self.enable_faststair_planner:
+            self.faststair_search_offsets = rectangular_search_offsets(
+                getattr(
+                    self.cfg.env,
+                    "faststair_candidate_x_offsets",
+                    [-0.04, -0.02, 0.0, 0.02, 0.04],
+                ),
+                getattr(
+                    self.cfg.env,
+                    "faststair_candidate_y_offsets",
+                    [-0.06, -0.04, -0.02, 0.0, 0.02, 0.04, 0.06],
+                ),
+                device=self.device,
+            )
+            self.faststair_planner_weights = DCMPlannerWeights(
+                nominal=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_nominal_cost_weight",
+                        1.0,
+                    )
+                ),
+                dcm_offset=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_dcm_cost_weight",
+                        2.0,
+                    )
+                ),
+                steepness=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_steepness_cost_weight",
+                        1.0,
+                    )
+                ),
+                edge=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_edge_cost_weight",
+                        0.35,
+                    )
+                ),
+                min_com_height=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_min_com_height",
+                        0.30,
+                    )
+                ),
+                max_com_height=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_max_com_height",
+                        1.20,
+                    )
+                ),
+                min_horizon=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_min_horizon_s",
+                        0.12,
+                    )
+                ),
+                max_horizon=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_max_horizon_s",
+                        0.45,
+                    )
+                ),
+                nominal_scale_x=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_nominal_scale_x",
+                        0.15,
+                    )
+                ),
+                nominal_scale_y=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_nominal_scale_y",
+                        0.10,
+                    )
+                ),
+                dcm_scale_x=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_dcm_scale_x",
+                        0.20,
+                    )
+                ),
+                dcm_scale_y=float(
+                    getattr(
+                        self.cfg.env,
+                        "faststair_dcm_scale_y",
+                        0.15,
+                    )
+                ),
+            )
+        else:
+            self.faststair_search_offsets = torch.zeros(
+                1, 2, dtype=torch.float, device=self.device
+            )
+            self.faststair_planner_weights = DCMPlannerWeights()
+        self.faststair_dcm_obs_scale = torch.tensor(
+            (
+                float(self.faststair_planner_weights.dcm_scale_x),
+                float(self.faststair_planner_weights.dcm_scale_y),
+            ),
             dtype=torch.float,
             device=self.device,
         )
@@ -819,6 +1068,15 @@ class N2StairsEnv(N2Env):
         self.last_episode_mean_right_foot_lateral_position = torch.zeros_like(
             self.best_forward_progress
         )
+        self.last_episode_faststair_planner_valid_fraction = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_faststair_foothold_error = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.last_episode_faststair_edge_margin = torch.zeros_like(
+            self.best_forward_progress
+        )
 
     def _get_noise_scale_vec(self, cfg):
         """Noise layout for commands, optional phase, proprioception, and terrain."""
@@ -1151,7 +1409,7 @@ class N2StairsEnv(N2Env):
         actor_heights = all_heights[:, self.actor_height_indices]
         obs_now = torch.cat((proprio, actor_heights), dim=-1)
 
-        critic_features = (
+        critic_features = [
             ("proprio", proprio, self.proprio_obs_size),
             ("base_lin_vel", self.base_lin_vel * self.obs_scales.lin_vel, 3),
             ("payload", self.payload * 0.5, 1),
@@ -1162,7 +1420,15 @@ class N2StairsEnv(N2Env):
             ("motor_strength", self.motor_strength, self.num_actions),
             ("foot_contacts", self.contacts, len(self.feet_indices)),
             ("terrain_heights", all_heights, critic_height_count),
-        )
+        ]
+        if self.include_faststair_planner_privileged:
+            critic_features.append(
+                (
+                    "faststair_planner",
+                    self._faststair_planner_observations(),
+                    self.faststair_planner_obs_dim,
+                )
+            )
         self.privileged_obs_buf = torch.cat(
             tuple(
                 self._reshape_critic_feature(name, value, width)
@@ -1282,6 +1548,310 @@ class N2StairsEnv(N2Env):
         px = torch.clamp(points[..., 0], 0, self.height_samples.shape[0] - 1)
         py = torch.clamp(points[..., 1], 0, self.height_samples.shape[1] - 1)
         return self.height_samples[px, py] * self.terrain.cfg.vertical_scale
+
+    def _faststair_nominal_landing(self, expected_foot):
+        """Return the center of the next tread in each foot's nominal lane."""
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        _, _, step_height = self._current_stair_targets()
+        next_tread = torch.clamp(
+            self.last_advanced_tread + 1,
+            min=1,
+            max=int(self.cfg.terrain.num_steps),
+        )
+        landing_x = stair_start_x + (
+            next_tread.float() - 0.5
+        ) * float(self.cfg.terrain.step_width)
+        lateral_offset = float(self.cfg.env.foothold_lateral_offset)
+        landing_y = self.env_origins[:, 1] + torch.where(
+            expected_foot == 0,
+            torch.full_like(landing_x, lateral_offset),
+            torch.full_like(landing_x, -lateral_offset),
+        )
+        ankle_offset = torch.gather(
+            self.foot_surface_offset,
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1)
+        landing_z = (
+            self.env_origins[:, 2]
+            + next_tread.float() * step_height
+            + ankle_offset
+        )
+        return (
+            torch.stack((landing_x, landing_y, landing_z), dim=1),
+            next_tread,
+        )
+
+    def _update_faststair_plan(self):
+        """Build and score terrain-valid DCM footholds for every environment."""
+        if not self.enable_faststair_planner:
+            self.faststair_plan_active.zero_()
+            self.faststair_plan_valid.zero_()
+            return
+
+        expected_foot, active = self._next_tread_swing_state()
+        nominal, next_tread = self._faststair_nominal_landing(expected_foot)
+        offsets = self.faststair_search_offsets
+        candidate_count = offsets.shape[0]
+        candidates = nominal.unsqueeze(1).expand(
+            -1, candidate_count, -1
+        ).clone()
+        candidates[:, :, :2] += offsets.unsqueeze(0)
+
+        half_length = float(
+            getattr(self.cfg.env, "faststair_foot_half_length", 0.09)
+        )
+        half_width = float(
+            getattr(self.cfg.env, "faststair_foot_half_width", 0.035)
+        )
+        footprint_xy = (
+            candidates[:, :, None, :2]
+            + self.faststair_footprint_offsets[None, None, :, :]
+        )
+        footprint_heights = self._sample_terrain_height_xy(footprint_xy)
+        center_heights = self._sample_terrain_height_xy(
+            candidates[:, :, :2]
+        )
+        maximum_height = torch.max(footprint_heights, dim=2).values
+        minimum_height = torch.min(footprint_heights, dim=2).values
+        flatness = maximum_height - minimum_height
+
+        _, _, step_height = self._current_stair_targets()
+        target_surface_height = (
+            self.env_origins[:, 2]
+            + next_tread.float() * step_height
+        )
+        surface_height = torch.mean(footprint_heights, dim=2)
+        ankle_offset = torch.gather(
+            self.foot_surface_offset,
+            1,
+            expected_foot.unsqueeze(1),
+        ).squeeze(1)
+        candidates[:, :, 2] = (
+            surface_height + ankle_offset.unsqueeze(1)
+        )
+
+        stair_start_x = self.stair_start_x[
+            self.terrain_levels, self.terrain_types
+        ]
+        tread_start_x = stair_start_x + (
+            next_tread.float() - 1.0
+        ) * float(self.cfg.terrain.step_width)
+        tread_end_x = tread_start_x + float(self.cfg.terrain.step_width)
+        leading_margin = (
+            tread_end_x.unsqueeze(1)
+            - (candidates[:, :, 0] + half_length)
+        )
+        trailing_margin = (
+            candidates[:, :, 0]
+            - half_length
+            - tread_start_x.unsqueeze(1)
+        )
+        lateral_margin = (
+            0.5 * float(self.cfg.terrain.terrain_width)
+            - torch.abs(
+                candidates[:, :, 1]
+                - self.env_origins[:, 1].unsqueeze(1)
+            )
+            - half_width
+        )
+        edge_margin = torch.minimum(
+            torch.minimum(leading_margin, trailing_margin),
+            lateral_margin,
+        )
+        flatness_tolerance = float(
+            getattr(
+                self.cfg.env,
+                "faststair_flatness_tolerance",
+                0.008,
+            )
+        )
+        height_tolerance = float(
+            getattr(
+                self.cfg.env,
+                "faststair_surface_height_tolerance",
+                0.008,
+            )
+        )
+        minimum_edge_margin = float(
+            getattr(
+                self.cfg.env,
+                "faststair_min_edge_margin",
+                0.005,
+            )
+        )
+        candidate_valid = (
+            (flatness <= flatness_tolerance)
+            & (
+                torch.abs(
+                    center_heights
+                    - target_surface_height.unsqueeze(1)
+                )
+                <= height_tolerance
+            )
+            & (edge_margin >= minimum_edge_margin)
+        )
+        normalized_steepness = flatness / max(
+            flatness_tolerance, 1.0e-4
+        )
+        preferred_edge_margin = float(
+            getattr(
+                self.cfg.env,
+                "faststair_preferred_edge_margin",
+                0.035,
+            )
+        )
+        edge_cost = torch.clamp(
+            (
+                preferred_edge_margin - edge_margin
+            ) / max(preferred_edge_margin, 1.0e-4),
+            min=0.0,
+            max=2.0,
+        )
+
+        stance_foot = 1 - expected_foot
+        gather_xy = stance_foot.view(-1, 1, 1).expand(-1, 1, 2)
+        stance_xy = torch.gather(
+            self.feet_pos[:, :, :2], 1, gather_xy
+        ).squeeze(1)
+        yaw = self.base_euler_xyz[:, 2]
+        command_x = self.commands[:, 0]
+        command_y = self.commands[:, 1]
+        desired_velocity_xy = torch.stack(
+            (
+                command_x * torch.cos(yaw)
+                - command_y * torch.sin(yaw),
+                command_x * torch.sin(yaw)
+                + command_y * torch.cos(yaw),
+            ),
+            dim=1,
+        )
+        gather_scalar = expected_foot.unsqueeze(1)
+        elapsed = torch.gather(
+            self.swing_elapsed_time, 1, gather_scalar
+        ).squeeze(1)
+        horizon = self._nominal_swing_duration() - elapsed
+        result = dcm_foothold_search(
+            com_xy=self.root_states[:, :2],
+            com_velocity_xy=self.root_states[:, 7:9],
+            com_height=self.root_states[:, 2] - self.terrain_h,
+            stance_xy=stance_xy,
+            desired_velocity_xy=desired_velocity_xy,
+            nominal_foothold=nominal,
+            candidates=candidates,
+            candidate_valid=candidate_valid,
+            horizon=horizon,
+            candidate_steepness=normalized_steepness,
+            candidate_edge_cost=edge_cost,
+            weights=self.faststair_planner_weights,
+        )
+        selected_edge_margin = torch.gather(
+            edge_margin, 1, result.selected_index.unsqueeze(1)
+        ).squeeze(1)
+        plan_valid = result.valid & active
+        environment_ids = self.faststair_environment_ids
+        previous_target = self.faststair_latched_target[
+            environment_ids, expected_foot
+        ]
+        previous_valid = self.faststair_latched_valid[
+            environment_ids, expected_foot
+        ]
+        smoothing = float(
+            getattr(
+                self.cfg.env,
+                "faststair_target_update_fraction",
+                0.20,
+            )
+        )
+        smoothing = min(max(smoothing, 0.0), 1.0)
+        smoothed_target = torch.where(
+            previous_valid.unsqueeze(1),
+            (1.0 - smoothing) * previous_target
+            + smoothing * result.foothold,
+            result.foothold,
+        )
+        selected_target = torch.where(
+            plan_valid.unsqueeze(1),
+            smoothed_target,
+            result.foothold,
+        )
+        self.faststair_plan_target[:] = selected_target
+        self.faststair_plan_nominal[:] = nominal
+        self.faststair_plan_dcm[:] = result.dcm
+        self.faststair_plan_predicted_dcm[:] = result.predicted_dcm
+        self.faststair_plan_cost[:] = result.cost
+        self.faststair_plan_valid[:] = plan_valid
+        self.faststair_plan_active[:] = active
+        self.faststair_plan_expected_foot[:] = expected_foot
+        self.faststair_plan_edge_margin[:] = torch.where(
+            result.valid,
+            selected_edge_margin,
+            torch.zeros_like(selected_edge_margin),
+        )
+        self.faststair_plan_request_count += active.float()
+        self.faststair_plan_valid_count += plan_valid.float()
+
+        latched_target = self.faststair_latched_target[
+            environment_ids, expected_foot
+        ]
+        self.faststair_latched_target[
+            environment_ids, expected_foot
+        ] = torch.where(
+            plan_valid.unsqueeze(1),
+            selected_target,
+            latched_target,
+        )
+        self.faststair_latched_edge_margin[
+            environment_ids, expected_foot
+        ] = torch.where(
+            plan_valid,
+            selected_edge_margin,
+            self.faststair_latched_edge_margin[
+                environment_ids, expected_foot
+            ],
+        )
+        self.faststair_latched_valid[
+            environment_ids, expected_foot
+        ] |= plan_valid
+
+    def _faststair_planner_observations(self):
+        """Return the eight planner features reserved for the privileged Critic."""
+        expected_foot = self.faststair_plan_expected_foot
+        stance_foot = 1 - expected_foot
+        gather_xy = stance_foot.view(-1, 1, 1).expand(-1, 1, 2)
+        stance_xy = torch.gather(
+            self.feet_pos[:, :, :2], 1, gather_xy
+        ).squeeze(1)
+        relative_target = torch.clamp(
+            (
+                self.faststair_plan_target
+                - self.root_states[:, :3]
+            ) / self.faststair_target_obs_scale,
+            min=-3.0,
+            max=3.0,
+        )
+        relative_dcm = torch.clamp(
+            (
+                self.faststair_plan_predicted_dcm - stance_xy
+            ) / self.faststair_dcm_obs_scale,
+            min=-3.0,
+            max=3.0,
+        )
+        active = self.faststair_plan_active.float().unsqueeze(1)
+        expected_one_hot = torch.nn.functional.one_hot(
+            expected_foot, num_classes=2
+        ).float()
+        return torch.cat(
+            (
+                relative_target * active,
+                relative_dcm * active,
+                expected_one_hot,
+                self.faststair_plan_valid.float().unsqueeze(1),
+            ),
+            dim=1,
+        )
 
     def _update_foot_step_progress(self):
         """Track stable landings and strict stair-over-stair alternation."""
@@ -1670,6 +2240,26 @@ class N2StairsEnv(N2Env):
         self.swing_forward_displacement_count += (
             measured_swing_landing.float()
         )
+        planned_landing = (
+            measured_swing_landing & self.faststair_latched_valid
+        )
+        planned_touchdown_error = torch.norm(
+            self.feet_pos - self.faststair_latched_target,
+            dim=2,
+        )
+        self.faststair_touchdown_error_sum += torch.sum(
+            planned_touchdown_error * planned_landing.float(),
+            dim=1,
+        )
+        self.faststair_touchdown_edge_margin_sum += torch.sum(
+            self.faststair_latched_edge_margin
+            * planned_landing.float(),
+            dim=1,
+        )
+        self.faststair_touchdown_count += torch.sum(
+            planned_landing.float(), dim=1
+        )
+        self.faststair_latched_valid[confirmed_landing] = False
         self.swing_start_valid[confirmed_landing] = False
         continued_pending_time = self.swing_pending_time + self.dt
         pending_duration = torch.where(
@@ -1836,11 +2426,24 @@ class N2StairsEnv(N2Env):
         initial_expected_foot = torch.where(
             has_physical_swing, physical_foot, scheduled_foot
         )
-        expected_foot = torch.where(
-            self.last_advanced_foot < 0,
-            initial_expected_foot,
-            torch.clamp(1 - self.last_advanced_foot, min=0, max=1),
-        )
+        if bool(
+            getattr(
+                self.cfg.env,
+                "faststair_follow_physical_swing",
+                False,
+            )
+        ):
+            # FastStair plans for the leg that is physically airborne.  It
+            # deliberately does not force the opposite of the last advancing
+            # foot: stable step-to recovery is allowed while the planner and
+            # terrain determine where that real swing should land.
+            expected_foot = initial_expected_foot
+        else:
+            expected_foot = torch.where(
+                self.last_advanced_foot < 0,
+                initial_expected_foot,
+                torch.clamp(1 - self.last_advanced_foot, min=0, max=1),
+            )
         scheduled_swing = torch.gather(
             scheduled_swing_mask.long(),
             1,
@@ -1921,34 +2524,21 @@ class N2StairsEnv(N2Env):
             self._swing_progress_state(), 1, gather_scalar
         ).squeeze(1)
 
-        levels = self.terrain_levels
-        types = self.terrain_types
-        stair_start_x = self.stair_start_x[levels, types]
         _, _, step_height = self._current_stair_targets()
-        next_tread = torch.clamp(
-            self.last_advanced_tread + 1,
-            min=1,
-            max=int(self.cfg.terrain.num_steps),
+        nominal_landing, _ = self._faststair_nominal_landing(
+            expected_foot
         )
-        step_width = float(self.cfg.terrain.step_width)
-        landing_x = stair_start_x + (
-            next_tread.float() - 0.5
-        ) * step_width
-        lateral_offset = float(self.cfg.env.foothold_lateral_offset)
-        landing_y = self.env_origins[:, 1] + torch.where(
-            expected_foot == 0,
-            torch.full_like(landing_x, lateral_offset),
-            torch.full_like(landing_x, -lateral_offset),
+        planner_matches_swing = (
+            self.faststair_plan_expected_foot == expected_foot
         )
-        ankle_offset = torch.gather(
-            self.foot_surface_offset, 1, gather_scalar
-        ).squeeze(1)
-        landing_z = (
-            self.env_origins[:, 2]
-            + next_tread.float() * step_height
-            + ankle_offset
-        )
-        landing = torch.stack((landing_x, landing_y, landing_z), dim=1)
+        if self.enable_faststair_planner:
+            landing = torch.where(
+                planner_matches_swing.unsqueeze(1),
+                self.faststair_plan_target,
+                nominal_landing,
+            )
+        else:
+            landing = nominal_landing
 
         target = smooth_swing_trajectory(
             start,
@@ -1985,6 +2575,10 @@ class N2StairsEnv(N2Env):
             * squared_error
         )
         target_active = active & start_valid
+        if self.enable_faststair_planner:
+            target_active &= (
+                planner_matches_swing & self.faststair_plan_valid
+            )
 
         # Do not pay positive tracking reward while the leg or foot is pushing
         # into a riser.  The bounded error and explicit collision terms remain.
@@ -2304,6 +2898,7 @@ class N2StairsEnv(N2Env):
             self.max_climb_height, current_climb_height
         )
         self._update_foot_step_progress()
+        self._update_faststair_plan()
 
         if self.enforce_walk_gait:
             (
@@ -2826,6 +3421,24 @@ class N2StairsEnv(N2Env):
         mean_right_foot_inward_error = mean_foot_inward_error[:, 1]
         mean_left_foot_lateral_position = mean_foot_lateral_position[:, 0]
         mean_right_foot_lateral_position = mean_foot_lateral_position[:, 1]
+        planner_valid_fraction = (
+            self.faststair_plan_valid_count[env_ids]
+            / torch.clamp(
+                self.faststair_plan_request_count[env_ids], min=1.0
+            )
+        ) * valid.float()
+        mean_faststair_foothold_error = (
+            self.faststair_touchdown_error_sum[env_ids]
+            / torch.clamp(
+                self.faststair_touchdown_count[env_ids], min=1.0
+            )
+        ) * valid.float()
+        mean_faststair_edge_margin = (
+            self.faststair_touchdown_edge_margin_sum[env_ids]
+            / torch.clamp(
+                self.faststair_touchdown_count[env_ids], min=1.0
+            )
+        ) * valid.float()
 
         self.last_episode_success[env_ids] = success
         self.last_episode_completion[env_ids] = completion
@@ -2916,6 +3529,15 @@ class N2StairsEnv(N2Env):
         )
         self.last_episode_mean_right_foot_lateral_position[env_ids] = (
             mean_right_foot_lateral_position
+        )
+        self.last_episode_faststair_planner_valid_fraction[env_ids] = (
+            planner_valid_fraction
+        )
+        self.last_episode_faststair_foothold_error[env_ids] = (
+            mean_faststair_foothold_error
+        )
+        self.last_episode_faststair_edge_margin[env_ids] = (
+            mean_faststair_edge_margin
         )
 
         super().reset_idx(env_ids)
@@ -3055,6 +3677,15 @@ class N2StairsEnv(N2Env):
                 "stairs_mean_right_foot_lateral_position": masked_mean(
                     mean_right_foot_lateral_position
                 ),
+                "faststair_planner_valid_fraction": masked_mean(
+                    planner_valid_fraction
+                ),
+                "faststair_foothold_error": masked_mean(
+                    mean_faststair_foothold_error
+                ),
+                "faststair_edge_margin": masked_mean(
+                    mean_faststair_edge_margin
+                ),
                 "stairs_survival_time": masked_mean(survival),
                 "stairs_command_x": masked_mean(episode_command),
             }
@@ -3124,6 +3755,23 @@ class N2StairsEnv(N2Env):
         self.foot_lateral_inward_error_sum[env_ids] = 0.0
         self.foot_lateral_position_sum[env_ids] = 0.0
         self.foot_lateral_sample_count[env_ids] = 0.0
+        self.faststair_plan_target[env_ids] = 0.0
+        self.faststair_plan_nominal[env_ids] = 0.0
+        self.faststair_plan_dcm[env_ids] = 0.0
+        self.faststair_plan_predicted_dcm[env_ids] = 0.0
+        self.faststair_plan_cost[env_ids] = 0.0
+        self.faststair_plan_valid[env_ids] = False
+        self.faststair_plan_active[env_ids] = False
+        self.faststair_plan_expected_foot[env_ids] = 0
+        self.faststair_plan_edge_margin[env_ids] = 0.0
+        self.faststair_latched_target[env_ids] = 0.0
+        self.faststair_latched_valid[env_ids] = False
+        self.faststair_latched_edge_margin[env_ids] = 0.0
+        self.faststair_plan_request_count[env_ids] = 0.0
+        self.faststair_plan_valid_count[env_ids] = 0.0
+        self.faststair_touchdown_error_sum[env_ids] = 0.0
+        self.faststair_touchdown_edge_margin_sum[env_ids] = 0.0
+        self.faststair_touchdown_count[env_ids] = 0.0
         self.top_reached_buf[env_ids] = False
         self.top_position_reached_buf[env_ids] = False
         self.completion_buf[env_ids] = False
@@ -3442,6 +4090,16 @@ class N2StairsEnv(N2Env):
 
     def _reward_stairs_swing_trajectory_error(self):
         """Provide a bounded gradient when the swing foot misses its arc."""
+        _, squared_error, active = self._swing_trajectory_state()
+        return squared_error * active
+
+    def _reward_faststair_foothold(self):
+        """Reward tracking the DCM-selected C2 swing-foot trajectory."""
+        score, _, active = self._swing_trajectory_state()
+        return score * active
+
+    def _reward_faststair_foothold_error(self):
+        """Penalize normalized error from the DCM-selected swing target."""
         _, squared_error, active = self._swing_trajectory_state()
         return squared_error * active
 

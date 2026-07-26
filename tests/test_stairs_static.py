@@ -941,8 +941,10 @@ class StairConfigurationTests(unittest.TestCase):
             cfg = stairs_module.N2StairsCfg()
             robust_cfg = stairs_module.N2StairsRobustCfg()
             walk_cfg = stairs_module.N2StairsWalkCfg()
+            faststair_cfg = stairs_module.N2FastStairCfg()
             train_cfg = stairs_module.N2StairsCfgPPO()
             walk_train_cfg = stairs_module.N2StairsWalkCfgPPO()
+            faststair_train_cfg = stairs_module.N2FastStairCfgPPO()
             self.assertEqual(cfg.env.num_observations, 375)
             self.assertEqual(cfg.env.num_privileged_obs, 146)
             self.assertTrue(cfg.asset.use_foot_force_sensors)
@@ -1120,6 +1122,48 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 walk_train_cfg.runner.experiment_name, "n2_stairs_walk"
             )
+            self.assertTrue(faststair_cfg.env.enable_faststair_planner)
+            self.assertTrue(
+                faststair_cfg.env.include_faststair_planner_privileged
+            )
+            self.assertTrue(
+                faststair_cfg.env.faststair_follow_physical_swing
+            )
+            self.assertEqual(faststair_cfg.env.num_single_obs, 115)
+            self.assertEqual(faststair_cfg.env.num_observations, 575)
+            self.assertEqual(faststair_cfg.env.num_privileged_obs, 217)
+            self.assertEqual(
+                len(faststair_cfg.terrain.actor_measured_points_x)
+                * len(faststair_cfg.terrain.actor_measured_points_y),
+                45,
+            )
+            self.assertEqual(
+                len(faststair_cfg.terrain.measured_points_x)
+                * len(faststair_cfg.terrain.measured_points_y),
+                77,
+            )
+            self.assertFalse(faststair_cfg.terrain.curriculum)
+            self.assertEqual(
+                faststair_cfg.terrain.level_mix,
+                [0, 0, 1, 1, 2, 3, 4, 4],
+            )
+            self.assertEqual(
+                len(faststair_cfg.env.faststair_candidate_x_offsets)
+                * len(faststair_cfg.env.faststair_candidate_y_offsets),
+                35,
+            )
+            self.assertEqual(
+                faststair_cfg.env.success_min_alternating_tread_count,
+                0,
+            )
+            self.assertEqual(
+                faststair_train_cfg.runner.experiment_name,
+                "n2_faststair",
+            )
+            self.assertEqual(
+                faststair_train_cfg.algorithm.schedule,
+                "adaptive",
+            )
             with (
                 ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
             ).open() as stream:
@@ -1254,6 +1298,28 @@ class StairConfigurationTests(unittest.TestCase):
             if value != 0 and name not in implemented
         )
         self.assertEqual(walk_missing, [])
+        faststair_scales = literal_assignments(
+            nested_class(
+                self.config_tree,
+                "N2FastStairCfg",
+                "rewards",
+                "scales",
+            )
+        )
+        faststair_missing = sorted(
+            name for name, value in faststair_scales.items()
+            if value != 0 and name not in implemented
+        )
+        self.assertEqual(faststair_missing, [])
+        self.assertGreater(faststair_scales["faststair_foothold"], 0.0)
+        self.assertLess(
+            faststair_scales["faststair_foothold_error"], 0.0
+        )
+        self.assertEqual(
+            faststair_scales["stairs_alternating_tread"], 0.0
+        )
+        self.assertEqual(faststair_scales["stairs_repeated_lead"], 0.0)
+        self.assertEqual(faststair_scales["stairs_same_tread_join"], 0.0)
         for required_reward in (
             "stairs_overspeed",
             "stairs_command_speed_error",
@@ -1452,7 +1518,28 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn('"n2_stairs"', registration)
         self.assertIn('"n2_stairs_robust"', registration)
         self.assertIn('"n2_stairs_walk"', registration)
+        self.assertIn('"n2_faststair"', registration)
         self.assertIn("N2StairsEnv", registration)
+
+    def test_faststair_launcher_is_guarded_and_from_scratch(self):
+        launcher = (
+            ROOT / "humanoid" / "scripts" / "run_faststair_n2.sh"
+        ).read_text()
+        self.assertIn("--task=n2_faststair", launcher)
+        self.assertIn("warm_start=False", launcher)
+        self.assertIn("schedule=adaptive", launcher)
+        self.assertNotIn("--fixed_learning_rate", launcher)
+        self.assertIn("STAGE1_MIX=", launcher)
+        self.assertIn("STAGE2_MIX=", launcher)
+        self.assertIn("STAGE3_MIX=", launcher)
+        self.assertIn("select_faststair_checkpoint.py", launcher)
+        self.assertIn("holdout_candidate.csv", launcher)
+        self.assertIn("holdout_baseline.csv", launcher)
+        self.assertIn("FASTSTAIR_HOLDOUT_APPROVED=True", launcher)
+        self.assertIn("FASTSTAIR_HOLDOUT_APPROVED=False", launcher)
+        self.assertIn("model_screen_best.pt", launcher)
+        self.assertIn("selected_checkpoint.txt", launcher)
+        self.assertIn("stability_selected_s*/model_best.pt", launcher)
 
     def test_play_has_no_one_meter_per_second_override(self):
         play_source = (ROOT / "humanoid" / "scripts" / "play.py").read_text()

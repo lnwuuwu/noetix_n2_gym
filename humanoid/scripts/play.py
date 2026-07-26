@@ -59,7 +59,12 @@ def play(args):
         args.num_envs = 1
     _disable_randomization(env_cfg)
 
-    stair_tasks = ("n2_stairs", "n2_stairs_robust", "n2_stairs_walk")
+    stair_tasks = (
+        "n2_stairs",
+        "n2_stairs_robust",
+        "n2_stairs_walk",
+        "n2_faststair",
+    )
     if args.task in stair_tasks:
         if not 0 <= args.terrain_level < env_cfg.terrain.num_rows:
             raise ValueError(

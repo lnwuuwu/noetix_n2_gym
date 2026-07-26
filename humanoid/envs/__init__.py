@@ -15,6 +15,8 @@ from .n2.n2_stairs_config import (
     N2StairsRobustCfgPPO,
     N2StairsWalkCfg,
     N2StairsWalkCfgPPO,
+    N2FastStairCfg,
+    N2FastStairCfgPPO,
 )
 
 
@@ -33,12 +35,17 @@ task_registry.register(
     N2StairsWalkCfg(),
     N2StairsWalkCfgPPO(),
 )
+task_registry.register(
+    "n2_faststair",
+    N2StairsEnv,
+    N2FastStairCfg(),
+    N2FastStairCfgPPO(),
+)
 
 # ---------------------------------------------- Mimic ----------------------------------------------
 from .n2.n2_mimic_env import N2MimicEnv
 from .n2.n2_mimic_config import N2MimicCfg, N2MimicCfgPPO
 task_registry.register( "n2_mimic", N2MimicEnv, N2MimicCfg(), N2MimicCfgPPO() )
-
 
 
 

@@ -170,10 +170,13 @@ def train(args):
             "--symmetrize_actor_reference requires a positive "
             "--actor_reference_loss_coeff"
         )
-    if args.symmetrize_actor_reference and args.task != "n2_stairs_walk":
+    if args.symmetrize_actor_reference and args.task not in (
+        "n2_stairs_walk",
+        "n2_faststair",
+    ):
         raise ValueError(
             "--symmetrize_actor_reference currently supports "
-            "n2_stairs_walk only"
+            "n2_stairs_walk and n2_faststair only"
         )
     if args.residual_policy:
         if args.task != "n2_stairs_walk":
@@ -216,6 +219,7 @@ def train(args):
         "n2_stairs",
         "n2_stairs_robust",
         "n2_stairs_walk",
+        "n2_faststair",
     )
     reward_scale_overrides = parse_reward_scale_overrides(
         args.reward_scale_overrides
@@ -512,9 +516,10 @@ def train(args):
         noise_parameter.requires_grad_(False)
         print("Action-noise parameter: frozen")
     if args.symmetry_loss_coeff > 0.0:
-        if args.task != "n2_stairs_walk":
+        if args.task not in ("n2_stairs_walk", "n2_faststair"):
             raise ValueError(
-                "--symmetry_loss_coeff currently supports n2_stairs_walk only"
+                "--symmetry_loss_coeff currently supports n2_stairs_walk "
+                "and n2_faststair only"
             )
         coefficient = float(args.symmetry_loss_coeff)
         symmetry_cfg = {

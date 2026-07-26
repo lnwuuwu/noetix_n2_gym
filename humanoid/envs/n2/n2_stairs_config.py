@@ -657,3 +657,224 @@ class N2StairsWalkCfgPPO(N2StairsCfgPPO):
     class runner(N2StairsCfgPPO.runner):
         experiment_name = "n2_stairs_walk"
         run_name = "phase_walk_v1"
+
+
+class N2FastStairCfg(N2StairsWalkCfg):
+    """FastStair-style safety pretraining with GPU DCM foothold planning.
+
+    This task intentionally starts from scratch.  Its wider elevation map and
+    planner-augmented Critic are incompatible with the legacy 410-wide Actor,
+    so a misleading warm start from ``model_9440.pt`` is rejected naturally by
+    the network shape check.  The old policy remains a benchmark and fallback.
+    """
+
+    class env(N2StairsWalkCfg.env):
+        enable_faststair_planner = True
+        include_faststair_planner_privileged = True
+        faststair_planner_obs_dim = 8
+        faststair_follow_physical_swing = True
+
+        # 70 deployable proprio/navigation values + a 9 x 5 elevation map.
+        num_single_obs = 115
+        frame_stack = 5
+        num_observations = frame_stack * num_single_obs
+        # Critic = proprio(70) + base velocity(3) + dynamics(3) +
+        # actuator randomization(54) + contacts(2) + map(77) + planner(8).
+        num_privileged_obs = 217
+
+        # The policy may recover with step-to support; no alternating-foot
+        # condition is used to declare a safe physical climb successful.
+        success_min_phase_contact_match = 0.0
+        success_max_double_flight_fraction = 0.12
+        success_min_alternating_tread_count = 0
+        success_min_alternating_tread_rate = 0.0
+        success_max_same_tread_join_rate = 1.0
+        success_max_skipped_tread_rate = 1.0
+        success_max_sagittal_foot_separation = 0.52
+        curriculum_min_alternating_tread_count = 0
+        curriculum_min_alternating_tread_rate = 0.0
+        curriculum_max_same_tread_join_rate = 1.0
+        curriculum_max_skipped_tread_rate = 1.0
+        curriculum_min_phase_contact_match = 0.0
+        curriculum_max_double_flight_fraction = 0.15
+        top_dwell_s = 0.25
+        completion_dwell_s = 0.40
+
+        # Fresh training uses the tread-matched clock immediately.  The clock
+        # remains an observation, but planner targets follow the real airborne
+        # leg instead of enforcing an open-loop alternating sequence.
+        gait_frequency_transition_steps = 0
+        randomize_gait_phase = True
+
+        # GPU candidate set: 35 terrain-checked placements around the nominal
+        # foot lane.  The 18 cm sole still retains at least 5 mm of tread edge
+        # margin on every accepted candidate.
+        faststair_candidate_x_offsets = [-0.04, -0.02, 0.0, 0.02, 0.04]
+        faststair_candidate_y_offsets = [
+            -0.06,
+            -0.04,
+            -0.02,
+            0.0,
+            0.02,
+            0.04,
+            0.06,
+        ]
+        faststair_foot_half_length = 0.09
+        faststair_foot_half_width = 0.035
+        faststair_flatness_tolerance = 0.008
+        faststair_surface_height_tolerance = 0.008
+        faststair_min_edge_margin = 0.005
+        faststair_preferred_edge_margin = 0.035
+        faststair_target_update_fraction = 0.15
+
+        # DCM/VHIP search limits and dimensionless costs.  The nominal term
+        # prevents foot-lane drift, while the DCM term moves the landing only
+        # when current CoM state requires a capture correction.
+        faststair_nominal_cost_weight = 1.0
+        faststair_dcm_cost_weight = 1.5
+        faststair_steepness_cost_weight = 2.0
+        faststair_edge_cost_weight = 0.75
+        faststair_min_com_height = 0.35
+        faststair_max_com_height = 1.00
+        faststair_min_horizon_s = 0.12
+        faststair_max_horizon_s = 0.45
+        faststair_nominal_scale_x = 0.12
+        faststair_nominal_scale_y = 0.08
+        faststair_dcm_scale_x = 0.18
+        faststair_dcm_scale_y = 0.12
+        faststair_target_obs_scale_x = 0.45
+        faststair_target_obs_scale_y = 0.15
+        faststair_target_obs_scale_z = 0.20
+
+    class terrain(N2StairsWalkCfg.terrain):
+        # A fixed mixed batch avoids the old 2 cm curriculum trap while still
+        # allocating half the robots to the two easiest discovery levels.
+        curriculum = False
+        fixed_level = -1
+        level_mix = [0, 0, 1, 1, 2, 3, 4, 4]
+        measured_points_x = [
+            -0.20,
+            0.0,
+            0.15,
+            0.30,
+            0.45,
+            0.60,
+            0.75,
+            0.90,
+            1.05,
+            1.20,
+            1.35,
+        ]
+        measured_points_y = [
+            -0.30,
+            -0.20,
+            -0.10,
+            0.0,
+            0.10,
+            0.20,
+            0.30,
+        ]
+        actor_measured_points_x = [
+            0.15,
+            0.30,
+            0.45,
+            0.60,
+            0.75,
+            0.90,
+            1.05,
+            1.20,
+            1.35,
+        ]
+        actor_measured_points_y = [-0.20, -0.10, 0.0, 0.10, 0.20]
+
+    class commands(N2StairsWalkCfg.commands):
+        curriculum = False
+
+        class ranges(N2StairsWalkCfg.commands.ranges):
+            lin_vel_x = [0.10, 0.22]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
+
+    class domain_rand(N2StairsWalkCfg.domain_rand):
+        # Stage 1 discovers safe footholds before actuator perturbations.
+        action_delay = False
+        randomize_gains = False
+        randomize_motor_strength = False
+        randomize_friction = True
+        friction_range = [0.75, 1.00]
+        randomize_restitution = False
+        push_robots = False
+        disturbance = False
+
+    class rewards(N2StairsWalkCfg.rewards):
+        class scales(N2StairsWalkCfg.rewards.scales):
+            tracking_lin_vel = 2.5
+            tracking_ang_vel = 0.5
+            stairs_forward_progress = 0.75
+            stairs_vertical_progress = 2.0
+            stairs_command_speed_error = -8.0
+            stairs_overspeed = -12.0
+            stairs_completion = 5.0
+            stairs_curriculum_completion = 0.0
+            stairs_success = 15.0
+
+            # The planner replaces fixed tread centers and strict alternating
+            # shaping.  A C2 swing target supplies the dense Stage-1 signal.
+            faststair_foothold = 6.0
+            faststair_foothold_error = -5.0
+            stairs_swing_trajectory = 0.0
+            stairs_swing_trajectory_error = 0.0
+            stairs_phase_contact = 0.25
+            stairs_phase_contact_mismatch = -0.25
+            stairs_sagittal_foot_phase = 0.0
+            stairs_sagittal_foot_phase_error = 0.0
+            stairs_foot_step_progress = 0.0
+            stairs_alternating_tread = 0.0
+            stairs_repeated_lead = 0.0
+            stairs_same_tread_join = 0.0
+            stairs_same_tread_support = 0.0
+            stairs_skipped_tread = -2.0
+
+            stairs_double_flight = -6.0
+            stairs_single_support = 0.30
+            stairs_stable_contact = 0.50
+            stairs_swing_timeout = -2.0
+            stairs_lower_leg_collision = -5.0
+            stairs_foot_riser_collision = -5.0
+            stairs_overstride = -2.0
+            stairs_swing_knee_flexion = 1.0
+            stairs_swing_knee_deficit = -2.0
+            stairs_arm_swing = 0.20
+
+            stairs_lateral_drift = -8.0
+            stairs_heading_alignment = 2.5
+            stairs_leg_alignment = -1.5
+            stairs_feet_yaw = -1.5
+            stairs_forward_pitch = 0.75
+            stairs_base_behind_support = -3.0
+            stairs_foot_pitch = -1.5
+            lin_vel_z = -2.5
+            ang_vel_xy = -0.20
+            orientation = 0.50
+            action_rate = -0.08
+            action_smoothness = -0.08
+            dof_acc = -2.0e-7
+
+    class noise(N2StairsWalkCfg.noise):
+        noise_level = 0.25
+
+
+class N2FastStairCfgPPO(N2StairsCfgPPO):
+    class policy(N2StairsCfgPPO.policy):
+        init_noise_std = 0.55
+
+    class algorithm(N2StairsCfgPPO.algorithm):
+        learning_rate = 3.0e-4
+        entropy_coef = 0.006
+        desired_kl = 0.012
+
+    class runner(N2StairsCfgPPO.runner):
+        max_iterations = 4000
+        save_interval = 50
+        experiment_name = "n2_faststair"
+        run_name = "dcm_safety_stage1"

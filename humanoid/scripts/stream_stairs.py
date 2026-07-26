@@ -35,7 +35,12 @@ from humanoid.utils.residual_policy import (
 from humanoid.utils.task_registry import task_registry
 
 
-STAIR_TASKS = ("n2_stairs", "n2_stairs_robust", "n2_stairs_walk")
+STAIR_TASKS = (
+    "n2_stairs",
+    "n2_stairs_robust",
+    "n2_stairs_walk",
+    "n2_faststair",
+)
 
 
 class _FrameStore:

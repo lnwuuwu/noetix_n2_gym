@@ -358,6 +358,21 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
                                 env_id
                             ].item()
                         ),
+                        "faststair_planner_valid_fraction": float(
+                            env.last_episode_faststair_planner_valid_fraction[
+                                env_id
+                            ].item()
+                        ),
+                        "faststair_foothold_error_m": float(
+                            env.last_episode_faststair_foothold_error[
+                                env_id
+                            ].item()
+                        ),
+                        "faststair_edge_margin_m": float(
+                            env.last_episode_faststair_edge_margin[
+                                env_id
+                            ].item()
+                        ),
                         "action_rate_rms": float(
                             torch.sqrt(
                                 action_rate_square_sum[env_id]
@@ -563,6 +578,15 @@ def _evaluate_level(env, policy, level, command_speed, episodes_per_env):
         "mean_right_foot_lateral_position_m": mean(
             "mean_right_foot_lateral_position_m"
         ),
+        "mean_faststair_planner_valid_fraction": mean(
+            "faststair_planner_valid_fraction"
+        ),
+        "mean_faststair_foothold_error_m": mean(
+            "faststair_foothold_error_m"
+        ),
+        "mean_faststair_edge_margin_m": mean(
+            "faststair_edge_margin_m"
+        ),
         "mean_action_rate_rms": mean("action_rate_rms"),
         "mean_action_accel_rms": mean("action_accel_rms"),
         "mean_actor_symmetry_error_rms": mean(
@@ -600,6 +624,7 @@ def evaluate(args):
         "n2_stairs",
         "n2_stairs_robust",
         "n2_stairs_walk",
+        "n2_faststair",
     ):
         raise ValueError("eval_stairs.py only supports n2_stairs tasks")
     if args.num_envs is None:
@@ -718,6 +743,9 @@ def evaluate(args):
             "Lsw{mean_left_swing_action_accel_rms:.3f} "
             "phase_roll=Rsw{mean_right_swing_roll_rate_rms:.3f}/"
             "Lsw{mean_left_swing_roll_rate_rms:.3f} "
+            "plan_valid={mean_faststair_planner_valid_fraction:.1%} "
+            "plan_err={mean_faststair_foothold_error_m:.3f}m "
+            "edge={mean_faststair_edge_margin_m:.3f}m "
             "arm={mean_arm_swing_match:.2f} "
             "gait={mean_gait_frequency_hz:.2f}Hz "
             "fall={fall_rate:.1%}".format(

@@ -68,6 +68,7 @@ docs/*
 !docs/AUTODL_STAIRS.md
 !docs/N2_STAIRS_TRAINING_GUIDE.md
 !docs/RL_ALGORITHM_ALTERNATIVES.md
+!docs/FASTSTAIR_N2.md
 # resources
 
 # other
