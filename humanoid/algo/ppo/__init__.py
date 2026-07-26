@@ -29,7 +29,7 @@
 #
 # Copyright (c) 2024 Beijing RobotEra TECHNOLOGY CO.,LTD. All rights reserved.
 
-from .actor_critic import ActorCritic
+from .actor_critic import ActorCritic, ResidualActorCritic
 #from .memory import Memory
 from .ppo import PPO
 from .on_policy_runner import OnPolicyRunner

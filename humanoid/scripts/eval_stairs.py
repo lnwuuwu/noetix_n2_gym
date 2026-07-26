@@ -19,6 +19,11 @@ from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs import *  # noqa: F401,F403 - task registration side effects
 from humanoid.utils.helpers import parse_humanoid_args
 from humanoid.utils.policy_symmetry import make_reflection_blended_policy
+from humanoid.utils.residual_policy import (
+    configure_residual_policy,
+    residual_metadata_from_checkpoint,
+    resolve_checkpoint_path,
+)
 from humanoid.utils.task_registry import task_registry
 
 
@@ -603,6 +608,19 @@ def evaluate(args):
         raise ValueError("--episodes_per_env must be positive")
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    if args.resume:
+        checkpoint_path = resolve_checkpoint_path(args, train_cfg)
+        policy_metadata = residual_metadata_from_checkpoint(
+            checkpoint_path
+        )
+        if configure_residual_policy(
+            env_cfg, train_cfg, policy_metadata
+        ):
+            print(
+                "Detected residual policy checkpoint: {}".format(
+                    checkpoint_path
+                )
+            )
     step_heights = list(env_cfg.terrain.step_heights)
     levels = _parse_levels(args, step_heights)
     command_min = env_cfg.commands.ranges.lin_vel_x[0]

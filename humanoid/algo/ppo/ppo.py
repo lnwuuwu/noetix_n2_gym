@@ -43,6 +43,7 @@ class PPO:
         device="cpu",                    # 计算设备
         normalize_advantage_per_mini_batch=False,  # 是否按小批次归一化优势函数
         symmetry_cfg: Optional[dict] = None,
+        residual_l2_coeff: float = 0.0,
         multi_gpu_cfg: Optional[dict] = None,      # 多GPU配置
     ):
         """
@@ -107,6 +108,23 @@ class PPO:
         self.actor_reference_symmetry_env = None
         self.actor_reference_mirror_blend = 0.5
         self.surrogate_loss_scale = 1.0
+        self.set_residual_regularization(residual_l2_coeff)
+
+    def set_residual_regularization(self, coefficient):
+        """Penalize use of a bounded residual, not the frozen base Actor."""
+        coefficient = float(coefficient)
+        if not math.isfinite(coefficient) or coefficient < 0.0:
+            raise ValueError(
+                "Residual regularization coefficient must be finite and "
+                "non-negative"
+            )
+        if coefficient > 0.0 and not hasattr(
+            self.policy, "normalized_residual_correction"
+        ):
+            raise ValueError(
+                "Residual regularization requires a residual policy"
+            )
+        self.residual_l2_coeff = coefficient
 
     def set_symmetry_config(self, symmetry_cfg):
         """Configure an optional exact actor-reflection consistency loss."""
@@ -302,6 +320,7 @@ class PPO:
         mean_entropy = 0         # 平均熵
         mean_symmetry_loss = 0
         mean_actor_reference_loss = 0
+        mean_residual_l2_loss = 0
 
         # 小批次生成器
         if self.policy.is_recurrent:
@@ -389,7 +408,7 @@ class PPO:
                 mirrored_obs = symmetry_env.mirror_observations(
                     obs_batch
                 )
-                mirrored_mean = self.policy.actor(mirrored_obs)
+                mirrored_mean = self.policy.actor_mean(mirrored_obs)
                 expected_mirrored_mean = symmetry_env.mirror_actions(
                     self.policy.action_mean
                 )
@@ -420,6 +439,15 @@ class PPO:
                 actor_reference_loss = (
                     self.actor_reference_loss_coeff
                     * F.mse_loss(self.policy.action_mean, reference_mean)
+                )
+            residual_l2_loss = torch.zeros((), device=self.device)
+            if self.residual_l2_coeff > 0.0:
+                normalized_residual = (
+                    self.policy.normalized_residual_correction(obs_batch)
+                )
+                residual_l2_loss = (
+                    self.residual_l2_coeff
+                    * torch.mean(torch.square(normalized_residual))
                 )
 
             # KL散度计算
@@ -487,6 +515,7 @@ class PPO:
                 - self.entropy_coef * entropy_batch.mean()
                 + symmetry_loss
                 + actor_reference_loss
+                + residual_l2_loss
             )
 
             # 计算梯度
@@ -509,6 +538,7 @@ class PPO:
             mean_entropy += entropy_batch.mean().item()
             mean_symmetry_loss += symmetry_loss.item()
             mean_actor_reference_loss += actor_reference_loss.item()
+            mean_residual_l2_loss += residual_l2_loss.item()
 
         # -- 对于PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches  # 更新次数
@@ -517,6 +547,7 @@ class PPO:
         mean_entropy /= num_updates         # 平均熵
         mean_symmetry_loss /= num_updates
         mean_actor_reference_loss /= num_updates
+        mean_residual_l2_loss /= num_updates
        
         # -- 清除存储
         self.storage.clear()
@@ -528,6 +559,7 @@ class PPO:
             "entropy": mean_entropy,              # 熵
             "symmetry": mean_symmetry_loss,
             "actor_reference": mean_actor_reference_loss,
+            "residual_l2": mean_residual_l2_loss,
         }
 
         return loss_dict

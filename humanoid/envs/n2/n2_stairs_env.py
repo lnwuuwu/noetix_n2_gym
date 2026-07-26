@@ -176,6 +176,39 @@ class N2StairsEnv(N2Env):
             )
         self.mirror_single_source = torch.tensor(source, dtype=torch.long)
         self.mirror_single_sign = torch.tensor(signs, dtype=torch.float)
+        if getattr(self, "include_residual_targets", False):
+            if getattr(self, "residual_target_obs_dim", 0) != 15:
+                raise ValueError(
+                    "Residual stair-target mirror expects 15 features, "
+                    "received {}".format(self.residual_target_obs_dim)
+                )
+            # desired L/R, contact L/R, progress L/R, expected-foot L/R,
+            # target active, target error XYZ, pelvis Y, lateral velocity,
+            # and normalized step height.
+            self.mirror_residual_source = torch.tensor(
+                [1, 0, 3, 2, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14],
+                dtype=torch.long,
+            )
+            self.mirror_residual_sign = torch.tensor(
+                [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    -1.0,
+                    1.0,
+                    -1.0,
+                    -1.0,
+                    1.0,
+                ],
+                dtype=torch.float,
+            )
 
     def mirror_actions(self, actions):
         source = self.mirror_action_source.to(device=actions.device)
@@ -192,9 +225,14 @@ class N2StairsEnv(N2Env):
                     expected_width, observations.shape[-1]
                 )
             )
-        shape = observations.shape
-        frames = observations.reshape(
-            *shape[:-1],
+        base_width = (
+            int(self.cfg.env.frame_stack)
+            * int(self.cfg.env.num_single_obs)
+        )
+        base_observations = observations[..., :base_width]
+        base_shape = base_observations.shape
+        frames = base_observations.reshape(
+            *base_shape[:-1],
             int(self.cfg.env.frame_stack),
             int(self.cfg.env.num_single_obs),
         )
@@ -202,9 +240,22 @@ class N2StairsEnv(N2Env):
         signs = self.mirror_single_sign.to(
             device=observations.device, dtype=observations.dtype
         )
-        return (
+        mirrored_base = (
             frames.index_select(-1, source) * signs
-        ).reshape(shape)
+        ).reshape(base_shape)
+        if not getattr(self, "include_residual_targets", False):
+            return mirrored_base
+        residual = observations[..., base_width:]
+        residual_source = self.mirror_residual_source.to(
+            device=observations.device
+        )
+        residual_sign = self.mirror_residual_sign.to(
+            device=observations.device, dtype=observations.dtype
+        )
+        mirrored_residual = (
+            residual.index_select(-1, residual_source) * residual_sign
+        )
+        return torch.cat((mirrored_base, mirrored_residual), dim=-1)
 
     def create_sim(self):
         """Create the directional stair generator instead of mixed HumanoidTerrain."""
@@ -278,6 +329,33 @@ class N2StairsEnv(N2Env):
         self.include_navigation_state = bool(
             getattr(self.cfg.env, "include_navigation_state", False)
         )
+        self.include_residual_targets = bool(
+            getattr(self.cfg.env, "include_residual_targets", False)
+        )
+        self.residual_target_obs_dim = int(
+            getattr(self.cfg.env, "residual_target_obs_dim", 0)
+        )
+        self.base_actor_obs_dim = (
+            int(self.cfg.env.frame_stack)
+            * int(self.cfg.env.num_single_obs)
+        )
+        expected_actor_obs_dim = self.base_actor_obs_dim
+        if self.include_residual_targets:
+            expected_actor_obs_dim += self.residual_target_obs_dim
+        if int(self.cfg.env.num_observations) != expected_actor_obs_dim:
+            raise ValueError(
+                "Actor observation config is {}, expected {} (base {} + "
+                "residual {})".format(
+                    self.cfg.env.num_observations,
+                    expected_actor_obs_dim,
+                    self.base_actor_obs_dim,
+                    (
+                        self.residual_target_obs_dim
+                        if self.include_residual_targets
+                        else 0
+                    ),
+                )
+            )
         self.proprio_obs_size = self._BASE_PROPRIO_OBS
         self.proprio_obs_size += 2 if self.include_gait_phase else 0
         self.proprio_obs_size += 3 if self.include_base_lin_vel else 0
@@ -889,6 +967,140 @@ class N2StairsEnv(N2Env):
             )
         return value
 
+    def _residual_target_observations(self):
+        """Build deployable contact/foothold features for the residual Actor.
+
+        These values deliberately bypass the frozen 410-wide base Actor.  They
+        are expressed in the local stair frame and normalized to order-one
+        ranges, so the correction network does not have to reconstruct foot
+        kinematics and contact transactions from five noisy proprio frames.
+        """
+        expected_foot, strict_active = self._next_tread_swing_state()
+        expected_one_hot = torch.nn.functional.one_hot(
+            expected_foot, num_classes=2
+        ).float()
+        progress_per_foot = self._swing_progress_state()
+        gather_xyz = expected_foot.view(-1, 1, 1).expand(-1, 1, 3)
+        gather_scalar = expected_foot.unsqueeze(1)
+        actual = torch.gather(
+            self.feet_pos, 1, gather_xyz
+        ).squeeze(1)
+        start = torch.gather(
+            self.swing_start_pos, 1, gather_xyz
+        ).squeeze(1)
+        start_valid = torch.gather(
+            self.swing_start_valid.long(), 1, gather_scalar
+        ).squeeze(1).bool()
+        start = torch.where(start_valid.unsqueeze(1), start, actual)
+        progress = torch.gather(
+            progress_per_foot, 1, gather_scalar
+        ).squeeze(1)
+
+        levels = self.terrain_levels
+        types = self.terrain_types
+        stair_start_x = self.stair_start_x[levels, types]
+        _, _, step_height = self._current_stair_targets()
+        next_tread = torch.clamp(
+            self.last_advanced_tread + 1,
+            min=1,
+            max=int(self.cfg.terrain.num_steps),
+        )
+        landing_x = stair_start_x + (
+            next_tread.float() - 0.5
+        ) * float(self.cfg.terrain.step_width)
+        lateral_offset = float(self.cfg.env.foothold_lateral_offset)
+        landing_y = self.env_origins[:, 1] + torch.where(
+            expected_foot == 0,
+            torch.full_like(landing_x, lateral_offset),
+            torch.full_like(landing_x, -lateral_offset),
+        )
+        ankle_offset = torch.gather(
+            self.foot_surface_offset, 1, gather_scalar
+        ).squeeze(1)
+        landing_z = (
+            self.env_origins[:, 2]
+            + next_tread.float() * step_height
+            + ankle_offset
+        )
+        landing = torch.stack((landing_x, landing_y, landing_z), dim=1)
+        target = smooth_swing_trajectory(
+            start,
+            landing,
+            progress,
+            float(self.cfg.env.swing_trajectory_arc_base)
+            + float(self.cfg.env.swing_trajectory_arc_height_gain)
+            * step_height,
+            float(self.cfg.env.swing_trajectory_forward_delay),
+            float(self.cfg.env.swing_trajectory_lift_end),
+            float(self.cfg.env.swing_trajectory_descent_start),
+        )
+
+        scheduled_swing = torch.gather(
+            (~self.desired_contacts).long(), 1, gather_scalar
+        ).squeeze(1).bool()
+        transaction_active = torch.gather(
+            self.swing_active.long(), 1, gather_scalar
+        ).squeeze(1).bool()
+        near_stairs = self.root_states[:, 0] >= (
+            stair_start_x
+            - float(self.cfg.env.first_tread_target_activation_distance)
+        )
+        target_active = (
+            (scheduled_swing | transaction_active)
+            & near_stairs
+            & (self.last_advanced_tread < int(self.cfg.terrain.num_steps))
+        )
+        normalizers = torch.tensor(
+            [
+                float(self.cfg.env.swing_trajectory_x_normalizer),
+                float(self.cfg.env.swing_trajectory_y_normalizer),
+                float(self.cfg.env.swing_trajectory_z_normalizer),
+            ],
+            dtype=torch.float,
+            device=self.device,
+        )
+        target_error = torch.clamp(
+            (actual - target) / normalizers,
+            min=-2.0,
+            max=2.0,
+        ) * target_active.float().unsqueeze(1)
+        lateral_position = torch.clamp(
+            (
+                self.root_states[:, 1] - self.env_origins[:, 1]
+            ) / float(self.cfg.env.lateral_error_normalizer),
+            min=-2.0,
+            max=2.0,
+        ).unsqueeze(1)
+        lateral_velocity = torch.clamp(
+            self.base_lin_vel[:, 1] / 0.30,
+            min=-2.0,
+            max=2.0,
+        ).unsqueeze(1)
+        normalized_height = torch.clamp(
+            step_height / 0.10, min=0.0, max=1.5
+        ).unsqueeze(1)
+        features = torch.cat(
+            (
+                self.desired_contacts.float(),
+                self.contacts.float(),
+                progress_per_foot,
+                expected_one_hot,
+                strict_active.float().unsqueeze(1),
+                target_error,
+                lateral_position,
+                lateral_velocity,
+                normalized_height,
+            ),
+            dim=1,
+        )
+        if features.shape[1] != self.residual_target_obs_dim:
+            raise RuntimeError(
+                "Residual target observation width {} != {}".format(
+                    features.shape[1], self.residual_target_obs_dim
+                )
+            )
+        return features
+
     def compute_observations(self):
         proprio_parts = [self.commands[:, :3] * self.commands_scale]
         if self.include_gait_phase:
@@ -982,9 +1194,21 @@ class N2StairsEnv(N2Env):
             )
 
         self.obs_history.append(obs_now)
-        self.obs_buf = torch.stack(list(self.obs_history), dim=1).reshape(
+        base_observations = torch.stack(
+            list(self.obs_history), dim=1
+        ).reshape(
             self.num_envs, -1
         )
+        if self.include_residual_targets:
+            self.obs_buf = torch.cat(
+                (
+                    base_observations,
+                    self._residual_target_observations(),
+                ),
+                dim=1,
+            )
+        else:
+            self.obs_buf = base_observations
 
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
@@ -2928,6 +3152,10 @@ class N2StairsEnv(N2Env):
         )
         for history_frame in self.obs_history:
             history_frame[env_ids] = 0.0
+        # The first post-reset observation is produced before the next
+        # physics callback. Refresh the scheduled support mask now so the
+        # residual Actor never receives the previous episode's support side.
+        self._update_desired_contacts()
         self.episode_started[env_ids] = True
 
     def get_checkpoint_state(self):

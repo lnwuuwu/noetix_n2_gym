@@ -311,6 +311,13 @@ class N2StairsWalkCfg(N2StairsCfg):
         num_privileged_obs = 153
         lateral_position_obs_scale = 2.0
         yaw_error_obs_scale = 1.0
+        # Opt-in observations for the bounded residual policy.  Keeping these
+        # outside the five-frame 410-vector lets the frozen base Actor consume
+        # its original input byte-for-byte while the correction branch sees
+        # physical support and the next deployable foothold reference.
+        include_residual_targets = False
+        residual_target_obs_dim = 15
+        residual_base_obs_dim = num_observations
 
         # Phase clock is deployable: it depends only on elapsed policy time and
         # the commanded forward velocity. A short double-support interval is

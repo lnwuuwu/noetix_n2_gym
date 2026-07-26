@@ -14,6 +14,10 @@ from .helpers import (
     set_seed,
     parse_sim_params,
 )
+from .residual_policy import (
+    configure_residual_policy,
+    residual_metadata_from_checkpoint,
+)
 from humanoid.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 class TaskRegistry():
@@ -150,6 +154,29 @@ class TaskRegistry():
                     checkpoint=train_cfg.runner.checkpoint,
                 )
             train_cfg.runner.resume_path = resume_path
+
+            policy_metadata = residual_metadata_from_checkpoint(resume_path)
+            if policy_metadata is not None:
+                expected_observations = int(
+                    policy_metadata["residual_observation_dim"]
+                )
+                actual_observations = int(
+                    env.get_observations().shape[1]
+                )
+                if actual_observations != expected_observations:
+                    raise RuntimeError(
+                        "Residual checkpoint expects {} Actor observations, "
+                        "but the environment provides {}. Use the residual "
+                        "training/evaluation entry point so target features "
+                        "are enabled before environment construction.".format(
+                            expected_observations, actual_observations
+                        )
+                    )
+                configure_residual_policy(
+                    self.env_cfg_for_wandb,
+                    train_cfg,
+                    policy_metadata,
+                )
         
         train_cfg_dict = class_to_dict(train_cfg)
         env_cfg_dict = class_to_dict(self.env_cfg_for_wandb)

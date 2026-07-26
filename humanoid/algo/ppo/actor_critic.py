@@ -157,8 +157,9 @@ class ActorCritic(nn.Module):
         """
         # 将观测数据移动到与网络相同的设备上
         observations = observations.to(self.actor[0].weight.device)
-        # 计算动作均值
-        mean = self.actor(observations)
+        # Keep the policy mean behind one method so constrained/residual
+        # policies can reuse the standard PPO distribution implementation.
+        mean = self.actor_mean(observations)
         # 计算动作标准差
         if self.noise_std_type == "scalar":
             # 标量形式的标准差
@@ -197,8 +198,12 @@ class ActorCritic(nn.Module):
         :return: 确定性动作（均值）
         """
         # 直接使用演员网络计算动作均值
-        actions_mean = self.actor(observations)
+        actions_mean = self.actor_mean(observations)
         return actions_mean
+
+    def actor_mean(self, observations):
+        """Return the deterministic Actor mean for training and inference."""
+        return self.actor(observations)
 
     def evaluate(self, critic_observations, **kwargs):
         """
@@ -223,4 +228,241 @@ class ActorCritic(nn.Module):
         """
 
         super().load_state_dict(state_dict, strict=strict)
+        return True
+
+
+class ResidualActorCritic(ActorCritic):
+    """Frozen base Actor plus a small, bounded leg-only correction.
+
+    The base Actor keeps the exact observation width and weights of the
+    approved checkpoint.  A second MLP receives the base observation plus
+    deployable stair-target features and may alter only explicitly selected
+    leg joints.  Its output layer is initialized to zero, so converting a
+    normal checkpoint into this policy is behavior preserving at step zero.
+    """
+
+    def __init__(
+        self,
+        num_actor_obs,
+        num_critic_obs,
+        num_actions,
+        residual_base_obs_dim=410,
+        residual_hidden_dims=(128, 64),
+        residual_action_indices=(4, 5, 6, 7, 8, 13, 14, 15, 16, 17),
+        residual_action_scales=(
+            0.08,
+            0.12,
+            0.16,
+            0.20,
+            0.12,
+            0.08,
+            0.12,
+            0.16,
+            0.20,
+            0.12,
+        ),
+        residual_frozen_action_std=1.0e-4,
+        **kwargs,
+    ):
+        self.residual_observation_dim = int(num_actor_obs)
+        self.residual_base_obs_dim = int(residual_base_obs_dim)
+        if self.residual_base_obs_dim <= 0:
+            raise ValueError("residual_base_obs_dim must be positive")
+        if self.residual_base_obs_dim > self.residual_observation_dim:
+            raise ValueError(
+                "Residual base observation width {} exceeds total width {}"
+                .format(
+                    self.residual_base_obs_dim,
+                    self.residual_observation_dim,
+                )
+            )
+
+        hidden_dims = [int(width) for width in residual_hidden_dims]
+        if not hidden_dims or any(width <= 0 for width in hidden_dims):
+            raise ValueError("residual_hidden_dims must contain positive widths")
+        action_indices = [int(index) for index in residual_action_indices]
+        action_scales = [float(scale) for scale in residual_action_scales]
+        if len(action_indices) != len(action_scales):
+            raise ValueError(
+                "Residual action indices/scales must have equal lengths"
+            )
+        if len(set(action_indices)) != len(action_indices):
+            raise ValueError("Residual action indices must be unique")
+        if any(index < 0 or index >= num_actions for index in action_indices):
+            raise ValueError("Residual action index is outside the action space")
+        if any(scale <= 0.0 for scale in action_scales):
+            raise ValueError("Residual action scales must be positive")
+        if residual_frozen_action_std <= 0.0:
+            raise ValueError("residual_frozen_action_std must be positive")
+
+        # Construct the checkpoint-compatible base Actor with its original
+        # 410-wide input.  The Critic keeps its unchanged privileged input.
+        super().__init__(
+            self.residual_base_obs_dim,
+            num_critic_obs,
+            num_actions,
+            **kwargs,
+        )
+
+        activation_name = kwargs.get("activation", "elu")
+        activation = resolve_nn_activation(activation_name)
+        residual_layers = []
+        input_width = self.residual_observation_dim
+        for output_width in hidden_dims:
+            residual_layers.extend(
+                (nn.Linear(input_width, output_width), activation)
+            )
+            input_width = output_width
+        residual_layers.append(nn.Linear(input_width, len(action_indices)))
+        self.residual_actor = nn.Sequential(*residual_layers)
+        final_layer = self.residual_actor[-1]
+        nn.init.zeros_(final_layer.weight)
+        nn.init.zeros_(final_layer.bias)
+
+        self.register_buffer(
+            "residual_action_indices",
+            torch.tensor(action_indices, dtype=torch.long),
+        )
+        self.register_buffer(
+            "residual_action_scales",
+            torch.tensor(action_scales, dtype=torch.float),
+        )
+        action_mask = torch.zeros(num_actions, dtype=torch.bool)
+        action_mask[self.residual_action_indices] = True
+        self.register_buffer("residual_action_mask", action_mask)
+        self.register_buffer(
+            "residual_frozen_action_std",
+            torch.tensor(float(residual_frozen_action_std)),
+        )
+
+        # The approved base policy is an immutable skill prior.  PPO trains
+        # only the residual branch, Critic, and (unless separately frozen)
+        # noise parameter.
+        self.actor.requires_grad_(False)
+        self._last_residual_action = None
+        print(
+            "Residual Actor MLP: {} (base_obs={} total_obs={} actions={})"
+            .format(
+                self.residual_actor,
+                self.residual_base_obs_dim,
+                self.residual_observation_dim,
+                action_indices,
+            )
+        )
+
+    def residual_correction(self, observations):
+        """Return a full-width, bounded residual action tensor."""
+        if observations.shape[-1] != self.residual_observation_dim:
+            raise ValueError(
+                "Residual Actor expects {} observations, received {}".format(
+                    self.residual_observation_dim, observations.shape[-1]
+                )
+            )
+        compact = torch.tanh(self.residual_actor(observations))
+        compact = compact * self.residual_action_scales.to(
+            device=compact.device, dtype=compact.dtype
+        )
+        residual = torch.zeros(
+            *compact.shape[:-1],
+            self.residual_action_mask.numel(),
+            dtype=compact.dtype,
+            device=compact.device,
+        )
+        residual[..., self.residual_action_indices] = compact
+        return residual
+
+    def actor_mean(self, observations):
+        base_observations = observations[..., : self.residual_base_obs_dim]
+        base_actions = self.actor(base_observations)
+        residual = self.residual_correction(observations)
+        self._last_residual_action = residual
+        return base_actions + residual
+
+    def update_distribution(self, observations):
+        observations = observations.to(self.actor[0].weight.device)
+        mean = self.actor_mean(observations)
+        if self.noise_std_type == "scalar":
+            learned_std = torch.clamp(self.std, min=1.0e-6)
+        elif self.noise_std_type == "log":
+            learned_std = torch.exp(self.log_std)
+        else:
+            raise ValueError(
+                "Unknown standard deviation type: {}".format(
+                    self.noise_std_type
+                )
+            )
+        frozen_std = self.residual_frozen_action_std.to(
+            device=mean.device, dtype=mean.dtype
+        )
+        effective_std = torch.where(
+            self.residual_action_mask.to(device=mean.device),
+            learned_std.to(device=mean.device, dtype=mean.dtype),
+            frozen_std,
+        )
+        self.distribution = Normal(mean, effective_std.expand_as(mean))
+
+    def normalized_residual_correction(self, observations):
+        """Return compact residual usage normalized by each safety bound."""
+        compact = torch.tanh(self.residual_actor(observations))
+        return compact
+
+    def checkpoint_metadata(self):
+        return {
+            "class_name": self.__class__.__name__,
+            "residual_base_obs_dim": self.residual_base_obs_dim,
+            "residual_observation_dim": self.residual_observation_dim,
+            "residual_hidden_dims": [
+                module.out_features
+                for module in self.residual_actor
+                if isinstance(module, nn.Linear)
+            ][:-1],
+            "residual_action_indices": self.residual_action_indices.tolist(),
+            "residual_action_scales": self.residual_action_scales.tolist(),
+            "residual_frozen_action_std": float(
+                self.residual_frozen_action_std.item()
+            ),
+        }
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load either a base checkpoint or a residual checkpoint safely."""
+        incompatible = nn.Module.load_state_dict(
+            self, state_dict, strict=False
+        )
+        residual_prefixes = (
+            "residual_actor.",
+            "residual_action_indices",
+            "residual_action_scales",
+            "residual_action_mask",
+            "residual_frozen_action_std",
+        )
+        loaded_residual = any(
+            key.startswith("residual_actor.") for key in state_dict
+        )
+        invalid_missing = [
+            key
+            for key in incompatible.missing_keys
+            if loaded_residual or not key.startswith(residual_prefixes)
+        ]
+        if invalid_missing or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "Residual checkpoint mismatch: missing={} unexpected={}"
+                .format(invalid_missing, incompatible.unexpected_keys)
+            )
+        expected_mask = torch.zeros_like(self.residual_action_mask)
+        expected_mask[self.residual_action_indices] = True
+        if not torch.equal(expected_mask, self.residual_action_mask):
+            raise RuntimeError(
+                "Residual checkpoint action mask does not match its indices"
+            )
+        if not loaded_residual:
+            # Loading a normal approved checkpoint deliberately keeps the
+            # zero-initialized correction.  Assert that invariant instead of
+            # silently accepting a non-zero branch.
+            with torch.no_grad():
+                final_layer = self.residual_actor[-1]
+                final_layer.weight.zero_()
+                final_layer.bias.zero_()
+            print(
+                "Initialized zero residual policy from base Actor checkpoint"
+            )
         return True

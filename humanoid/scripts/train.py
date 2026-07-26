@@ -21,6 +21,10 @@ import torch
 # Use the repository-specific name.  Isaac Gym exposes a different
 # zero-argument ``get_args`` in some Python 3.8 import orders.
 from humanoid.utils.helpers import parse_humanoid_args
+from humanoid.utils.residual_policy import (
+    configure_residual_policy,
+    residual_metadata,
+)
 from humanoid.utils.task_registry import task_registry
 
 
@@ -76,6 +80,27 @@ def parse_terrain_level_mix(value):
     return levels
 
 
+def parse_numeric_list(value, value_type, option_name):
+    """Parse a non-empty comma-separated numeric option."""
+    values = []
+    for raw_value in str(value).split(","):
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        try:
+            parsed = value_type(raw_value)
+        except ValueError as error:
+            raise ValueError(
+                "{} contains an invalid value: {}".format(
+                    option_name, raw_value
+                )
+            ) from error
+        values.append(parsed)
+    if not values:
+        raise ValueError("{} cannot be empty".format(option_name))
+    return values
+
+
 def train(args):
     """
     训练函数：根据提供的参数执行强化学习训练
@@ -96,6 +121,7 @@ def train(args):
         or args.actor_trainable_layers is not None
         or args.reward_scale_overrides is not None
         or args.observation_noise_level is not None
+        or args.residual_policy
     )
     if resume_only_options and not args.resume:
         raise ValueError(
@@ -149,11 +175,43 @@ def train(args):
             "--symmetrize_actor_reference currently supports "
             "n2_stairs_walk only"
         )
+    if args.residual_policy:
+        if args.task != "n2_stairs_walk":
+            raise ValueError(
+                "--residual_policy currently supports n2_stairs_walk only"
+            )
+        if not args.reset_optimizer:
+            raise ValueError(
+                "--residual_policy requires --reset_optimizer"
+            )
+        incompatible = []
+        if args.actor_head_only:
+            incompatible.append("--actor_head_only")
+        if args.actor_trainable_layers is not None:
+            incompatible.append("--actor_trainable_layers")
+        if args.actor_reference_loss_coeff > 0.0:
+            incompatible.append("--actor_reference_loss_coeff")
+        if args.symmetrize_actor_reference:
+            incompatible.append("--symmetrize_actor_reference")
+        if args.symmetry_loss_coeff > 0.0:
+            incompatible.append("--symmetry_loss_coeff")
+        if incompatible:
+            raise ValueError(
+                "--residual_policy freezes the base Actor and cannot be "
+                "combined with {}".format(", ".join(incompatible))
+            )
+        if not math.isfinite(args.residual_l2_coeff) or (
+            args.residual_l2_coeff < 0.0
+        ):
+            raise ValueError(
+                "--residual_l2_coeff must be non-negative and finite"
+            )
 
     # 根据任务名称和参数创建环境实例
     # env: 环境对象，用于模拟和交互
     # env_cfg: 环境配置对象，包含环境的具体配置参数
     env_cfg = None
+    train_cfg_override = None
     stair_tasks = (
         "n2_stairs",
         "n2_stairs_robust",
@@ -184,6 +242,61 @@ def train(args):
                 "only valid for n2_stairs tasks"
             )
         env_cfg, _ = task_registry.get_cfgs(name=args.task)
+    if args.residual_policy:
+        if env_cfg is None:
+            env_cfg, train_cfg_override = task_registry.get_cfgs(
+                name=args.task
+            )
+        else:
+            _, train_cfg_override = task_registry.get_cfgs(name=args.task)
+        hidden_dims = parse_numeric_list(
+            args.residual_hidden_dims,
+            int,
+            "--residual_hidden_dims",
+        )
+        if any(width <= 0 for width in hidden_dims):
+            raise ValueError(
+                "--residual_hidden_dims values must be positive"
+            )
+        action_scales = parse_numeric_list(
+            args.residual_action_scales,
+            float,
+            "--residual_action_scales",
+        )
+        if any(
+            not math.isfinite(scale) or scale <= 0.0
+            for scale in action_scales
+        ):
+            raise ValueError(
+                "--residual_action_scales values must be positive and finite"
+            )
+        metadata = residual_metadata(
+            hidden_dims=hidden_dims,
+            action_scales=action_scales,
+            base_obs_dim=(
+                int(env_cfg.env.frame_stack)
+                * int(env_cfg.env.num_single_obs)
+            ),
+            target_obs_dim=env_cfg.env.residual_target_obs_dim,
+        )
+        configure_residual_policy(
+            env_cfg, train_cfg_override, metadata
+        )
+        train_cfg_override.algorithm.residual_l2_coeff = float(
+            args.residual_l2_coeff
+        )
+        print(
+            "Residual policy: frozen base={} obs, target={} obs, "
+            "hidden={}, leg bounds={}".format(
+                metadata["residual_base_obs_dim"],
+                (
+                    metadata["residual_observation_dim"]
+                    - metadata["residual_base_obs_dim"]
+                ),
+                metadata["residual_hidden_dims"],
+                metadata["residual_action_scales"],
+            )
+        )
     if args.fixed_terrain_level is not None:
         if not 0 <= args.fixed_terrain_level < env_cfg.terrain.num_rows:
             raise ValueError(
@@ -269,6 +382,7 @@ def train(args):
         env=env,
         name=args.task,
         args=args,
+        train_cfg=train_cfg_override,
         load_optimizer=not args.reset_optimizer,
     )
     if args.resume and ppo_runner.current_learning_iteration <= 0:
@@ -412,6 +526,35 @@ def train(args):
         ppo_runner.alg_cfg["symmetry_cfg"] = symmetry_cfg
         print(
             "Actor reflection loss: coefficient={:.4f}".format(coefficient)
+        )
+    if args.residual_policy:
+        ppo_runner.alg.set_residual_regularization(
+            args.residual_l2_coeff
+        )
+        trainable_parameters = [
+            parameter
+            for parameter in ppo_runner.alg.policy.parameters()
+            if parameter.requires_grad
+        ]
+        ppo_runner.alg.optimizer = torch.optim.Adam(
+            trainable_parameters,
+            lr=ppo_runner.alg.learning_rate,
+        )
+        trainable_count = sum(
+            parameter.numel() for parameter in trainable_parameters
+        )
+        frozen_count = sum(
+            parameter.numel()
+            for parameter in ppo_runner.alg.policy.parameters()
+            if not parameter.requires_grad
+        )
+        print(
+            "Residual optimizer: {} trainable, {} frozen parameters; "
+            "normalized L2={:.6g}".format(
+                trainable_count,
+                frozen_count,
+                args.residual_l2_coeff,
+            )
         )
     
     # max_iterations is treated as the total target iteration. On resume, run
@@ -590,6 +733,36 @@ if __name__ == '__main__':
                 "type": float,
                 "default": None,
                 "help": "Override the environment observation-noise multiplier.",
+            },
+            {
+                "name": "--residual_policy",
+                "action": "store_true",
+                "default": False,
+                "help": (
+                    "Freeze the loaded base Actor and train only a bounded "
+                    "leg residual using explicit stair-target observations."
+                ),
+            },
+            {
+                "name": "--residual_hidden_dims",
+                "type": str,
+                "default": "128,64",
+                "help": "Comma-separated residual Actor hidden widths.",
+            },
+            {
+                "name": "--residual_action_scales",
+                "type": str,
+                "default": "0.08,0.12,0.16,0.20,0.12,0.08,0.12,0.16,0.20,0.12",
+                "help": (
+                    "Bounded corrections for L/R hip-yaw, hip-roll, "
+                    "hip-pitch, knee, and ankle action coordinates."
+                ),
+            },
+            {
+                "name": "--residual_l2_coeff",
+                "type": float,
+                "default": 0.01,
+                "help": "Normalized residual-action regularization.",
             },
         ]
     )

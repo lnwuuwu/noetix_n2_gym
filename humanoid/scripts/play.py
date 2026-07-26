@@ -20,6 +20,11 @@ from humanoid.utils.helpers import (
     export_policy_as_onnx,
     parse_humanoid_args,
 )
+from humanoid.utils.residual_policy import (
+    configure_residual_policy,
+    residual_metadata_from_checkpoint,
+    resolve_checkpoint_path,
+)
 from humanoid.utils.task_registry import task_registry
 
 
@@ -43,6 +48,13 @@ def _disable_randomization(env_cfg):
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    if args.resume:
+        checkpoint_path = resolve_checkpoint_path(args, train_cfg)
+        configure_residual_policy(
+            env_cfg,
+            train_cfg,
+            residual_metadata_from_checkpoint(checkpoint_path),
+        )
     if args.num_envs is None:
         args.num_envs = 1
     _disable_randomization(env_cfg)

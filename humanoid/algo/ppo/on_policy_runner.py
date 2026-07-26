@@ -15,7 +15,7 @@ from typing import Optional
 
 import humanoid
 from humanoid.algo.ppo.ppo import PPO
-from humanoid.algo.ppo.actor_critic import ActorCritic 
+from humanoid.algo.ppo.actor_critic import ActorCritic, ResidualActorCritic
 from humanoid.algo.ppo.normalizer import EmpiricalNormalization
 from humanoid.algo import VecEnv
 from humanoid.utils.utils import store_code_state
@@ -413,6 +413,10 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,  # 当前迭代次数
             "infos": infos,  # 附加信息
         }
+        if hasattr(self.alg.policy, "checkpoint_metadata"):
+            saved_dict["policy_metadata"] = (
+                self.alg.policy.checkpoint_metadata()
+            )
         if hasattr(self.env, "get_checkpoint_state"):
             saved_dict["env_state"] = self.env.get_checkpoint_state()
         # -- 如果使用了观测归一化，则保存归一化器

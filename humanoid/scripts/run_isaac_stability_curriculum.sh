@@ -13,9 +13,9 @@ INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 # Adapt in guarded stages.  Every stage screens its periodic checkpoints and
 # independently re-evaluates the winner before it can become the next source.
 # A rejected stage stops immediately and leaves the last approved model intact.
-TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-300}"
-STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-100}"
-CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"
+TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"
+STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-200}"
+CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"
 EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-128}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
 # Keep every evaluated height in the rollout distribution so a local style
@@ -24,20 +24,29 @@ HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
 TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
-# Full-Actor, low-rate adaptation is needed to change a systematic gait bias;
-# training only the last two layers repeatedly returned to the same policy.
-# The frozen source remains a soft skill anchor, while periodic deterministic
-# screening and an independent holdout protect climbing performance.
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-1.0e-6}"
-ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.03}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.60}"
+# The default path no longer edits the approved Actor.  It trains a small,
+# zero-initialized, bounded leg residual with explicit contact/foothold target
+# features.  Set N2_STABILITY_RESIDUAL_POLICY=False only for legacy diagnosis.
+RESIDUAL_POLICY="${N2_STABILITY_RESIDUAL_POLICY:-True}"
+RESIDUAL_HIDDEN_DIMS="${N2_STABILITY_RESIDUAL_HIDDEN_DIMS:-128,64}"
+RESIDUAL_ACTION_SCALES="${N2_STABILITY_RESIDUAL_ACTION_SCALES:-0.08,0.12,0.16,0.20,0.12,0.08,0.12,0.16,0.20,0.12}"
+RESIDUAL_L2_COEFF="${N2_STABILITY_RESIDUAL_L2_COEFF:-0.02}"
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-1.0e-4}"
+ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.04}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.0}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
-SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.001}"
+SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.0}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-4}"
-OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.03}"
-REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.15,action_smoothness=-0.10,dof_acc=-4e-7,stairs_lateral_drift=-12,stairs_left_drift=-4,stairs_lateral_excursion=-3,stairs_terminal_lateral=-2,stairs_heading_alignment=4,stairs_stride_symmetry=-3,stairs_right_stride_excess=-2,stairs_right_stride_excess_continuous=-3,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-2,stairs_foot_crossover=-6,stairs_foot_lane_error=-4,stairs_single_support_stability=-2,stairs_right_support_stability=-3,stairs_swing_timeout=-3,stairs_alternating_tread=3,stairs_repeated_lead=-3,stairs_same_tread_join=-4}"
+OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.05}"
+# This pass deliberately does not force alternating treads.  The approved
+# policy already climbs with a step-to gait; making a bounded correction learn
+# a different footfall grammar at the same time caused the long right step and
+# right-support shake seen in the recordings.  Keep only weak phase/trajectory
+# guidance and spend the residual capacity on lanes, stride balance and
+# support stability.
+REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.08,action_smoothness=-0.06,dof_acc=-3e-7,stairs_lateral_drift=-8,stairs_left_drift=-3,stairs_lateral_excursion=-2,stairs_terminal_lateral=-2,stairs_heading_alignment=4,stairs_stride_symmetry=-2,stairs_right_stride_excess=-1.5,stairs_right_stride_excess_continuous=-2,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-3,stairs_foot_crossover=-5,stairs_foot_lane_error=-4,stairs_single_support_stability=-2,stairs_right_support_stability=-4,stairs_phase_contact=0.5,stairs_phase_contact_mismatch=-0.5,stairs_sagittal_foot_phase=0.1,stairs_sagittal_foot_phase_error=-0.1,stairs_swing_trajectory=1,stairs_swing_trajectory_error=-1.5,stairs_swing_timeout=-1,stairs_same_tread_support=-1,stairs_alternating_tread=0,stairs_repeated_lead=0,stairs_same_tread_join=0}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
@@ -60,8 +69,9 @@ TARGET_ITERATION=""
 PREFLIGHT_EVALUATION=""
 
 usage() {
-    echo "Usage: $0 smoke|pilot|long|diagnose|correct|final|status|log|stop|view"
-    echo "pilot: one 80-iteration run; long: up to 300 iterations in guarded 100-iteration stages."
+    echo "Usage: $0 smoke|pilot|long|residual-long|legacy-long|diagnose|correct|final|status|log|stop|view"
+    echo "pilot: one 100-iteration residual run; long: up to 600 iterations in guarded 200-iteration stages."
+    echo "long/residual-long freeze the approved Actor and train only a bounded leg residual."
     echo "diagnose: zero-training mirrored-policy safety/style preflight."
     echo "correct/final: preflight-gated 100-iteration full-Actor distillation."
     echo "The newest guarded stability-selected model is selected automatically."
@@ -122,6 +132,11 @@ require_checkpoint() {
                 if [[ -f "${selected}" ]] \
                     && [[ -z "${newest}" || "${selected}" -nt "${newest}" ]]; then
                     newest="${selected}"
+                    # The source came from a completed guarded selection.
+                    # Preserve that approval if the residual trajectory finds
+                    # no safer improvement; otherwise ``view`` would reject
+                    # the unchanged, already-approved checkpoint.
+                    SOURCE_APPROVED="True"
                 fi
             fi
         done
@@ -268,15 +283,34 @@ train_trajectory() {
     local source_run
     local run_name
     local reference_options=()
+    local policy_options=()
 
     source_iteration="$(checkpoint_iteration "${source_checkpoint}")"
     TARGET_ITERATION=$((source_iteration + extra_iterations))
     source_run="$(dirname "${source_checkpoint}")"
     run_name="stability_continuous_from_${source_iteration}_to_${TARGET_ITERATION}_s${TRAIN_SEED}"
-    if [[ "${SYMMETRIZE_REFERENCE}" == "True" ]]; then
-        reference_options+=(--symmetrize_actor_reference)
-    elif [[ "${SYMMETRIZE_REFERENCE}" != "False" ]]; then
-        echo "N2_STABILITY_SYMMETRIZE_REFERENCE must be True or False." >&2
+    if [[ "${RESIDUAL_POLICY}" == "True" ]]; then
+        policy_options+=(
+            --residual_policy
+            "--residual_hidden_dims=${RESIDUAL_HIDDEN_DIMS}"
+            "--residual_action_scales=${RESIDUAL_ACTION_SCALES}"
+            "--residual_l2_coeff=${RESIDUAL_L2_COEFF}"
+        )
+    elif [[ "${RESIDUAL_POLICY}" == "False" ]]; then
+        policy_options+=(
+            "--actor_trainable_layers=${ACTOR_LAYERS}"
+            "--actor_reference_loss_coeff=${REFERENCE_COEFF}"
+            "--actor_reference_mirror_blend=${REFERENCE_MIRROR_BLEND}"
+            "--symmetry_loss_coeff=${SYMMETRY_COEFF}"
+        )
+        if [[ "${SYMMETRIZE_REFERENCE}" == "True" ]]; then
+            reference_options+=(--symmetrize_actor_reference)
+        elif [[ "${SYMMETRIZE_REFERENCE}" != "False" ]]; then
+            echo "N2_STABILITY_SYMMETRIZE_REFERENCE must be True or False." >&2
+            return 2
+        fi
+    else
+        echo "N2_STABILITY_RESIDUAL_POLICY must be True or False." >&2
         return 2
     fi
 
@@ -301,12 +335,9 @@ train_trajectory() {
         --fixed_learning_rate \
         "--action_noise_std=${ACTION_NOISE}" \
         --freeze_action_noise \
-        "--actor_trainable_layers=${ACTOR_LAYERS}" \
-        "--actor_reference_loss_coeff=${REFERENCE_COEFF}" \
+        "${policy_options[@]}" \
         "${reference_options[@]}" \
-        "--actor_reference_mirror_blend=${REFERENCE_MIRROR_BLEND}" \
         "--actor_policy_loss_scale=${POLICY_LOSS_SCALE}" \
-        "--symmetry_loss_coeff=${SYMMETRY_COEFF}" \
         "--observation_noise_level=${OBSERVATION_NOISE}" \
         "--reward_scale_overrides=${REWARD_OVERRIDES}" \
         "--save_interval=${checkpoint_interval}"
@@ -433,7 +464,9 @@ run_continuous() {
     require_positive_integer N2_STABILITY_CHECKPOINT_INTERVAL "${CHECKPOINT_INTERVAL}"
     require_positive_integer N2_STABILITY_EVAL_ENVS "${EVAL_ENVS}"
     require_positive_integer N2_STABILITY_HOLDOUT_ENVS "${HOLDOUT_ENVS}"
-    require_positive_integer N2_STABILITY_ACTOR_LAYERS "${ACTOR_LAYERS}"
+    if [[ "${RESIDUAL_POLICY}" == "False" ]]; then
+        require_positive_integer N2_STABILITY_ACTOR_LAYERS "${ACTOR_LAYERS}"
+    fi
 
     trap terminate_driver TERM INT
     trap cleanup_driver EXIT
@@ -499,7 +532,7 @@ run_continuous() {
     optimizer_updates=$((TRAIN_ITERATIONS * 5 * 4))
 
     echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${current_checkpoint}"
-    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} stage_iterations=${STAGE_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX} selection=${SELECTION_MODE}"
+    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} stage_iterations=${STAGE_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} residual_policy=${RESIDUAL_POLICY} residual_hidden=${RESIDUAL_HIDDEN_DIMS} residual_l2=${RESIDUAL_L2_COEFF} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX} selection=${SELECTION_MODE}"
     echo "ISAAC_STABILITY_TRAINING_VOLUME transitions=${expected_transitions} optimizer_minibatch_updates=${optimizer_updates}"
     evaluate_checkpoint \
         "${current_checkpoint}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
@@ -734,13 +767,27 @@ case "${MODE}" in
         ;;
     pilot)
         launch_continuous pilot \
-            N2_STABILITY_TRAIN_ITERATIONS=80 \
-            N2_STABILITY_CHECKPOINT_INTERVAL=10 \
+            N2_STABILITY_RESIDUAL_POLICY=True \
+            N2_STABILITY_TRAIN_ITERATIONS=100 \
+            N2_STABILITY_STAGE_ITERATIONS=100 \
+            N2_STABILITY_CHECKPOINT_INTERVAL=20 \
             N2_STABILITY_EVAL_ENVS=64 \
             N2_STABILITY_HOLDOUT_ENVS=128
         ;;
-    long)
-        launch_continuous long
+    long|residual-long)
+        launch_continuous residual_long \
+            N2_STABILITY_RESIDUAL_POLICY=True
+        ;;
+    legacy-long)
+        launch_continuous legacy_long \
+            N2_STABILITY_RESIDUAL_POLICY=False \
+            N2_STABILITY_TRAIN_ITERATIONS=300 \
+            N2_STABILITY_STAGE_ITERATIONS=100 \
+            N2_STABILITY_CHECKPOINT_INTERVAL=20 \
+            N2_STABILITY_LEARNING_RATE=1.0e-6 \
+            N2_STABILITY_ACTION_NOISE=0.03 \
+            N2_STABILITY_REFERENCE_COEFF=0.60 \
+            N2_STABILITY_SYMMETRY_COEFF=0.001
         ;;
     diagnose)
         if active_pid >/dev/null; then
@@ -758,6 +805,7 @@ case "${MODE}" in
         require_approved_selection
         launch_continuous gait_correction \
             "N2_STABILITY_INIT_CHECKPOINT=${INIT_CHECKPOINT}" \
+            N2_STABILITY_RESIDUAL_POLICY=False \
             N2_STABILITY_SOURCE_APPROVED=True \
             N2_STABILITY_CORRECTION_PREFLIGHT=True \
             N2_STABILITY_TRAIN_ITERATIONS=100 \

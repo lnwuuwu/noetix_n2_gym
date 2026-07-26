@@ -230,6 +230,28 @@ class _TorchPolicyExporter(torch.nn.Module):
         super().__init__()
         self.actor = copy.deepcopy(actor_critic.actor)
         self.is_recurrent = actor_critic.is_recurrent
+        self.use_residual = hasattr(actor_critic, "residual_actor")
+        self.base_obs_dim = int(self.actor[0].in_features)
+        if self.use_residual:
+            self.residual_actor = copy.deepcopy(
+                actor_critic.residual_actor
+            )
+            self.observation_dim = int(
+                actor_critic.residual_observation_dim
+            )
+            projection = torch.zeros(
+                len(actor_critic.residual_action_indices),
+                actor_critic.residual_action_mask.numel(),
+            )
+            projection[
+                torch.arange(len(actor_critic.residual_action_indices)),
+                actor_critic.residual_action_indices.cpu(),
+            ] = actor_critic.residual_action_scales.cpu()
+        else:
+            self.residual_actor = torch.nn.Identity()
+            self.observation_dim = self.base_obs_dim
+            projection = torch.zeros(1, self.actor[-1].out_features)
+        self.register_buffer("residual_projection", projection)
 
         if normalizer:
             self.normalizer = copy.deepcopy(normalizer)
@@ -237,7 +259,12 @@ class _TorchPolicyExporter(torch.nn.Module):
             self.normalizer = torch.nn.Identity()
 
     def forward(self, x):
-        return self.actor(self.normalizer(x))
+        observations = self.normalizer(x)
+        actions = self.actor(observations[..., : self.base_obs_dim])
+        if self.use_residual:
+            compact = torch.tanh(self.residual_actor(observations))
+            actions = actions + compact @ self.residual_projection
+        return actions
 
     @torch.jit.export
     def reset(self):
@@ -262,6 +289,28 @@ class _OnnxPolicyExporter(torch.nn.Module):
         self.verbose = verbose
         self.actor = copy.deepcopy(actor_critic.actor)
         self.is_recurrent = actor_critic.is_recurrent
+        self.use_residual = hasattr(actor_critic, "residual_actor")
+        self.base_obs_dim = int(self.actor[0].in_features)
+        if self.use_residual:
+            self.residual_actor = copy.deepcopy(
+                actor_critic.residual_actor
+            )
+            self.observation_dim = int(
+                actor_critic.residual_observation_dim
+            )
+            projection = torch.zeros(
+                len(actor_critic.residual_action_indices),
+                actor_critic.residual_action_mask.numel(),
+            )
+            projection[
+                torch.arange(len(actor_critic.residual_action_indices)),
+                actor_critic.residual_action_indices.cpu(),
+            ] = actor_critic.residual_action_scales.cpu()
+        else:
+            self.residual_actor = torch.nn.Identity()
+            self.observation_dim = self.base_obs_dim
+            projection = torch.zeros(1, self.actor[-1].out_features)
+        self.register_buffer("residual_projection", projection)
 
         if normalizer:
             self.normalizer = copy.deepcopy(normalizer)
@@ -269,11 +318,16 @@ class _OnnxPolicyExporter(torch.nn.Module):
             self.normalizer = torch.nn.Identity()
 
     def forward(self, x):
-        return self.actor(self.normalizer(x))
+        observations = self.normalizer(x)
+        actions = self.actor(observations[..., : self.base_obs_dim])
+        if self.use_residual:
+            compact = torch.tanh(self.residual_actor(observations))
+            actions = actions + compact @ self.residual_projection
+        return actions
 
     def export(self, path, filename):
         self.to("cpu")
-        obs = torch.zeros(1, self.actor[0].in_features)
+        obs = torch.zeros(1, self.observation_dim)
         torch.onnx.export(
                 self,
                 obs,

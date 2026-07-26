@@ -1766,15 +1766,15 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
-            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-300}"',
+            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"',
             launcher,
         )
         self.assertIn(
-            'STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-100}"',
+            'STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-200}"',
             launcher,
         )
         self.assertIn(
-            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"',
+            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"',
             launcher,
         )
         self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
@@ -1783,6 +1783,17 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn("--actor_trainable_layers=${ACTOR_LAYERS}", launcher)
+        self.assertIn(
+            'RESIDUAL_POLICY="${N2_STABILITY_RESIDUAL_POLICY:-True}"',
+            launcher,
+        )
+        self.assertIn("--residual_policy", launcher)
+        self.assertIn("--residual_hidden_dims=${RESIDUAL_HIDDEN_DIMS}", launcher)
+        self.assertIn("--residual_action_scales=${RESIDUAL_ACTION_SCALES}", launcher)
+        self.assertIn("--residual_l2_coeff=${RESIDUAL_L2_COEFF}", launcher)
+        self.assertIn("stairs_alternating_tread=0", launcher)
+        self.assertIn("stairs_repeated_lead=0", launcher)
+        self.assertIn("stairs_same_tread_join=0", launcher)
         self.assertIn(
             "--reward_scale_overrides=${REWARD_OVERRIDES}", launcher
         )
@@ -1838,6 +1849,10 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         for option in (
             "--actor_trainable_layers",
+            "--residual_policy",
+            "--residual_hidden_dims",
+            "--residual_action_scales",
+            "--residual_l2_coeff",
             "--reward_scale_overrides",
             "--observation_noise_level",
             "--terrain_level_mix",
@@ -2454,6 +2469,20 @@ class SourceCompatibilityTests(unittest.TestCase):
             )
         )
 
+        instance.include_residual_targets = True
+        instance.residual_target_obs_dim = 15
+        instance.cfg.env.num_observations = 425
+        instance._build_mirror_layout(joint_order)
+        residual_observations = torch.randn(7, 425)
+        self.assertTrue(
+            torch.equal(
+                instance.mirror_observations(
+                    instance.mirror_observations(residual_observations)
+                ),
+                residual_observations,
+            )
+        )
+
     def test_right_foot_inward_metric_uses_verified_world_y_sign(self):
         source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
         tree = ast.parse(source_path.read_text(), filename=str(source_path))
@@ -2538,6 +2567,107 @@ class SourceCompatibilityTests(unittest.TestCase):
         )
         for name, value in algorithm.actor_reference.state_dict().items():
             self.assertTrue(torch.equal(value, reference_before[name]))
+
+    def test_residual_policy_starts_exactly_at_the_base_and_is_bounded(self):
+        from humanoid.algo.ppo.actor_critic import (
+            ActorCritic,
+            ResidualActorCritic,
+        )
+
+        base = ActorCritic(
+            5,
+            3,
+            6,
+            actor_hidden_dims=[8],
+            critic_hidden_dims=[8],
+            init_noise_std=0.1,
+        )
+        residual = ResidualActorCritic(
+            8,
+            3,
+            6,
+            actor_hidden_dims=[8],
+            critic_hidden_dims=[8],
+            residual_base_obs_dim=5,
+            residual_hidden_dims=[7],
+            residual_action_indices=[1, 4],
+            residual_action_scales=[0.10, 0.20],
+            init_noise_std=0.1,
+        )
+        residual.load_state_dict(base.state_dict())
+        observations = torch.randn(11, 8)
+        with torch.no_grad():
+            expected = base.actor(observations[:, :5])
+            actual = residual.act_inference(observations)
+        self.assertTrue(torch.equal(actual, expected))
+        self.assertTrue(
+            all(
+                not parameter.requires_grad
+                for parameter in residual.actor.parameters()
+            )
+        )
+        untouched = [0, 2, 3, 5]
+        residual.update_distribution(observations)
+        self.assertTrue(torch.equal(
+            residual.action_std[:, untouched],
+            torch.full_like(
+                residual.action_std[:, untouched],
+                residual.residual_frozen_action_std.item(),
+            ),
+        ))
+        self.assertTrue(torch.equal(
+            residual.action_std[:, [1, 4]],
+            torch.full_like(residual.action_std[:, [1, 4]], 0.1),
+        ))
+
+        with torch.no_grad():
+            residual.residual_actor[-1].bias.fill_(100.0)
+            correction = residual.residual_correction(observations)
+        self.assertTrue(torch.equal(
+            correction[:, untouched],
+            torch.zeros_like(correction[:, untouched]),
+        ))
+        self.assertTrue(
+            torch.all(correction[:, 1].abs() <= 0.10 + 1.0e-7)
+        )
+        self.assertTrue(
+            torch.all(correction[:, 4].abs() <= 0.20 + 1.0e-7)
+        )
+
+    def test_residual_checkpoint_metadata_round_trip(self):
+        import tempfile
+
+        from humanoid.algo.ppo.actor_critic import ResidualActorCritic
+        from humanoid.utils.residual_policy import (
+            residual_metadata_from_checkpoint,
+        )
+
+        policy = ResidualActorCritic(
+            8,
+            3,
+            6,
+            actor_hidden_dims=[8],
+            critic_hidden_dims=[8],
+            residual_base_obs_dim=5,
+            residual_hidden_dims=[7],
+            residual_action_indices=[1, 4],
+            residual_action_scales=[0.10, 0.20],
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pt") as stream:
+            torch.save(
+                {
+                    "model_state_dict": policy.state_dict(),
+                    "policy_metadata": policy.checkpoint_metadata(),
+                    "iter": 1,
+                },
+                stream.name,
+            )
+            metadata = residual_metadata_from_checkpoint(stream.name)
+        self.assertEqual(metadata["class_name"], "ResidualActorCritic")
+        self.assertEqual(metadata["residual_base_obs_dim"], 5)
+        self.assertEqual(metadata["residual_observation_dim"], 8)
+        self.assertEqual(metadata["residual_hidden_dims"], [7])
+        self.assertEqual(metadata["residual_action_indices"], [1, 4])
 
     def test_symmetrized_actor_reference_target_is_equivariant(self):
         from humanoid.algo.ppo.actor_critic import ActorCritic
