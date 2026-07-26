@@ -527,9 +527,35 @@ class AMPStaticIntegrationTests(unittest.TestCase):
             ROOT / "humanoid/scripts/collect_reference_motions.py"
         ).read_text()
         self.assertIn('"AMPFeatureVersion": AMP_FEATURE_VERSION', collector)
+        self.assertIn(
+            'open(manifest, "w", encoding="utf-8")',
+            collector,
+        )
+        self.assertIn(
+            'open(path, "w", encoding="utf-8")',
+            collector,
+        )
         self.assertIn("last_episode_completion", collector)
         self.assertIn("episode_frames[env_id] = []", collector)
         self.assertNotIn("all_frames.extend", collector)
+
+    def test_amp_text_io_is_explicitly_utf8(self):
+        runner = (
+            ROOT / "humanoid/algo/amp/amp_runner.py"
+        ).read_text()
+        loader = (
+            ROOT / "humanoid/amp_utils/motion_loader.py"
+        ).read_text()
+        entry = (ROOT / "humanoid/scripts/train_amp.py").read_text()
+        self.assertIn('open(path, "r", encoding="utf-8")', runner)
+        self.assertEqual(
+            loader.count('open(motion_file, "r", encoding="utf-8")'),
+            4,
+        )
+        self.assertIn(
+            'open(manifest, "r", encoding="utf-8")',
+            entry,
+        )
 
 
 if __name__ == "__main__":

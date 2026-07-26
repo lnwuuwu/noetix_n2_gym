@@ -155,7 +155,7 @@ def _write_motion(path, frames, frame_duration, metrics, mirrored):
             "frame_count": int(frames.shape[0]),
         },
     }
-    with open(path, "w") as stream:
+    with open(path, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, separators=(",", ":"))
 
 
@@ -322,7 +322,7 @@ def collect(args):
             )
             written.append(os.path.abspath(mirror_path))
 
-    with open(manifest, "w") as stream:
+    with open(manifest, "w", encoding="utf-8") as stream:
         stream.write("\n".join(written) + "\n")
     print(
         "[AMP] Wrote {} curated motion file(s) from {} accepted episodes".format(

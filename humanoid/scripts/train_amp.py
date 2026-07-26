@@ -186,7 +186,7 @@ def resolve_motion_files(motion_file=None, motion_manifest=None):
             motion_manifest, "Motion manifest"
         )
         manifest_dir = os.path.dirname(manifest)
-        with open(manifest, "r") as stream:
+        with open(manifest, "r", encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, start=1):
                 entry = line.split("#", 1)[0].strip()
                 if not entry:

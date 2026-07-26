@@ -33,7 +33,7 @@ def validate_motion_file(path, allow_legacy=False):
     """Validate the dataset before allocating a large GPU preload buffer."""
     if not os.path.isfile(path):
         raise FileNotFoundError("AMP reference motion does not exist: " + path)
-    with open(path, "r") as stream:
+    with open(path, "r", encoding="utf-8") as stream:
         data = json.load(stream)
     frames = data.get("Frames")
     if not isinstance(frames, list) or len(frames) < 2:
@@ -258,7 +258,7 @@ class AMPOnPolicyRunner(OnPolicyRunner):
         if isinstance(symmetry_cfg, dict):
             symmetry_env = symmetry_cfg.pop("_env", None)
         try:
-            with open(config_path, "w") as stream:
+            with open(config_path, "w", encoding="utf-8") as stream:
                 json.dump(self.cfg, stream, indent=4)
         finally:
             if symmetry_env is not None:

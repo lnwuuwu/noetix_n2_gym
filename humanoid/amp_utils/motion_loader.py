@@ -102,7 +102,7 @@ class MotionLoaderNing:
 
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split('.')[0])
-            with open(motion_file, "r") as f:
+            with open(motion_file, "r", encoding="utf-8") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
 
@@ -480,7 +480,7 @@ class MotionLoaderNing10DOF:
 
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split('.')[0])
-            with open(motion_file, "r") as f:
+            with open(motion_file, "r", encoding="utf-8") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
 
@@ -815,7 +815,7 @@ class MotionLoaderNing20DOF:
 
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split('.')[0])
-            with open(motion_file, "r") as f:
+            with open(motion_file, "r", encoding="utf-8") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
 
@@ -1152,7 +1152,7 @@ class MotionLoaderNingTracking:
 
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split('.')[0])
-            with open(motion_file, "r") as f:
+            with open(motion_file, "r", encoding="utf-8") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
 
