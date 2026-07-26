@@ -130,20 +130,40 @@ class TaskRegistry():
         # evaluation reports record the exact checkpoint, not just ``-1``.
         resume = train_cfg.runner.resume
         resume_path = None
+        direct_resume_path = getattr(args, "model_path", None)
         if resume:
-            resume_root = default_log_root if log_root is None else log_root
-            resume_path = get_load_path(
-                resume_root,
-                load_run=train_cfg.runner.load_run,
-                checkpoint=train_cfg.runner.checkpoint,
-            )
+            if direct_resume_path:
+                resume_path = os.path.abspath(
+                    os.path.expanduser(direct_resume_path)
+                )
+                if not os.path.isfile(resume_path):
+                    raise FileNotFoundError(
+                        "Checkpoint does not exist: " + resume_path
+                    )
+            else:
+                resume_root = (
+                    default_log_root if log_root is None else log_root
+                )
+                resume_path = get_load_path(
+                    resume_root,
+                    load_run=train_cfg.runner.load_run,
+                    checkpoint=train_cfg.runner.checkpoint,
+                )
             train_cfg.runner.resume_path = resume_path
         
         train_cfg_dict = class_to_dict(train_cfg)
         env_cfg_dict = class_to_dict(self.env_cfg_for_wandb)
         all_cfg = {**train_cfg_dict, **env_cfg_dict}
         
-        runner_class = eval(train_cfg_dict["runner_class_name"])
+        runner_class_name = train_cfg_dict["runner_class_name"]
+        if runner_class_name == "AMPOnPolicyRunner":
+            # Import lazily so normal PPO and evaluation entry points do not
+            # import the AMP motion-data stack.
+            from humanoid.algo.amp.amp_runner import AMPOnPolicyRunner
+
+            runner_class = AMPOnPolicyRunner
+        else:
+            runner_class = eval(runner_class_name)
         runner = runner_class(env, all_cfg, log_dir, device=args.rl_device)
         #save resume path before creating a new log_dir
         if resume:
@@ -153,19 +173,31 @@ class TaskRegistry():
             checkpoint_name = os.path.basename(resume_path)
             match = re.fullmatch(r"model_(\d+)\.pt", checkpoint_name)
             if match is None:
-                raise RuntimeError(
-                    "Cannot verify checkpoint iteration from filename: "
-                    + checkpoint_name
-                )
-            filename_iteration = int(match.group(1))
-            loaded_iteration = int(runner.current_learning_iteration)
-            if loaded_iteration != filename_iteration:
-                raise RuntimeError(
-                    "Checkpoint iteration mismatch: filename says {}, "
-                    "metadata says {} ({})".format(
-                        filename_iteration, loaded_iteration, resume_path
+                if not direct_resume_path:
+                    raise RuntimeError(
+                        "Cannot verify checkpoint iteration from filename: "
+                        + checkpoint_name
                     )
+                loaded_iteration = int(runner.current_learning_iteration)
+                if loaded_iteration <= 0:
+                    raise RuntimeError(
+                        "Explicit checkpoint has no positive iteration "
+                        "metadata: " + resume_path
+                    )
+                print(
+                    "Verified explicit checkpoint metadata: iteration "
+                    "{} ({})".format(loaded_iteration, checkpoint_name)
                 )
+            else:
+                filename_iteration = int(match.group(1))
+                loaded_iteration = int(runner.current_learning_iteration)
+                if loaded_iteration != filename_iteration:
+                    raise RuntimeError(
+                        "Checkpoint iteration mismatch: filename says {}, "
+                        "metadata says {} ({})".format(
+                            filename_iteration, loaded_iteration, resume_path
+                        )
+                    )
             print(
                 "Verified checkpoint iteration: {}".format(
                     loaded_iteration

@@ -2,50 +2,38 @@ import json
 
 import torch
 import numpy as np
-from pybullet_utils import transformations
 
 _EPS = 1e-6
 
 
-
 def quaternion_slerp(q0, q1, fraction, spin=0, shortestpath=True):
-    """Batch quaternion spherical linear interpolation."""
+    """Numerically stable batched quaternion spherical interpolation."""
+    del spin
+    q0 = torch.nn.functional.normalize(q0, dim=-1)
+    q1 = torch.nn.functional.normalize(q1, dim=-1)
+    fraction = torch.as_tensor(
+        fraction, dtype=q0.dtype, device=q0.device
+    )
+    while fraction.ndim < q0.ndim:
+        fraction = fraction.unsqueeze(-1)
 
-    out = torch.zeros_like(q0)
-
-    zero_mask = torch.isclose(fraction, torch.zeros_like(fraction)).squeeze()
-    ones_mask = torch.isclose(fraction, torch.ones_like(fraction)).squeeze()
-    out[zero_mask] = q0[zero_mask]
-    out[ones_mask] = q1[ones_mask]
-
-    d = torch.sum(q0 * q1, dim=-1, keepdim=True)
-    dist_mask = (torch.abs(torch.abs(d) - 1.0) < _EPS).squeeze()
-    out[dist_mask] = q0[dist_mask]
-
+    dot = torch.sum(q0 * q1, dim=-1, keepdim=True)
     if shortestpath:
-        d_old = torch.clone(d)
-        d = torch.where(d_old < 0, -d, d)
-        q1 = torch.where(d_old < 0, -q1, q1)
-    
-    #TODO Clip d to be in the range [-1, 1] to avoid nan from acos
-    d = torch.clamp(d, -1.0 + _EPS, 1.0 - _EPS)
+        q1 = torch.where(dot < 0.0, -q1, q1)
+        dot = torch.abs(dot)
+    dot = torch.clamp(dot, -1.0, 1.0)
 
-    angle = torch.acos(d) + spin * torch.pi
-    angle_mask = (torch.abs(angle) < _EPS).squeeze()
-    out[angle_mask] = q0[angle_mask]
-
-    final_mask = torch.logical_or(zero_mask, ones_mask)
-    final_mask = torch.logical_or(final_mask, dist_mask)
-    final_mask = torch.logical_or(final_mask, angle_mask)
-    final_mask = torch.logical_not(final_mask)
-
-    # isin = 1.0 / angle
-    isin = 1.0 / (angle + _EPS)     #TODO Avoid division by zero
-    q0 *= torch.sin((1.0 - fraction) * angle) * isin
-    q1 *= torch.sin(fraction * angle) * isin
-    q0 += q1
-    out[final_mask] = q0[final_mask]
-    return out
+    linear = torch.nn.functional.normalize(
+        (1.0 - fraction) * q0 + fraction * q1, dim=-1
+    )
+    theta = torch.acos(torch.clamp(dot, -1.0 + _EPS, 1.0 - _EPS))
+    sin_theta = torch.sin(theta)
+    spherical = (
+        torch.sin((1.0 - fraction) * theta) / (sin_theta + _EPS) * q0
+        + torch.sin(fraction * theta) / (sin_theta + _EPS) * q1
+    )
+    near = torch.abs(dot) > 1.0 - 1.0e-5
+    return torch.where(near, linear, spherical)
 
 class MotionLoaderNing:
 
@@ -57,6 +45,7 @@ class MotionLoaderNing:
     ANGULAR_VEL_SIZE = 3
     JOINT_VEL_SIZE = 18
     BASE_HEIGHT_SIZE = 1
+    MASKED_OBSERVATION_INDICES = (8, 17, 44, 53)
 
     ROOT_POS_START_IDX = 0
     ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE
@@ -185,15 +174,26 @@ class MotionLoaderNing:
 
     def traj_time_sample(self, traj_idx):
         """Sample random time for traj."""
-        subst = self.time_between_frames * (self.reference_observation_horizon - 1) + self.trajectory_frame_durations[traj_idx]
-        return max(
-            0, (self.trajectory_lens[traj_idx] * np.random.uniform() - subst))
+        reserved = (
+            self.time_between_frames
+            * (self.reference_observation_horizon - 1)
+        )
+        maximum_time = max(
+            0.0, self.trajectory_lens[traj_idx] - reserved
+        )
+        return maximum_time * np.random.uniform()
 
     def traj_time_sample_batch(self, traj_idxs):
         """Sample random time for multiple trajectories."""
-        subst = self.time_between_frames * (self.reference_observation_horizon - 1) + self.trajectory_frame_durations[traj_idxs]
-        time_samples = self.trajectory_lens[traj_idxs] * np.random.uniform(size=len(traj_idxs)) - subst
-        return np.maximum(np.zeros_like(time_samples), time_samples)
+        reserved = (
+            self.time_between_frames
+            * (self.reference_observation_horizon - 1)
+        )
+        maximum_times = np.maximum(
+            np.zeros_like(self.trajectory_lens[traj_idxs]),
+            self.trajectory_lens[traj_idxs] - reserved,
+        )
+        return maximum_times * np.random.uniform(size=len(traj_idxs))
 
     def slerp(self, val0, val1, blend):
         return (1.0 - blend) * val0 + blend * val1
@@ -206,17 +206,21 @@ class MotionLoaderNing:
         """Returns frame for the given trajectory at the specified time."""
         p = float(time) / self.trajectory_lens[traj_idx]
         n = self.trajectories[traj_idx].shape[0]
-        idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n))
+        frame_position = p * (n - 1)
+        idx_low = int(np.floor(frame_position))
+        idx_high = int(np.ceil(frame_position))
         frame_start = self.trajectories[traj_idx][idx_low]
         frame_end = self.trajectories[traj_idx][idx_high]
-        blend = p * n - idx_low
+        blend = frame_position - idx_low
         return self.slerp(frame_start, frame_end, blend)
 
     def get_frame_at_time_batch(self, traj_idxs, times):
         """Returns frame for the given trajectory at the specified time."""
         p = times / self.trajectory_lens[traj_idxs]
         n = self.trajectory_num_frames[traj_idxs]
-        idx_low, idx_high = np.floor(p * n).astype(np.int32), np.ceil(p * n).astype(np.int32)
+        frame_positions = p * (n - 1)
+        idx_low = np.floor(frame_positions).astype(np.int32)
+        idx_high = np.ceil(frame_positions).astype(np.int32)
         all_frame_starts = torch.zeros(len(traj_idxs), self.observation_dim, device=self.device)
         all_frame_ends = torch.zeros(len(traj_idxs), self.observation_dim, device=self.device)
         for traj_idx in set(traj_idxs):
@@ -224,23 +228,31 @@ class MotionLoaderNing:
             traj_mask = traj_idxs == traj_idx
             all_frame_starts[traj_mask] = trajectory[idx_low[traj_mask]]
             all_frame_ends[traj_mask] = trajectory[idx_high[traj_mask]]
-        blend = torch.tensor(p * n - idx_low, device=self.device, dtype=torch.float32).unsqueeze(-1)
+        blend = torch.tensor(
+            frame_positions - idx_low,
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(-1)
         return self.slerp(all_frame_starts, all_frame_ends, blend)
 
     def get_full_frame_at_time(self, traj_idx, time):
         """Returns full frame for the given trajectory at the specified time."""
         p = float(time) / self.trajectory_lens[traj_idx]
         n = self.trajectories_full[traj_idx].shape[0]
-        idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n))
+        frame_position = p * (n - 1)
+        idx_low = int(np.floor(frame_position))
+        idx_high = int(np.ceil(frame_position))
         frame_start = self.trajectories_full[traj_idx][idx_low]
         frame_end = self.trajectories_full[traj_idx][idx_high]
-        blend = p * n - idx_low
+        blend = frame_position - idx_low
         return self.blend_frame_pose(frame_start, frame_end, blend)
 
     def get_full_frame_at_time_batch(self, traj_idxs, times):
         p = times / self.trajectory_lens[traj_idxs]
         n = self.trajectory_num_frames[traj_idxs]
-        idx_low, idx_high = np.floor(p * n).astype(np.int32), np.ceil(p * n).astype(np.int32)
+        frame_positions = p * (n - 1)
+        idx_low = np.floor(frame_positions).astype(np.int32)
+        idx_high = np.ceil(frame_positions).astype(np.int32)
         all_frame_pos_starts = torch.zeros(len(traj_idxs), MotionLoaderNing.POS_SIZE, device=self.device)
         all_frame_pos_ends = torch.zeros(len(traj_idxs), MotionLoaderNing.POS_SIZE, device=self.device)
         all_frame_rot_starts = torch.zeros(len(traj_idxs), MotionLoaderNing.ROT_SIZE, device=self.device)
@@ -256,7 +268,11 @@ class MotionLoaderNing:
             all_frame_rot_ends[traj_mask] = MotionLoaderNing.get_root_rot_batch(trajectory[idx_high[traj_mask]])
             all_frame_AMP_starts[traj_mask] = trajectory[idx_low[traj_mask]][:, MotionLoaderNing.JOINT_POSE_START_IDX:MotionLoaderNing.BASE_HEIGHT_END_IDX]
             all_frame_AMP_ends[traj_mask] = trajectory[idx_high[traj_mask]][:, MotionLoaderNing.JOINT_POSE_START_IDX:MotionLoaderNing.BASE_HEIGHT_END_IDX]
-        blend = torch.tensor(p * n - idx_low, device=self.device, dtype=torch.float32).unsqueeze(-1)
+        blend = torch.tensor(
+            frame_positions - idx_low,
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(-1)
 
         pos_blend = self.slerp(all_frame_pos_starts, all_frame_pos_ends, blend)
         rot_blend = quaternion_slerp(all_frame_rot_starts, all_frame_rot_ends, blend)
@@ -299,25 +315,37 @@ class MotionLoaderNing:
         linear_vel_0, linear_vel_1 = MotionLoaderNing.get_linear_vel(frame0), MotionLoaderNing.get_linear_vel(frame1)
         angular_vel_0, angular_vel_1 = MotionLoaderNing.get_angular_vel(frame0), MotionLoaderNing.get_angular_vel(frame1)
         joint_vel_0, joint_vel_1 = MotionLoaderNing.get_joint_vel(frame0), MotionLoaderNing.get_joint_vel(frame1)
+        base_height_0, base_height_1 = (
+            MotionLoaderNing.get_base_height(frame0),
+            MotionLoaderNing.get_base_height(frame1),
+        )
 
         blend_root_pos = self.slerp(root_pos0, root_pos1, blend)
-        blend_root_rot = transformations.quaternion_slerp(
-            root_rot0.cpu().numpy(), root_rot1.cpu().numpy(), blend)
+        blend_root_rot = quaternion_slerp(
+            root_rot0.unsqueeze(0),
+            root_rot1.unsqueeze(0),
+            torch.tensor([[blend]], dtype=root_rot0.dtype, device=root_rot0.device),
+        ).squeeze(0)
         blend_joints = self.slerp(joints0, joints1, blend)
         blend_tar_toe_pos = self.slerp(tar_toe_pos_0, tar_toe_pos_1, blend)
         blend_linear_vel = self.slerp(linear_vel_0, linear_vel_1, blend)
         blend_angular_vel = self.slerp(angular_vel_0, angular_vel_1, blend)
         blend_joints_vel = self.slerp(joint_vel_0, joint_vel_1, blend)
+        blend_base_height = self.slerp(
+            base_height_0, base_height_1, blend
+        )
 
         return torch.cat([
             blend_root_pos, blend_root_rot, blend_joints, blend_tar_toe_pos,
-            blend_linear_vel, blend_angular_vel, blend_joints_vel])
+            blend_linear_vel, blend_angular_vel, blend_joints_vel,
+            blend_base_height,
+        ])
 
     def feed_forward_generator(self, num_mini_batch, mini_batch_size):
         for _ in range(num_mini_batch):
             ids = torch.randint(0, self.num_preload_transitions, (mini_batch_size,), device=self.device)
             states = self.preloaded_states[ids, :, self.observation_start_dim:]
-            states[:, :, [8, 17, 44, 53]] = 0.0
+            states[:, :, list(self.MASKED_OBSERVATION_INDICES)] = 0.0
             labels = self.motion_label[ids]
             yield states, labels
 
@@ -376,7 +404,13 @@ class MotionLoaderNing:
 
     def get_joint_vel_batch(poses):
         return poses[:, MotionLoaderNing.JOINT_VEL_START_IDX:MotionLoaderNing.JOINT_VEL_END_IDX]  
-    
+
+    def get_base_height(pose):
+        return pose[
+            MotionLoaderNing.BASE_HEIGHT_START_IDX:
+            MotionLoaderNing.BASE_HEIGHT_END_IDX
+        ]
+
     def get_base_height_batch(poses):
         return poses[:, MotionLoaderNing.BASE_HEIGHT_START_IDX:MotionLoaderNing.BASE_HEIGHT_END_IDX]  
 
@@ -635,8 +669,11 @@ class MotionLoaderNing10DOF:
         joint_vel_0, joint_vel_1 = MotionLoaderNing10DOF.get_joint_vel(frame0), MotionLoaderNing10DOF.get_joint_vel(frame1)
 
         blend_root_pos = self.slerp(root_pos0, root_pos1, blend)
-        blend_root_rot = transformations.quaternion_slerp(
-            root_rot0.cpu().numpy(), root_rot1.cpu().numpy(), blend)
+        blend_root_rot = quaternion_slerp(
+            root_rot0.unsqueeze(0),
+            root_rot1.unsqueeze(0),
+            torch.tensor([[blend]], dtype=root_rot0.dtype, device=root_rot0.device),
+        ).squeeze(0)
         blend_joints = self.slerp(joints0, joints1, blend)
         blend_tar_toe_pos = self.slerp(tar_toe_pos_0, tar_toe_pos_1, blend)
         blend_linear_vel = self.slerp(linear_vel_0, linear_vel_1, blend)
@@ -967,8 +1004,11 @@ class MotionLoaderNing20DOF:
         joint_vel_0, joint_vel_1 = MotionLoaderNing20DOF.get_joint_vel(frame0), MotionLoaderNing20DOF.get_joint_vel(frame1)
 
         blend_root_pos = self.slerp(root_pos0, root_pos1, blend)
-        blend_root_rot = transformations.quaternion_slerp(
-            root_rot0.cpu().numpy(), root_rot1.cpu().numpy(), blend)
+        blend_root_rot = quaternion_slerp(
+            root_rot0.unsqueeze(0),
+            root_rot1.unsqueeze(0),
+            torch.tensor([[blend]], dtype=root_rot0.dtype, device=root_rot0.device),
+        ).squeeze(0)
         blend_root_rot = torch.tensor(
             motion_util.standardize_quaternion(blend_root_rot),
             dtype=torch.float32, device=self.device)
@@ -1300,8 +1340,11 @@ class MotionLoaderNingTracking:
         joint_vel_0, joint_vel_1 = MotionLoaderNingTracking.get_joint_vel(frame0), MotionLoaderNingTracking.get_joint_vel(frame1)
 
         blend_root_pos = self.slerp(root_pos0, root_pos1, blend)
-        blend_root_rot = transformations.quaternion_slerp(
-            root_rot0.cpu().numpy(), root_rot1.cpu().numpy(), blend)
+        blend_root_rot = quaternion_slerp(
+            root_rot0.unsqueeze(0),
+            root_rot1.unsqueeze(0),
+            torch.tensor([[blend]], dtype=root_rot0.dtype, device=root_rot0.device),
+        ).squeeze(0)
         blend_joints = self.slerp(joints0, joints1, blend)
         blend_tar_toe_pos = self.slerp(tar_toe_pos_0, tar_toe_pos_1, blend)
         blend_linear_vel = self.slerp(linear_vel_0, linear_vel_1, blend)

@@ -1,139 +1,240 @@
 #!/usr/bin/env bash
-# ============================================================================
-# run_amp_training.sh — AMP (Adversarial Motion Priors) 训练启动脚本
-#
-# 用法:
-#   bash humanoid/scripts/run_amp_training.sh collect   # 仅采集参考动作
-#   bash humanoid/scripts/run_amp_training.sh train     # 采集 + 训练
-#   bash humanoid/scripts/run_amp_training.sh train_only # 仅训练 (已有参考数据)
-#
-# 环境变量 (可选):
-#   N2_AMP_CHECKPOINT     - 策略 checkpoint 路径 (默认: 自动寻找最优)
-#   N2_AMP_STYLE_WEIGHT   - AMP 风格奖励权重 (默认: 0.5)
-#   N2_AMP_DISC_LR        - 判别器学习率 (默认: 1e-4)
-#   N2_AMP_MOTION_FILE    - 参考动作 JSON 路径
-#   N2_SEED               - 随机种子 (默认: 42)
-#   N2_NUM_ENVS           - 训练环境数 (默认: 4096)
-#   N2_AMP_COLLECT_ENVS   - 采集环境数 (默认: 64)
-#   N2_AMP_COLLECT_STEPS  - 采集步数 (默认: 500)
-# ============================================================================
+# Curated AMP collection and protected N2 stair-policy refinement.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-# --- 默认参数 ---
 MODE="${1:-train}"
 SEED="${N2_SEED:-42}"
-NUM_ENVS="${N2_NUM_ENVS:-4096}"
-STYLE_WEIGHT="${N2_AMP_STYLE_WEIGHT:-0.5}"
-DISC_LR="${N2_AMP_DISC_LR:-1e-4}"
-REPLAY_SIZE="${N2_AMP_REPLAY_SIZE:-100000}"
-MOTION_FILE="${N2_AMP_MOTION_FILE:-${PROJECT_ROOT}/humanoid/amp_data/stair_climb.json}"
+SIM_DEVICE="${N2_SIM_DEVICE:-cuda:0}"
+RL_DEVICE="${N2_RL_DEVICE:-cuda:0}"
+NUM_ENVS="${N2_NUM_ENVS:-512}"
 COLLECT_ENVS="${N2_AMP_COLLECT_ENVS:-64}"
-COLLECT_STEPS="${N2_AMP_COLLECT_STEPS:-500}"
-LEARNING_RATE="${N2_AMP_LR:-1e-5}"
-MAX_ITERATIONS="${N2_AMP_MAX_ITERATIONS:-10000}"
-TERRAIN_MIX="${N2_AMP_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"
+COLLECT_STEPS="${N2_AMP_COLLECT_STEPS:-6000}"
+MAX_MOTIONS="${N2_AMP_MAX_MOTIONS:-24}"
+ADDITIONAL_ITERATIONS="${N2_AMP_ADDITIONAL_ITERATIONS:-400}"
+STYLE_WEIGHT="${N2_AMP_STYLE_WEIGHT:-0.15}"
+DISC_LR="${N2_AMP_DISC_LR:-1e-4}"
+POLICY_LR="${N2_AMP_LR:-2e-6}"
+REPLAY_SIZE="${N2_AMP_REPLAY_SIZE:-100000}"
+AMP_BATCH_SIZE="${N2_AMP_BATCH_SIZE:-512}"
+PRELOAD_TRANSITIONS="${N2_AMP_PRELOAD_TRANSITIONS:-50000}"
+DISC_UPDATES="${N2_AMP_DISC_UPDATES:-2}"
+GRADIENT_PENALTY="${N2_AMP_GRADIENT_PENALTY:-10.0}"
+WARMUP_UPDATES="${N2_AMP_WARMUP_UPDATES:-10}"
+RAMP_UPDATES="${N2_AMP_RAMP_UPDATES:-100}"
+TERRAIN_MIX="${N2_AMP_TERRAIN_MIX:-2,3,4,4,4,4}"
+COMMAND_SPEED="${N2_AMP_COMMAND_SPEED:-0.18}"
+ACTOR_REFERENCE="${N2_AMP_ACTOR_REFERENCE:-0.10}"
+SYMMETRY_COEFF="${N2_AMP_SYMMETRY_COEFF:-0.002}"
+ACTION_NOISE="${N2_AMP_ACTION_NOISE:-0.05}"
+ACTOR_LAYERS="${N2_AMP_ACTOR_LAYERS:-2}"
+POLICY_LOSS_SCALE="${N2_AMP_POLICY_LOSS_SCALE:-0.50}"
+SAVE_INTERVAL="${N2_AMP_SAVE_INTERVAL:-20}"
+MOTION_DIR="${N2_AMP_MOTION_DIR:-${PROJECT_ROOT}/humanoid/amp_data/stair_climb_s${SEED}}"
+MOTION_MANIFEST="${N2_AMP_MOTION_MANIFEST:-${MOTION_DIR}/manifest.txt}"
+LAUNCHER_DIR="${PROJECT_ROOT}/logs/amp_launcher"
 
-# --- Checkpoint 自动发现 ---
+mkdir -p "${LAUNCHER_DIR}"
+
+if [[ "${MODE}" == "status" ]]; then
+    pgrep -af '[t]rain_amp.py' || echo "No AMP trainer is running."
+    if [[ -f "${LAUNCHER_DIR}/latest_amp_logpath" ]]; then
+        cat "${LAUNCHER_DIR}/latest_amp_logpath"
+    fi
+    exit 0
+fi
+if [[ "${MODE}" == "log" ]]; then
+    if [[ ! -f "${LAUNCHER_DIR}/latest_amp_logpath" ]]; then
+        echo "No AMP training log has been recorded." >&2
+        exit 2
+    fi
+    tail -f "$(<"${LAUNCHER_DIR}/latest_amp_logpath")"
+    exit 0
+fi
+
+find_default_checkpoint() {
+    local selected_dir
+    local candidate
+    selected_dir="${PROJECT_ROOT}/logs/isaac_launcher/stability_selected_s${SEED}"
+    if [[ -f "${selected_dir}/model_best.pt" ]]; then
+        printf '%s\n' "${selected_dir}/model_best.pt"
+        return
+    fi
+    candidate="$(
+        find "${selected_dir}" -maxdepth 1 -type f -name 'model_[0-9]*.pt' \
+            -print 2>/dev/null | sort -V | tail -n 1
+    )"
+    if [[ -n "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return
+    fi
+    return 1
+}
+
 if [[ -n "${N2_AMP_CHECKPOINT:-}" ]]; then
     CHECKPOINT="${N2_AMP_CHECKPOINT}"
 else
-    # 尝试找 stability_selected 的 best
-    SELECTED="${PROJECT_ROOT}/logs/isaac_launcher/stability_selected_s${SEED}/model_best.pt"
-    if [[ -f "${SELECTED}" ]]; then
-        CHECKPOINT="${SELECTED}"
-    else
-        echo "ERROR: No checkpoint found. Set N2_AMP_CHECKPOINT." >&2
-        exit 1
-    fi
+    CHECKPOINT="$(find_default_checkpoint || true)"
 fi
+if [[ -z "${CHECKPOINT}" || ! -f "${CHECKPOINT}" ]]; then
+    echo "ERROR: AMP base checkpoint not found." >&2
+    echo "Set N2_AMP_CHECKPOINT=/absolute/path/to/model_N.pt" >&2
+    exit 1
+fi
+CHECKPOINT="$(readlink -f "${CHECKPOINT}")"
 
-echo "============================================"
-echo " AMP Training Configuration"
-echo "============================================"
-echo "  Mode:           ${MODE}"
-echo "  Checkpoint:     ${CHECKPOINT}"
-echo "  Motion File:    ${MOTION_FILE}"
-echo "  Style Weight:   ${STYLE_WEIGHT}"
-echo "  Disc LR:        ${DISC_LR}"
-echo "  Policy LR:      ${LEARNING_RATE}"
-echo "  Seed:           ${SEED}"
-echo "  Num Envs:       ${NUM_ENVS}"
-echo "  Max Iterations: ${MAX_ITERATIONS}"
-echo "  Terrain Mix:    ${TERRAIN_MIX}"
-echo "============================================"
-
-# --- 采集参考动作 ---
-collect_motions() {
-    echo ""
-    echo "[AMP] Step 1: Collecting reference motions..."
-    python -u humanoid/scripts/collect_reference_motions.py \
-        --checkpoint "${CHECKPOINT}" \
-        --output "${MOTION_FILE}" \
-        --num_envs "${COLLECT_ENVS}" \
-        --num_steps "${COLLECT_STEPS}"
-    echo "[AMP] Reference motions saved to ${MOTION_FILE}"
+checkpoint_iteration() {
+    python -c 'import sys, torch
+path = sys.argv[1]
+try:
+    data = torch.load(path, map_location="cpu", weights_only=False)
+except TypeError:
+    data = torch.load(path, map_location="cpu")
+iteration = int(data.get("iter", -1))
+if iteration < 0:
+    raise SystemExit("checkpoint has no valid iter metadata: " + path)
+print(iteration)' "${CHECKPOINT}"
 }
 
-# --- 训练 ---
+CURRENT_ITERATION="$(checkpoint_iteration)"
+if [[ -n "${N2_AMP_MAX_ITERATIONS:-}" ]]; then
+    MAX_ITERATIONS="${N2_AMP_MAX_ITERATIONS}"
+else
+    MAX_ITERATIONS="$((CURRENT_ITERATION + ADDITIONAL_ITERATIONS))"
+fi
+
+collect_motions() {
+    mkdir -p "${MOTION_DIR}"
+    python -u humanoid/scripts/collect_reference_motions.py \
+        --task=n2_stairs_walk \
+        --model_path="${CHECKPOINT}" \
+        --output_dir="${MOTION_DIR}" \
+        --manifest="${MOTION_MANIFEST}" \
+        --headless \
+        --sim_device="${SIM_DEVICE}" \
+        --rl_device="${RL_DEVICE}" \
+        --num_envs="${COLLECT_ENVS}" \
+        --num_steps="${COLLECT_STEPS}" \
+        --max_motions="${MAX_MOTIONS}" \
+        --fixed_terrain_level=4 \
+        --command_speed="${COMMAND_SPEED}" \
+        --seed="${SEED}"
+}
+
 run_training() {
-    echo ""
-    echo "[AMP] Step 2: Starting AMP-augmented training..."
+    local log_path
+    local run_name
+    local run_dir
+    local selected_dir
+    if [[ ! -f "${MOTION_MANIFEST}" ]]; then
+        echo "ERROR: motion manifest not found: ${MOTION_MANIFEST}" >&2
+        exit 1
+    fi
+    if (( MAX_ITERATIONS <= CURRENT_ITERATION )); then
+        echo "ERROR: target iteration ${MAX_ITERATIONS} is not above checkpoint iteration ${CURRENT_ITERATION}." >&2
+        exit 1
+    fi
 
-    # 只保留任务奖励, 关闭手工风格奖励
-    # (forward_progress, success, completion, termination 保留)
-    STYLE_ZERO_OVERRIDES="stairs_alternating_tread=0,stairs_repeated_lead=0,stairs_same_tread_join=0"
-    STYLE_ZERO_OVERRIDES+=",stairs_stride_symmetry=0,stairs_arm_swing=0"
-    STYLE_ZERO_OVERRIDES+=",stairs_foothold_lateral_error=0,stairs_foot_crossover=0"
-    STYLE_ZERO_OVERRIDES+=",stairs_foot_lane_error=0,stairs_single_support_stability=0"
-    STYLE_ZERO_OVERRIDES+=",stairs_right_support_stability=0"
+    run_name="amp_curated_from_${CURRENT_ITERATION}_to_${MAX_ITERATIONS}_s${SEED}"
+    log_path="${LAUNCHER_DIR}/${run_name}_$(date +%m%d_%H-%M-%S).log"
+    printf '%s\n' "${log_path}" > "${LAUNCHER_DIR}/latest_amp_logpath"
+    echo "[AMP] log: ${log_path}"
 
-    python -u humanoid/scripts/train.py \
+    python -u humanoid/scripts/train_amp.py \
         --task=n2_stairs_walk \
         --resume \
-        --load_run="$(dirname "${CHECKPOINT}")" \
-        --checkpoint="$(basename "${CHECKPOINT}" .pt | sed 's/model_//')" \
+        --model_path="${CHECKPOINT}" \
+        --motion_manifest="${MOTION_MANIFEST}" \
         --headless \
-        --sim_device=cuda:0 \
-        --rl_device=cuda:0 \
+        --sim_device="${SIM_DEVICE}" \
+        --rl_device="${RL_DEVICE}" \
         --num_envs="${NUM_ENVS}" \
         --max_iterations="${MAX_ITERATIONS}" \
         --seed="${SEED}" \
         --terrain_level_mix="${TERRAIN_MIX}" \
-        --learning_rate="${LEARNING_RATE}" \
-        --reward_scale_overrides="${STYLE_ZERO_OVERRIDES}" \
-        --experiment_name=n2_stairs_amp
+        --command_speed="${COMMAND_SPEED}" \
+        --learning_rate="${POLICY_LR}" \
+        --fixed_learning_rate \
+        --reset_optimizer \
+        --action_noise_std="${ACTION_NOISE}" \
+        --actor_reference_loss_coeff="${ACTOR_REFERENCE}" \
+        --actor_policy_loss_scale="${POLICY_LOSS_SCALE}" \
+        --actor_trainable_layers="${ACTOR_LAYERS}" \
+        --freeze_action_noise \
+        --symmetry_loss_coeff="${SYMMETRY_COEFF}" \
+        --observation_noise_level=0.20 \
+        --save_interval="${SAVE_INTERVAL}" \
+        --amp_style_weight="${STYLE_WEIGHT}" \
+        --amp_disc_lr="${DISC_LR}" \
+        --amp_replay_size="${REPLAY_SIZE}" \
+        --amp_batch_size="${AMP_BATCH_SIZE}" \
+        --amp_preload_transitions="${PRELOAD_TRANSITIONS}" \
+        --amp_disc_updates="${DISC_UPDATES}" \
+        --amp_gradient_penalty="${GRADIENT_PENALTY}" \
+        --amp_reward_warmup_updates="${WARMUP_UPDATES}" \
+        --amp_reward_ramp_updates="${RAMP_UPDATES}" \
+        --experiment_name=n2_stairs_amp \
+        --run_name="${run_name}" 2>&1 | tee "${log_path}"
+
+    run_dir="$(
+        find "${PROJECT_ROOT}/logs/n2_stairs_amp" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name "*_${run_name}" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -nr | head -n 1 | cut -d' ' -f2-
+    )"
+    if [[ -z "${run_dir}" || ! -f "${run_dir}/model_best.pt" ]]; then
+        echo "ERROR: AMP run did not produce model_best.pt" >&2
+        exit 1
+    fi
+    selected_dir="${LAUNCHER_DIR}/selected_s${SEED}"
+    mkdir -p "${selected_dir}"
+    cp -f "${run_dir}/model_best.pt" "${selected_dir}/model_best.pt"
+    printf '%s\n' "${run_dir}" > "${selected_dir}/run_dir.txt"
+    printf '%s\n' "${run_dir}/model_best.pt" \
+        > "${selected_dir}/source_checkpoint.txt"
+    echo "N2_AMP_RUN=${run_dir}"
+    echo "N2_AMP_BEST=${selected_dir}/model_best.pt"
 }
 
-# --- 主逻辑 ---
+print_configuration() {
+    echo "AMP mode=${MODE}"
+    echo "checkpoint=${CHECKPOINT} (iteration ${CURRENT_ITERATION})"
+    echo "motion_manifest=${MOTION_MANIFEST}"
+    echo "target_iteration=${MAX_ITERATIONS}"
+    echo "envs=${NUM_ENVS} terrain_mix=${TERRAIN_MIX}"
+    echo "policy_lr=${POLICY_LR} style_weight=${STYLE_WEIGHT}"
+}
+
 case "${MODE}" in
     collect)
+        print_configuration
         collect_motions
         ;;
     train)
-        if [[ ! -f "${MOTION_FILE}" ]]; then
+        print_configuration
+        if [[ ! -f "${MOTION_MANIFEST}" ]]; then
             collect_motions
         else
-            echo "[AMP] Using existing motion file: ${MOTION_FILE}"
+            echo "[AMP] Reusing curated manifest: ${MOTION_MANIFEST}"
         fi
         run_training
         ;;
     train_only)
-        if [[ ! -f "${MOTION_FILE}" ]]; then
-            echo "ERROR: Motion file not found: ${MOTION_FILE}" >&2
-            echo "Run with 'collect' or 'train' mode first." >&2
-            exit 1
-        fi
+        print_configuration
+        run_training
+        ;;
+    smoke)
+        NUM_ENVS="${N2_NUM_ENVS:-64}"
+        PRELOAD_TRANSITIONS="${N2_AMP_PRELOAD_TRANSITIONS:-2048}"
+        MAX_ITERATIONS="$((CURRENT_ITERATION + 2))"
+        print_configuration
         run_training
         ;;
     *)
-        echo "Usage: $0 {collect|train|train_only}" >&2
-        exit 1
+        echo "Usage: $0 {collect|train|train_only|smoke|status|log}" >&2
+        exit 2
         ;;
 esac
-
-echo ""
-echo "[AMP] Done!"
