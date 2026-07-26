@@ -36,6 +36,9 @@ STAGE3_NOISE="${N2_FASTSTAIR_STAGE3_NOISE:-0.05}"
 STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"
 STAGE2_REFERENCE="${N2_FASTSTAIR_STAGE2_REFERENCE:-0.010}"
 STAGE3_REFERENCE="${N2_FASTSTAIR_STAGE3_REFERENCE:-0.005}"
+STAGE1_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE1_REWARDS:-stairs_alternating_tread=4,stairs_repeated_lead=-3,stairs_same_tread_join=-4,stairs_same_tread_support=-1.5,stairs_sagittal_foot_phase=0.5,stairs_sagittal_foot_phase_error=-0.25,stairs_stride_symmetry=-2,stairs_right_stride_excess=-2,stairs_right_stride_excess_continuous=-1,stairs_foothold_lateral=0.5,stairs_foothold_lateral_error=-0.5,stairs_foot_crossover=-2,stairs_foot_lane_error=-0.5,stairs_single_support_stability=-0.5,stairs_right_support_stability=-0.75,action_rate=-0.10,action_smoothness=-0.10}"
+STAGE2_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE2_REWARDS:-faststair_foothold=8,faststair_foothold_error=-8,stairs_alternating_tread=6,stairs_repeated_lead=-4,stairs_same_tread_join=-6,stairs_same_tread_support=-2,stairs_sagittal_foot_phase=0.75,stairs_sagittal_foot_phase_error=-0.35,stairs_stride_symmetry=-3,stairs_right_stride_excess=-3,stairs_right_stride_excess_continuous=-1.5,stairs_foothold_lateral=0.75,stairs_foothold_lateral_error=-0.75,stairs_foot_crossover=-3,stairs_foot_lane_error=-1,stairs_single_support_stability=-1,stairs_right_support_stability=-1.5,action_rate=-0.12,action_smoothness=-0.12}"
+STAGE3_REWARD_OVERRIDES="${N2_FASTSTAIR_STAGE3_REWARDS:-faststair_foothold=10,faststair_foothold_error=-10,stairs_alternating_tread=8,stairs_repeated_lead=-6,stairs_same_tread_join=-8,stairs_same_tread_support=-4,stairs_sagittal_foot_phase=1,stairs_sagittal_foot_phase_error=-0.5,stairs_stride_symmetry=-4,stairs_right_stride_excess=-4,stairs_right_stride_excess_continuous=-2,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-1,stairs_foot_crossover=-4,stairs_foot_lane_error=-1.5,stairs_single_support_stability=-1.5,stairs_right_support_stability=-2.5,action_rate=-0.15,action_smoothness=-0.15}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/faststair_launcher"
 TRAIN_ROOT="${ROOT_DIR}/logs/n2_faststair"
@@ -235,7 +238,7 @@ bootstrap_preflight() {
         n2_stairs_walk "${baseline_numbered}" "${baseline_evaluation}" \
         "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}"
     run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
-        --stage=1 \
+        --preflight \
         "--baseline=${baseline_evaluation}" \
         "--baseline-checkpoint=${baseline}" \
         --candidate \
@@ -279,6 +282,7 @@ train_stage() {
     local learning_rate
     local action_noise
     local reference_coefficient
+    local reward_overrides
 
     if [[ -z "${source}" || ! -f "${source}" ]]; then
         echo "FastStair stage ${stage} requires a preflight-approved source" >&2
@@ -297,18 +301,21 @@ train_stage() {
             learning_rate="${STAGE1_LEARNING_RATE}"
             action_noise="${STAGE1_NOISE}"
             reference_coefficient="${STAGE1_REFERENCE}"
+            reward_overrides="${STAGE1_REWARD_OVERRIDES}"
             ;;
         2)
             command_speed="${STAGE2_SPEED}"
             learning_rate="${STAGE2_LEARNING_RATE}"
             action_noise="${STAGE2_NOISE}"
             reference_coefficient="${STAGE2_REFERENCE}"
+            reward_overrides="${STAGE2_REWARD_OVERRIDES}"
             ;;
         3)
             command_speed="${STAGE3_SPEED}"
             learning_rate="${STAGE3_LEARNING_RATE}"
             action_noise="${STAGE3_NOISE}"
             reference_coefficient="${STAGE3_REFERENCE}"
+            reward_overrides="${STAGE3_REWARD_OVERRIDES}"
             ;;
         *)
             echo "Unsupported FastStair stage: ${stage}" >&2
@@ -317,6 +324,7 @@ train_stage() {
     esac
     target_iteration=$((source_iteration + extra_iterations))
     echo "FASTSTAIR_STAGE_TRAIN stage=${stage} source=${source_iteration} target=${target_iteration} mix=${terrain_mix} speed=${command_speed} lr=${learning_rate} noise=${action_noise} reference=${reference_coefficient}"
+    echo "FASTSTAIR_GAIT_REWARDS stage=${stage} ${reward_overrides}"
     run_child python -u humanoid/scripts/train.py \
         --task=n2_faststair \
         "${resume_options[@]}" \
@@ -336,6 +344,7 @@ train_stage() {
         --freeze_action_noise \
         "--actor_reference_loss_coeff=${reference_coefficient}" \
         --actor_policy_loss_scale=0.50 \
+        "--reward_scale_overrides=${reward_overrides}" \
         "--save_interval=${CHECKPOINT_INTERVAL}"
     local run_dir
     run_dir="$(latest_run_directory "${run_name}")"
@@ -456,6 +465,7 @@ run_training() {
     echo "FASTSTAIR_START seed=${SEED} envs=${NUM_ENVS} planner=dcm_gpu task=n2_faststair"
     echo "FASTSTAIR_PHYSX_GUARD envs=${NUM_ENVS}/${SAFE_TRAIN_ENV_LIMIT} max_gpu_contact_pairs=16777216 buffer_multiplier=8"
     echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 actor_bootstrap=True critic_bootstrap=False schedule=fixed"
+    echo "FASTSTAIR_ANTI_CHEAT planner_forces_opposite_foot=True natural_gait_stage_gates=True"
     echo "FASTSTAIR_BOOTSTRAP checkpoint=${baseline}"
     if ! bootstrap_preflight "${baseline}" "${timestamp}" "${work_dir}"; then
         echo "FASTSTAIR_TRAINING_ABORT reason=bootstrap_preflight_failed"

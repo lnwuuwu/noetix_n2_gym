@@ -1126,7 +1126,7 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertTrue(
                 faststair_cfg.env.include_faststair_planner_privileged
             )
-            self.assertTrue(
+            self.assertFalse(
                 faststair_cfg.env.faststair_follow_physical_swing
             )
             self.assertEqual(faststair_cfg.env.num_single_obs, 115)
@@ -1162,9 +1162,17 @@ class StairConfigurationTests(unittest.TestCase):
                 * len(faststair_cfg.env.faststair_candidate_y_offsets),
                 35,
             )
-            self.assertEqual(
+            self.assertGreaterEqual(
                 faststair_cfg.env.success_min_alternating_tread_count,
-                0,
+                3,
+            )
+            self.assertGreaterEqual(
+                faststair_cfg.env.success_min_alternating_tread_rate,
+                0.50,
+            )
+            self.assertLessEqual(
+                faststair_cfg.env.success_max_same_tread_join_rate,
+                0.25,
             )
             self.assertEqual(
                 faststair_train_cfg.runner.experiment_name,
@@ -1338,11 +1346,19 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertLess(
             faststair_scales["faststair_foothold_error"], 0.0
         )
-        self.assertEqual(
+        self.assertGreater(
             faststair_scales["stairs_alternating_tread"], 0.0
         )
-        self.assertEqual(faststair_scales["stairs_repeated_lead"], 0.0)
-        self.assertEqual(faststair_scales["stairs_same_tread_join"], 0.0)
+        self.assertLess(faststair_scales["stairs_repeated_lead"], 0.0)
+        self.assertLess(faststair_scales["stairs_same_tread_join"], 0.0)
+        self.assertLess(faststair_scales["stairs_stride_symmetry"], 0.0)
+        self.assertLess(
+            faststair_scales["stairs_right_support_stability"], 0.0
+        )
+        self.assertLess(faststair_scales["stairs_foot_lane_error"], 0.0)
+        self.assertGreater(
+            faststair_scales["stairs_curriculum_completion"], 0.0
+        )
         for required_reward in (
             "stairs_overspeed",
             "stairs_command_speed_error",
@@ -1551,11 +1567,14 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("--task=n2_faststair", launcher)
         self.assertIn("--bootstrap_actor_checkpoint", launcher)
         self.assertIn("--bootstrap_only", launcher)
+        self.assertIn("--preflight", launcher)
         self.assertIn("actor_bootstrap=True", launcher)
         self.assertIn("critic_bootstrap=False", launcher)
         self.assertIn("schedule=fixed", launcher)
         self.assertIn("--fixed_learning_rate", launcher)
         self.assertIn("--freeze_action_noise", launcher)
+        self.assertIn("--reward_scale_overrides=${reward_overrides}", launcher)
+        self.assertIn("FASTSTAIR_ANTI_CHEAT", launcher)
         self.assertIn("--stage=${stage}", launcher)
         self.assertIn("FASTSTAIR_STAGE_GATE", launcher)
         self.assertIn("FASTSTAIR_STAGE_STOP", launcher)

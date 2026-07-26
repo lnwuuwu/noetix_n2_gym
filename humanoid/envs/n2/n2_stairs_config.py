@@ -672,7 +672,12 @@ class N2FastStairCfg(N2StairsWalkCfg):
         enable_faststair_planner = True
         include_faststair_planner_privileged = True
         faststair_planner_obs_dim = 8
-        faststair_follow_physical_swing = True
+        # Recovery motions remain physically legal, but only the foot opposite
+        # the last advancing foot receives the next DCM foothold target. If the
+        # planner follows whichever leg happens to lift, a repeated-lead or
+        # step-to policy can collect the same reward as natural stair-over-stair
+        # gait.
+        faststair_follow_physical_swing = False
 
         # 70 deployable proprio/navigation values + a 9 x 5 elevation map.
         num_single_obs = 115
@@ -682,21 +687,25 @@ class N2FastStairCfg(N2StairsWalkCfg):
         # actuator randomization(54) + contacts(2) + map(77) + planner(8).
         num_privileged_obs = 217
 
-        # The policy may recover with step-to support; no alternating-foot
-        # condition is used to declare a safe physical climb successful.
-        success_min_phase_contact_match = 0.0
-        success_max_double_flight_fraction = 0.12
-        success_min_alternating_tread_count = 0
-        success_min_alternating_tread_rate = 0.0
-        success_max_same_tread_join_rate = 1.0
-        success_max_skipped_tread_rate = 1.0
-        success_max_sagittal_foot_separation = 0.52
-        curriculum_min_alternating_tread_count = 0
-        curriculum_min_alternating_tread_rate = 0.0
-        curriculum_max_same_tread_join_rate = 1.0
-        curriculum_max_skipped_tread_rate = 1.0
-        curriculum_min_phase_contact_match = 0.0
-        curriculum_max_double_flight_fraction = 0.15
+        # Physical completion remains a separate diagnostic. "Success" now
+        # means a stable climb with genuine support-to-support alternation; it
+        # cannot be earned by hopping, repeatedly leading with one foot, or
+        # joining both feet on every tread.
+        success_min_phase_contact_match = 0.65
+        success_max_double_flight_fraction = 0.08
+        success_min_alternating_tread_count = 3
+        success_min_alternating_tread_rate = 0.50
+        success_max_same_tread_join_rate = 0.25
+        success_max_skipped_tread_rate = 0.20
+        success_max_sagittal_foot_separation = 0.42
+        # Intermediate logging/promotion is intentionally less strict, giving
+        # PPO a dense route from the inherited step-to gait to final gait.
+        curriculum_min_alternating_tread_count = 1
+        curriculum_min_alternating_tread_rate = 0.20
+        curriculum_max_same_tread_join_rate = 0.40
+        curriculum_max_skipped_tread_rate = 0.30
+        curriculum_min_phase_contact_match = 0.55
+        curriculum_max_double_flight_fraction = 0.12
         top_dwell_s = 0.25
         completion_dwell_s = 0.40
 
@@ -824,7 +833,7 @@ class N2FastStairCfg(N2StairsWalkCfg):
             stairs_command_speed_error = -8.0
             stairs_overspeed = -12.0
             stairs_completion = 5.0
-            stairs_curriculum_completion = 0.0
+            stairs_curriculum_completion = 5.0
             stairs_success = 15.0
 
             # Before physical lift-off, two discovery rewards teach the
@@ -836,16 +845,29 @@ class N2FastStairCfg(N2StairsWalkCfg):
             faststair_foothold_error = -5.0
             stairs_swing_trajectory = 0.0
             stairs_swing_trajectory_error = 0.0
-            stairs_phase_contact = 0.75
-            stairs_phase_contact_mismatch = -0.75
-            stairs_sagittal_foot_phase = 0.0
-            stairs_sagittal_foot_phase_error = 0.0
+            stairs_phase_contact = 1.50
+            stairs_phase_contact_mismatch = -1.50
+            stairs_sagittal_foot_phase = 0.50
+            stairs_sagittal_foot_phase_error = -0.25
             stairs_foot_step_progress = 2.0
-            stairs_alternating_tread = 0.0
-            stairs_repeated_lead = 0.0
-            stairs_same_tread_join = 0.0
-            stairs_same_tread_support = 0.0
-            stairs_skipped_tread = -2.0
+            stairs_alternating_tread = 4.0
+            stairs_repeated_lead = -3.0
+            stairs_same_tread_join = -4.0
+            stairs_same_tread_support = -1.5
+            stairs_skipped_tread = -3.0
+            stairs_stride_symmetry = -2.0
+            stairs_right_stride_excess = -2.0
+            stairs_right_stride_excess_continuous = -1.0
+
+            # The DCM target and the dense lane terms agree on distinct left
+            # and right lanes. These close the observed loophole where the
+            # right swing stepped inward and translated the whole body left.
+            stairs_foothold_lateral = 0.50
+            stairs_foothold_lateral_error = -0.50
+            stairs_foot_crossover = -2.0
+            stairs_foot_lane_error = -0.50
+            stairs_single_support_stability = -0.50
+            stairs_right_support_stability = -0.75
 
             feet_air_time = 0.20
             stairs_swing_clearance = 0.30
@@ -870,8 +892,8 @@ class N2FastStairCfg(N2StairsWalkCfg):
             lin_vel_z = -2.5
             ang_vel_xy = -0.20
             orientation = 0.50
-            action_rate = -0.08
-            action_smoothness = -0.08
+            action_rate = -0.10
+            action_smoothness = -0.10
             dof_acc = -2.0e-7
 
     class noise(N2StairsWalkCfg.noise):
