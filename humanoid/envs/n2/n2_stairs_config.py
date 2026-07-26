@@ -437,14 +437,23 @@ class N2StairsWalkCfg(N2StairsCfg):
         # even while the torso is still centered.
         foothold_min_half_width = 0.055
         foothold_crossover_normalizer = 0.055
+        # Touchdown-level stride correction ignores centimetre-scale noise.
+        # The extra right-side deadband is used only by guarded polishing to
+        # remove the inherited right-foot overstride, then turns itself off.
+        stride_symmetry_deadband = 0.015
+        right_stride_excess_deadband = 0.015
         # Single-support shake is measured from roll tilt/rate and lateral
-        # body velocity plus policy action rate/acceleration. The separate
-        # right-support term targets the observed unstable phase in which the
-        # right foot supports while the left foot swings.
+        # body motion plus stance-leg joint/action motion.  Whole-policy
+        # action averages previously diluted a shaking stance knee across all
+        # 18 joints and could not see cumulative sideways translation.
         single_support_roll_rate_scale = 0.20
+        single_support_lateral_position_scale = 2.00
         single_support_lateral_velocity_scale = 0.50
-        single_support_action_rate_scale = 0.04
-        single_support_action_accel_scale = 0.02
+        single_support_vertical_velocity_scale = 0.20
+        single_support_stance_knee_velocity_scale = 0.04
+        single_support_stance_hip_roll_velocity_scale = 0.08
+        single_support_action_rate_scale = 0.08
+        single_support_action_accel_scale = 0.04
         # Preserve a natural early swing and introduce the absolute landing
         # target only after the foot has crossed the stance leg.
         next_tread_target_start_phase = 0.50
@@ -588,6 +597,7 @@ class N2StairsWalkCfg(N2StairsCfg):
             # Disabled in the general walk task; guarded stability polishing
             # enables it after the checkpoint already knows how to climb.
             stairs_stride_symmetry = 0.0
+            stairs_right_stride_excess = 0.0
             stairs_forward_pitch = 1.25
             stairs_base_behind_support = -4.0
             stairs_foot_pitch = -2.0

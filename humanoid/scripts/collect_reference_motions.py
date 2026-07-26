@@ -118,11 +118,11 @@ def _episode_metrics(env, env_id, actions):
     metrics["quality_score"] = (
         10.0 * metrics["completion"]
         + metrics["climb_height_m"]
-        - 2.0 * metrics["max_lateral_deviation_m"]
-        - 0.5 * abs(metrics["final_lateral_position_m"])
-        - 0.5 * metrics["stride_imbalance_m"]
-        - 0.25 * action_rate
-        - 0.10 * action_accel
+        - 4.0 * metrics["max_lateral_deviation_m"]
+        - 2.0 * abs(metrics["final_lateral_position_m"])
+        - 4.0 * metrics["stride_imbalance_m"]
+        - 0.50 * action_rate
+        - 0.25 * action_accel
     )
     return metrics
 
@@ -136,6 +136,8 @@ def _is_curated(metrics, frame_count, args):
         and metrics["path_failure"] < 0.5
         and metrics["max_lateral_deviation_m"]
         <= args.max_lateral_deviation
+        and abs(metrics["final_lateral_position_m"])
+        <= args.max_final_lateral_position
         and metrics["max_yaw_deviation_rad"] <= args.max_yaw_deviation
         and metrics["stride_imbalance_m"] <= args.max_stride_imbalance
         and math.isfinite(metrics["action_rate_rms"])
@@ -255,11 +257,13 @@ def collect(args):
                 )
                 print(
                     "[AMP] accepted episode={} frames={} completion={:.0%} "
-                    "lateral={:.3f}m stride={:.3f}m smooth={:.4f}".format(
+                    "lateral={:.3f}m final_y={:+.3f}m stride={:.3f}m "
+                    "smooth={:.4f}".format(
                         completed,
                         frame_count,
                         metrics["completion"],
                         metrics["max_lateral_deviation_m"],
+                        metrics["final_lateral_position_m"],
                         metrics["stride_imbalance_m"],
                         metrics["action_rate_rms"],
                     )
@@ -354,7 +358,12 @@ def main():
             {
                 "name": "--max_lateral_deviation",
                 "type": float,
-                "default": 0.16,
+                "default": 0.10,
+            },
+            {
+                "name": "--max_final_lateral_position",
+                "type": float,
+                "default": 0.04,
             },
             {
                 "name": "--max_yaw_deviation",
@@ -364,7 +373,7 @@ def main():
             {
                 "name": "--max_stride_imbalance",
                 "type": float,
-                "default": 0.12,
+                "default": 0.06,
             },
             {"name": "--command_speed", "type": float, "default": 0.18},
             {"name": "--fixed_terrain_level", "type": int, "default": 4},

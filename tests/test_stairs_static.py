@@ -9,6 +9,7 @@ import types
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -1765,16 +1766,16 @@ class SourceCompatibilityTests(unittest.TestCase):
             launcher,
         )
         self.assertIn(
-            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-400}"',
+            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"',
             launcher,
         )
         self.assertIn(
-            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"',
+            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"',
             launcher,
         )
         self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
         self.assertIn(
-            'ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"',
+            'ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-4}"',
             launcher,
         )
         self.assertIn("--actor_trainable_layers=${ACTOR_LAYERS}", launcher)
@@ -1793,8 +1794,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("N2_ISAAC_STABILITY_CHECKPOINT=", launcher)
         self.assertIn("N2_ISAAC_STABILITY_IMPROVED=", launcher)
         self.assertIn("N2_ISAAC_STABILITY_APPROVED=", launcher)
-        self.assertIn("model_9050.pt", launcher)
-        self.assertIn("guarded model_9050.pt", launcher)
+        self.assertIn("stability_selected_s*/model_best.pt", launcher)
+        self.assertIn("newest guarded stability-selected model", launcher)
         self.assertIn("N2_STABILITY_INIT_CHECKPOINT", launcher)
         self.assertIn("N2_STABILITY_SOURCE_APPROVED=True", launcher)
         self.assertIn("N2_STABILITY_TRAIN_ITERATIONS=100", launcher)
@@ -1809,6 +1810,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("stairs_foot_lane_error=-8", launcher)
         self.assertIn("stairs_single_support_stability=-4", launcher)
         self.assertIn("stairs_right_support_stability=-4", launcher)
+        self.assertIn("stairs_right_stride_excess=-10", launcher)
+        self.assertIn(
+            'SELECTION_MODE="${N2_ISAAC_STABILITY_SELECTION_MODE:-targeted}"',
+            launcher,
+        )
         self.assertIn("N2_ISAAC_STABILITY_BEST=", launcher)
         self.assertIn(
             "bash humanoid/scripts/run_isaac_stairs_polish.sh view",
@@ -1843,6 +1849,12 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn(
             "def _reward_stairs_stride_symmetry", stairs_source
         )
+        self.assertIn(
+            "def _reward_stairs_right_stride_excess", stairs_source
+        )
+        self.assertIn("self.swing_displacement_event", stairs_source)
+        self.assertIn("stance_knee_velocity", stairs_source)
+        self.assertIn("stance_hip_roll_velocity", stairs_source)
         self.assertIn("level_mix", stairs_source)
 
         train_tree = ast.parse(train_source)
@@ -1860,6 +1872,148 @@ class SourceCompatibilityTests(unittest.TestCase):
             namespace["parse_terrain_level_mix"]("0,1,2,3,4,4,4,4"),
             [0, 1, 2, 3, 4, 4, 4, 4],
         )
+
+    def test_stride_correction_is_touchdown_aligned_and_bounded(self):
+        source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        environment = nested_class(tree, "N2StairsEnv")
+        wanted = {
+            "_reward_stairs_stride_symmetry",
+            "_reward_stairs_right_stride_excess",
+        }
+        methods = [
+            node for node in environment.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        ]
+        harness = ast.ClassDef(
+            name="StrideHarness",
+            bases=[],
+            keywords=[],
+            body=methods,
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[harness], type_ignores=[])
+        )
+        namespace = {"torch": torch}
+        exec(compile(module, str(source_path), "exec"), namespace)
+
+        instance = namespace["StrideHarness"]()
+        instance.cfg = types.SimpleNamespace(
+            env=types.SimpleNamespace(
+                stride_symmetry_deadband=0.015,
+                right_stride_excess_deadband=0.015,
+            ),
+            terrain=types.SimpleNamespace(step_width=0.30),
+        )
+        instance.dt = 0.02
+        instance.swing_displacement_valid = torch.ones(
+            2, 2, dtype=torch.bool
+        )
+        instance.swing_displacement_event = torch.tensor(
+            [[False, True], [False, True]]
+        )
+        instance.last_swing_forward_displacement = torch.tensor(
+            [[0.10, 0.22], [0.10, 0.112]]
+        )
+        instance.root_states = torch.zeros(2, 13)
+        instance.root_states[:, 7] = 0.18
+        instance.projected_gravity = torch.tensor(
+            [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
+        )
+
+        symmetric = instance._reward_stairs_stride_symmetry()
+        right_excess = instance._reward_stairs_right_stride_excess()
+        expected = ((0.12 - 0.015) / 0.30) ** 2 / 0.02
+        self.assertAlmostEqual(symmetric[0].item(), expected, places=5)
+        self.assertAlmostEqual(right_excess[0].item(), expected, places=5)
+        self.assertEqual(symmetric[1].item(), 0.0)
+        self.assertEqual(right_excess[1].item(), 0.0)
+
+        # A stale displacement must not keep penalising unrelated timesteps,
+        # and the asymmetric correction applies only on right touchdown.
+        instance.swing_displacement_event.zero_()
+        self.assertTrue(
+            torch.equal(
+                instance._reward_stairs_stride_symmetry(),
+                torch.zeros(2),
+            )
+        )
+        instance.swing_displacement_event[0, 0] = True
+        self.assertEqual(
+            instance._reward_stairs_right_stride_excess()[0].item(), 0.0
+        )
+
+    def test_right_support_stability_targets_the_stance_leg(self):
+        source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        environment = nested_class(tree, "N2StairsEnv")
+        wanted = {
+            "_single_support_stability_state",
+            "_reward_stairs_single_support_stability",
+            "_reward_stairs_right_support_stability",
+        }
+        methods = [
+            node for node in environment.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        ]
+        harness = ast.ClassDef(
+            name="SupportHarness",
+            bases=[],
+            keywords=[],
+            body=methods,
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[harness], type_ignores=[])
+        )
+        namespace = {"torch": torch}
+        exec(compile(module, str(source_path), "exec"), namespace)
+
+        instance = namespace["SupportHarness"]()
+        instance.cfg = types.SimpleNamespace(
+            env=types.SimpleNamespace(
+                single_support_roll_rate_scale=0.2,
+                single_support_lateral_position_scale=2.0,
+                single_support_lateral_velocity_scale=0.5,
+                single_support_vertical_velocity_scale=0.2,
+                single_support_stance_knee_velocity_scale=0.04,
+                single_support_stance_hip_roll_velocity_scale=0.08,
+                single_support_action_rate_scale=0.08,
+                single_support_action_accel_scale=0.04,
+            )
+        )
+        instance.stable_contacts = torch.tensor(
+            [[False, True], [True, False]]
+        )
+        instance.contacts = instance.stable_contacts.clone()
+        instance.projected_gravity = torch.tensor(
+            [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
+        )
+        instance.base_ang_vel = torch.zeros(2, 3)
+        instance.base_lin_vel = torch.zeros(2, 3)
+        instance.root_states = torch.zeros(2, 13)
+        instance.root_states[:, 7] = 0.18
+        instance.env_origins = torch.zeros(2, 3)
+        instance.knee_dof_idxs = [7, 16]
+        instance.hip_roll_dof_idxs = [5, 14]
+        instance.support_leg_dof_idxs = torch.tensor(
+            [[4, 5, 6, 7, 8], [13, 14, 15, 16, 17]]
+        )
+        instance.dof_vel = torch.zeros(2, 18)
+        instance.dof_vel[0, 16] = 2.0
+        instance.dof_vel[0, 14] = 1.0
+        instance.actions = torch.zeros(2, 18)
+        instance.last_actions = torch.zeros(2, 18)
+        instance.last_last_actions = torch.zeros(2, 18)
+        instance.actions[0, 13:18] = 0.5
+
+        both = instance._reward_stairs_single_support_stability()
+        right_only = instance._reward_stairs_right_support_stability()
+        self.assertGreater(both[0].item(), 0.20)
+        self.assertEqual(both[1].item(), 0.0)
+        self.assertAlmostEqual(right_only[0].item(), both[0].item())
+        self.assertEqual(right_only[1].item(), 0.0)
 
     def test_isaac_stability_tournament_handles_episode_resolution(self):
         tournament = load_isaac_stability_tournament_module()
@@ -1966,6 +2120,32 @@ class SourceCompatibilityTests(unittest.TestCase):
             )
         )
 
+        # A good aggregate score must not hide a regression in the exact
+        # 10 cm defects seen in the recorded rollout.
+        aggregate_trap = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        aggregate_trap[4].update(
+            mean_max_lateral_deviation_m=0.094,
+            mean_final_lateral_position_m=0.036,
+            mean_right_swing_length_m=0.205,
+            mean_left_swing_action_rate_rms=0.76,
+            mean_left_swing_action_accel_rms=0.58,
+            mean_left_swing_roll_rate_rms=0.17,
+            mean_left_swing_lateral_velocity_rms=0.08,
+        )
+        rejected = tournament.compare(
+            baseline, aggregate_trap, episodes=64
+        )
+        self.assertFalse(rejected["eligible"])
+        self.assertFalse(rejected["hard_safe"])
+        self.assertTrue(
+            any(
+                reason.startswith("10 cm")
+                for reason in rejected["hard_reasons"]
+            )
+        )
+
         # A tiny isolated style trade-off may use the balanced fallback only
         # when the hard completion/fall/path gates and net style gain pass.
         fallback_candidate = {
@@ -1973,9 +2153,13 @@ class SourceCompatibilityTests(unittest.TestCase):
         }
         for values in fallback_candidate.values():
             values["mean_max_yaw_deviation_rad"] = 0.235
-        fallback = tournament.compare(
-            baseline, fallback_candidate, episodes=64
-        )
+        with mock.patch.dict(
+            "os.environ",
+            {"N2_ISAAC_STABILITY_SELECTION_MODE": "balanced"},
+        ):
+            fallback = tournament.compare(
+                baseline, fallback_candidate, episodes=64
+            )
         self.assertFalse(fallback["eligible"])
         self.assertTrue(fallback["hard_safe"])
         self.assertTrue(fallback["fallback_eligible"])

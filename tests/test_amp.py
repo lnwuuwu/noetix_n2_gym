@@ -512,6 +512,16 @@ class AMPStaticIntegrationTests(unittest.TestCase):
         ).read_text()
         self.assertIn("humanoid/scripts/train_amp.py", launcher)
         self.assertIn("--motion_manifest", launcher)
+        self.assertIn("--reward_scale_overrides", launcher)
+        self.assertIn("stairs_right_stride_excess=-10", launcher)
+        self.assertIn("stairs_right_support_stability=-8", launcher)
+        self.assertIn(
+            'ACTOR_LAYERS="${N2_AMP_ACTOR_LAYERS:-4}"', launcher
+        )
+        self.assertIn(
+            'OBSERVATION_NOISE="${N2_AMP_OBSERVATION_NOISE:-0.03}"',
+            launcher,
+        )
         self.assertNotIn("STYLE_ZERO_OVERRIDES", launcher)
         self.assertNotIn("humanoid/scripts/train.py \\", launcher)
 
@@ -536,6 +546,8 @@ class AMPStaticIntegrationTests(unittest.TestCase):
             collector,
         )
         self.assertIn("last_episode_completion", collector)
+        self.assertIn("--max_final_lateral_position", collector)
+        self.assertIn('"default": 0.06', collector)
         self.assertIn("episode_frames[env_id] = []", collector)
         self.assertNotIn("all_frames.extend", collector)
 

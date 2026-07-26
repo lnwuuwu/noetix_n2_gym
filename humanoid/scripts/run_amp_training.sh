@@ -14,8 +14,11 @@ NUM_ENVS="${N2_NUM_ENVS:-512}"
 COLLECT_ENVS="${N2_AMP_COLLECT_ENVS:-64}"
 COLLECT_STEPS="${N2_AMP_COLLECT_STEPS:-6000}"
 MAX_MOTIONS="${N2_AMP_MAX_MOTIONS:-24}"
+COLLECT_MAX_LATERAL="${N2_AMP_MAX_LATERAL:-0.10}"
+COLLECT_MAX_FINAL_LATERAL="${N2_AMP_MAX_FINAL_LATERAL:-0.04}"
+COLLECT_MAX_STRIDE_IMBALANCE="${N2_AMP_MAX_STRIDE_IMBALANCE:-0.06}"
 ADDITIONAL_ITERATIONS="${N2_AMP_ADDITIONAL_ITERATIONS:-400}"
-STYLE_WEIGHT="${N2_AMP_STYLE_WEIGHT:-0.15}"
+STYLE_WEIGHT="${N2_AMP_STYLE_WEIGHT:-0.10}"
 DISC_LR="${N2_AMP_DISC_LR:-1e-4}"
 POLICY_LR="${N2_AMP_LR:-2e-6}"
 REPLAY_SIZE="${N2_AMP_REPLAY_SIZE:-100000}"
@@ -27,13 +30,17 @@ WARMUP_UPDATES="${N2_AMP_WARMUP_UPDATES:-10}"
 RAMP_UPDATES="${N2_AMP_RAMP_UPDATES:-100}"
 TERRAIN_MIX="${N2_AMP_TERRAIN_MIX:-2,3,4,4,4,4}"
 COMMAND_SPEED="${N2_AMP_COMMAND_SPEED:-0.18}"
-ACTOR_REFERENCE="${N2_AMP_ACTOR_REFERENCE:-0.10}"
+ACTOR_REFERENCE="${N2_AMP_ACTOR_REFERENCE:-0.35}"
 SYMMETRY_COEFF="${N2_AMP_SYMMETRY_COEFF:-0.002}"
-ACTION_NOISE="${N2_AMP_ACTION_NOISE:-0.05}"
-ACTOR_LAYERS="${N2_AMP_ACTOR_LAYERS:-2}"
-POLICY_LOSS_SCALE="${N2_AMP_POLICY_LOSS_SCALE:-0.50}"
+ACTION_NOISE="${N2_AMP_ACTION_NOISE:-0.04}"
+ACTOR_LAYERS="${N2_AMP_ACTOR_LAYERS:-4}"
+POLICY_LOSS_SCALE="${N2_AMP_POLICY_LOSS_SCALE:-1.0}"
+OBSERVATION_NOISE="${N2_AMP_OBSERVATION_NOISE:-0.03}"
+REWARD_OVERRIDES="${N2_AMP_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.12,dof_acc=-5e-7,stairs_lateral_drift=-20,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_right_stride_excess=-10,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-5,stairs_foot_crossover=-10,stairs_foot_lane_error=-8,stairs_single_support_stability=-5,stairs_right_support_stability=-8,stairs_swing_timeout=-5,stairs_alternating_tread=5,stairs_repeated_lead=-4,stairs_same_tread_join=-5}"
 SAVE_INTERVAL="${N2_AMP_SAVE_INTERVAL:-20}"
-MOTION_DIR="${N2_AMP_MOTION_DIR:-${PROJECT_ROOT}/humanoid/amp_data/stair_climb_s${SEED}}"
+# Use a new dataset namespace so an old manifest collected with the former
+# 12 cm stride-imbalance gate can never be silently reused as "expert" data.
+MOTION_DIR="${N2_AMP_MOTION_DIR:-${PROJECT_ROOT}/humanoid/amp_data/stair_climb_targeted_v2_s${SEED}}"
 MOTION_MANIFEST="${N2_AMP_MOTION_MANIFEST:-${MOTION_DIR}/manifest.txt}"
 LAUNCHER_DIR="${PROJECT_ROOT}/logs/amp_launcher"
 
@@ -119,6 +126,9 @@ collect_motions() {
         --num_envs="${COLLECT_ENVS}" \
         --num_steps="${COLLECT_STEPS}" \
         --max_motions="${MAX_MOTIONS}" \
+        --max_lateral_deviation="${COLLECT_MAX_LATERAL}" \
+        --max_final_lateral_position="${COLLECT_MAX_FINAL_LATERAL}" \
+        --max_stride_imbalance="${COLLECT_MAX_STRIDE_IMBALANCE}" \
         --fixed_terrain_level=4 \
         --command_speed="${COMMAND_SPEED}" \
         --seed="${SEED}"
@@ -165,7 +175,8 @@ run_training() {
         --actor_trainable_layers="${ACTOR_LAYERS}" \
         --freeze_action_noise \
         --symmetry_loss_coeff="${SYMMETRY_COEFF}" \
-        --observation_noise_level=0.20 \
+        --observation_noise_level="${OBSERVATION_NOISE}" \
+        --reward_scale_overrides="${REWARD_OVERRIDES}" \
         --save_interval="${SAVE_INTERVAL}" \
         --amp_style_weight="${STYLE_WEIGHT}" \
         --amp_disc_lr="${DISC_LR}" \
@@ -203,9 +214,12 @@ print_configuration() {
     echo "AMP mode=${MODE}"
     echo "checkpoint=${CHECKPOINT} (iteration ${CURRENT_ITERATION})"
     echo "motion_manifest=${MOTION_MANIFEST}"
+    echo "motion_gate=max_lateral=${COLLECT_MAX_LATERAL} final_lateral=${COLLECT_MAX_FINAL_LATERAL} stride_imbalance=${COLLECT_MAX_STRIDE_IMBALANCE}"
     echo "target_iteration=${MAX_ITERATIONS}"
     echo "envs=${NUM_ENVS} terrain_mix=${TERRAIN_MIX}"
-    echo "policy_lr=${POLICY_LR} style_weight=${STYLE_WEIGHT}"
+    echo "policy_lr=${POLICY_LR} style_weight=${STYLE_WEIGHT} actor_layers=${ACTOR_LAYERS}"
+    echo "observation_noise=${OBSERVATION_NOISE}"
+    echo "targeted_reward_overrides=${REWARD_OVERRIDES}"
 }
 
 case "${MODE}" in

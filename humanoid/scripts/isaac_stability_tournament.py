@@ -3,9 +3,9 @@
 The tournament compares complete 0--10 cm evaluation tables generated from
 the same deterministic seed. Completion/fall checks are expressed in whole
 episode resolution, while selection is driven by action motion, left/right
-swing balance, foot lanes, support-phase shake, and lateral drift. Hard
-climbing guards remain mandatory; balanced mode can accept a positive net
-style gain despite a small isolated style trade-off.
+swing balance, foot lanes, support-phase shake, and lateral drift.  The
+default targeted mode also makes the three video-visible defects hard gates
+at 10 cm: lateral translation, unequal strides, and right-support shake.
 """
 
 import argparse
@@ -51,16 +51,59 @@ def _env_bool(name, default):
 def compare_config():
     """Return safety/style gates for deterministic checkpoint selection.
 
-    ``strict`` retains the original all-or-nothing style guard. ``balanced``
-    (the default) keeps completion/fall/path checks hard, while allowing a
-    candidate with a clear net style gain to pass small individual style
-    trade-offs. Environment variables remain the final override so expensive
-    runs can be reproduced exactly from their launcher logs.
+    ``targeted`` is the default for long polishing and requires measurable
+    improvement in at least two of lateral translation, stride balance, and
+    right-support stability at 10 cm. ``strict`` retains the older global
+    all-or-nothing style guard. ``balanced`` remains available for diagnostic
+    searches that intentionally permit a safe fallback.
     """
     mode = os.getenv(
-        "N2_ISAAC_STABILITY_SELECTION_MODE", "balanced"
+        "N2_ISAAC_STABILITY_SELECTION_MODE", "targeted"
     ).strip().lower()
     presets = {
+        "targeted": {
+            "high_tolerance_min": 0.020,
+            "level_tolerance_min": 0.080,
+            "completion_regression_tol": 0.020,
+            "fall_tolerance": 0.020,
+            "path_tolerance": 0.020,
+            "command_error_tolerance": 0.020,
+            "max_lateral_tol": 0.004,
+            "yaw_tol": 0.020,
+            "action_tol_ratio": 1.02,
+            "action_abs": 0.005,
+            "stride_imbalance_tol": 0.005,
+            "signed_lateral_tol": 0.004,
+            "foot_inward_tol": 0.003,
+            "foot_lane_center_tol": 0.003,
+            "left_swing_action_ratio": 1.01,
+            "left_swing_action_abs": 0.004,
+            "left_swing_body_ratio": 1.02,
+            "left_swing_body_abs": 0.004,
+            "actor_symmetry_ratio": 1.05,
+            "actor_symmetry_abs": 0.002,
+            "material_min_required": 3,
+            "hard_min_level": 2,
+            "minimum_style_gain_abs": 0.005,
+            "minimum_style_gain_rel": 0.002,
+            "allow_safe_fallback": False,
+            "fallback_min_style_gain": 0.0,
+            "fallback_min_score": 0.0,
+            "fallback_material_min": 2,
+            "enforce_targeted_gait": True,
+            "target_min_groups": 2,
+            "target_max_lateral_tol": 0.002,
+            "target_signed_lateral_tol": 0.002,
+            "target_stride_tol": 0.004,
+            "target_foot_lane_tol": 0.002,
+            "target_left_action_ratio": 1.01,
+            "target_left_action_abs": 0.003,
+            "target_left_body_ratio": 1.02,
+            "target_left_body_abs": 0.003,
+            "target_lateral_improvement": 0.002,
+            "target_stride_improvement": 0.005,
+            "target_shake_improvement": 0.008,
+        },
         "strict": {
             "high_tolerance_min": 0.025,
             "level_tolerance_min": 0.080,
@@ -124,7 +167,8 @@ def compare_config():
     }
     if mode not in presets:
         raise ValueError(
-            "N2_ISAAC_STABILITY_SELECTION_MODE must be strict or balanced"
+            "N2_ISAAC_STABILITY_SELECTION_MODE must be targeted, strict, "
+            "or balanced"
         )
     defaults = presets[mode]
     return {
@@ -220,6 +264,58 @@ def compare_config():
         "minimum_style_gain_rel": _env_float(
             "N2_ISAAC_STABILITY_STYLE_GAIN_REL",
             defaults["minimum_style_gain_rel"],
+        ),
+        "enforce_targeted_gait": _env_bool(
+            "N2_ISAAC_STABILITY_ENFORCE_TARGETED",
+            defaults.get("enforce_targeted_gait", False),
+        ),
+        "target_min_groups": _env_int(
+            "N2_ISAAC_STABILITY_TARGET_MIN_GROUPS",
+            defaults.get("target_min_groups", 0),
+        ),
+        "target_max_lateral_tol": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_MAX_LAT_TOL",
+            defaults.get("target_max_lateral_tol", 0.0),
+        ),
+        "target_signed_lateral_tol": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_SIGNED_LAT_TOL",
+            defaults.get("target_signed_lateral_tol", 0.0),
+        ),
+        "target_stride_tol": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_STRIDE_TOL",
+            defaults.get("target_stride_tol", 0.0),
+        ),
+        "target_foot_lane_tol": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_FOOT_LANE_TOL",
+            defaults.get("target_foot_lane_tol", 0.0),
+        ),
+        "target_left_action_ratio": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_LEFT_ACTION_RATIO",
+            defaults.get("target_left_action_ratio", 1.0),
+        ),
+        "target_left_action_abs": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_LEFT_ACTION_ABS",
+            defaults.get("target_left_action_abs", 0.0),
+        ),
+        "target_left_body_ratio": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_LEFT_BODY_RATIO",
+            defaults.get("target_left_body_ratio", 1.0),
+        ),
+        "target_left_body_abs": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_LEFT_BODY_ABS",
+            defaults.get("target_left_body_abs", 0.0),
+        ),
+        "target_lateral_improvement": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_LATERAL_GAIN",
+            defaults.get("target_lateral_improvement", 0.0),
+        ),
+        "target_stride_improvement": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_STRIDE_GAIN",
+            defaults.get("target_stride_improvement", 0.0),
+        ),
+        "target_shake_improvement": _env_float(
+            "N2_ISAAC_STABILITY_TARGET_SHAKE_GAIN",
+            defaults.get("target_shake_improvement", 0.0),
         ),
         "weight_completion": _env_float(
             "N2_ISAAC_STABILITY_WEIGHT_COMPLETION", 4.0
@@ -338,6 +434,36 @@ def stride_imbalance(row):
     )
 
 
+def foot_lane_center_error(row):
+    """Return common-mode left/right foot-lane translation."""
+    return abs(
+        0.5
+        * (
+            optional_float(
+                row, "mean_left_foot_lateral_position_m", 0.0
+            )
+            + optional_float(
+                row, "mean_right_foot_lateral_position_m", 0.0
+            )
+        )
+    )
+
+
+def targeted_gait_metrics(row):
+    """Metrics for the three defects identified in the recorded rollout."""
+    return {
+        "max_lateral": float(row["mean_max_lateral_deviation_m"]),
+        "signed_lateral": abs(
+            float(row["mean_final_lateral_position_m"])
+        ),
+        "foot_lane_center": foot_lane_center_error(row),
+        "stride_imbalance": stride_imbalance(row),
+        # Left swing is the observed right-foot-support shake phase.
+        "left_swing_action_motion": phase_action_motion(row, "left"),
+        "left_swing_body_motion": phase_body_motion(row, "left"),
+    }
+
+
 def aggregate(rows):
     action = sum(
         LEVEL_WEIGHTS[level] * action_motion(rows[level])
@@ -383,21 +509,7 @@ def aggregate(rows):
     # the centerline while the right foot stays far outside it.
     foot_lane_center = sum(
         LEVEL_WEIGHTS[level]
-        * abs(
-            0.5
-            * (
-                optional_float(
-                    rows[level],
-                    "mean_left_foot_lateral_position_m",
-                    0.0,
-                )
-                + optional_float(
-                    rows[level],
-                    "mean_right_foot_lateral_position_m",
-                    0.0,
-                )
-            )
-        )
+        * foot_lane_center_error(rows[level])
         for level in LEVELS
     )
     foot_lane_half_width_error = sum(
@@ -450,18 +562,19 @@ def aggregate(rows):
     )
     style_cost = (
         action
-        + 4.0 * stride
-        + 2.0 * signed_lateral
-        + max_lateral
+        + 8.0 * stride
+        + 4.0 * signed_lateral
+        + 2.0 * max_lateral
         + 0.25 * yaw
         + 0.5 * double_flight
         + 8.0 * foot_inward
         + 8.0 * foot_lane_center
         + 2.0 * foot_lane_half_width_error
-        + 0.5 * phase_motion_imbalance
-        + 0.5 * left_swing_body_motion
-        + 0.5 * phase_body_imbalance
-        + actor_symmetry_error
+        + left_swing_motion
+        + 1.5 * phase_motion_imbalance
+        + 2.0 * left_swing_body_motion
+        + phase_body_imbalance
+        + 0.25 * actor_symmetry_error
     )
     return {
         "completion": weighted_mean(rows, "completion_rate"),
@@ -550,6 +663,113 @@ def compare(baseline_rows, candidate_rows, episodes=None):
                 high_candidate["path_failure_rate"],
             )
         )
+
+    high_target_baseline = targeted_gait_metrics(high_baseline)
+    high_target_candidate = targeted_gait_metrics(high_candidate)
+    target_deltas = {
+        name: high_target_baseline[name] - high_target_candidate[name]
+        for name in high_target_baseline
+    }
+    target_group_deltas = {
+        "lateral": max(
+            target_deltas["max_lateral"],
+            target_deltas["signed_lateral"],
+            target_deltas["foot_lane_center"],
+        ),
+        "stride": target_deltas["stride_imbalance"],
+        "right_support_shake": max(
+            target_deltas["left_swing_action_motion"],
+            target_deltas["left_swing_body_motion"],
+        ),
+    }
+    target_group_improvements = {
+        "lateral": (
+            target_group_deltas["lateral"]
+            >= cfg["target_lateral_improvement"]
+        ),
+        "stride": (
+            target_group_deltas["stride"]
+            >= cfg["target_stride_improvement"]
+        ),
+        "right_support_shake": (
+            target_group_deltas["right_support_shake"]
+            >= cfg["target_shake_improvement"]
+        ),
+    }
+    target_groups_improved = sum(target_group_improvements.values())
+
+    if cfg["enforce_targeted_gait"]:
+        if high_target_candidate["max_lateral"] > (
+            high_target_baseline["max_lateral"]
+            + cfg["target_max_lateral_tol"]
+        ):
+            hard_reasons.append(
+                "10 cm lateral deviation increased {:.4f} -> {:.4f}".format(
+                    high_target_baseline["max_lateral"],
+                    high_target_candidate["max_lateral"],
+                )
+            )
+        if high_target_candidate["signed_lateral"] > (
+            high_target_baseline["signed_lateral"]
+            + cfg["target_signed_lateral_tol"]
+        ):
+            hard_reasons.append(
+                "10 cm signed lateral error increased {:.4f} -> {:.4f}".format(
+                    high_target_baseline["signed_lateral"],
+                    high_target_candidate["signed_lateral"],
+                )
+            )
+        if high_target_candidate["foot_lane_center"] > (
+            high_target_baseline["foot_lane_center"]
+            + cfg["target_foot_lane_tol"]
+        ):
+            hard_reasons.append(
+                "10 cm foot-lane center error increased {:.4f} -> {:.4f}".format(
+                    high_target_baseline["foot_lane_center"],
+                    high_target_candidate["foot_lane_center"],
+                )
+            )
+        if high_target_candidate["stride_imbalance"] > (
+            high_target_baseline["stride_imbalance"]
+            + cfg["target_stride_tol"]
+        ):
+            hard_reasons.append(
+                "10 cm stride imbalance increased {:.4f} -> {:.4f}".format(
+                    high_target_baseline["stride_imbalance"],
+                    high_target_candidate["stride_imbalance"],
+                )
+            )
+        if high_target_candidate["left_swing_action_motion"] > (
+            high_target_baseline["left_swing_action_motion"]
+            * cfg["target_left_action_ratio"]
+            + cfg["target_left_action_abs"]
+        ):
+            hard_reasons.append(
+                "10 cm right-support/left-swing action motion increased "
+                "{:.4f} -> {:.4f}".format(
+                    high_target_baseline["left_swing_action_motion"],
+                    high_target_candidate["left_swing_action_motion"],
+                )
+            )
+        if high_target_candidate["left_swing_body_motion"] > (
+            high_target_baseline["left_swing_body_motion"]
+            * cfg["target_left_body_ratio"]
+            + cfg["target_left_body_abs"]
+        ):
+            hard_reasons.append(
+                "10 cm right-support/left-swing body motion increased "
+                "{:.4f} -> {:.4f}".format(
+                    high_target_baseline["left_swing_body_motion"],
+                    high_target_candidate["left_swing_body_motion"],
+                )
+            )
+        if target_groups_improved < cfg["target_min_groups"]:
+            hard_reasons.append(
+                "10 cm improved only {} of 3 target defect groups; "
+                "{} required".format(
+                    target_groups_improved, cfg["target_min_groups"]
+                )
+            )
 
     for level in LEVELS:
         level_baseline = baseline_rows[level]
@@ -811,6 +1031,12 @@ def compare(baseline_rows, candidate_rows, episodes=None):
         "candidate": candidate,
         "improvements": improvements,
         "material_improvements": material_improvements,
+        "high_target_baseline": high_target_baseline,
+        "high_target_candidate": high_target_candidate,
+        "target_deltas": target_deltas,
+        "target_group_deltas": target_group_deltas,
+        "target_group_improvements": target_group_improvements,
+        "target_groups_improved": target_groups_improved,
         "style_gain": style_gain,
         "performance_delta": performance_delta,
         "selection_score": selection_score,
@@ -870,7 +1096,7 @@ def main():
         print(
             "ISAAC_STABILITY_CANDIDATE name={} eligible={} hard_safe={} "
             "fallback={} style_gain={:+.4f} performance={:+.4f} "
-            "score={:+.4f}".format(
+            "score={:+.4f} target_groups={}/3".format(
                 candidate["name"],
                 result["eligible"],
                 result["hard_safe"],
@@ -878,6 +1104,16 @@ def main():
                 result["style_gain"],
                 result["performance_delta"],
                 result["selection_score"],
+                result["target_groups_improved"],
+            )
+        )
+        print(
+            "ISAAC_STABILITY_TARGET_DELTAS name={} lateral={:+.4f} "
+            "stride={:+.4f} right_support_shake={:+.4f}".format(
+                candidate["name"],
+                result["target_group_deltas"]["lateral"],
+                result["target_group_deltas"]["stride"],
+                result["target_group_deltas"]["right_support_shake"],
             )
         )
         for reason in result["reasons"]:

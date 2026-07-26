@@ -56,6 +56,30 @@ class N2StairsEnv(N2Env):
             dof_index["L_leg_knee_joint"],
             dof_index["R_leg_knee_joint"],
         ]
+        self.hip_roll_dof_idxs = [
+            dof_index["L_leg_hip_roll_joint"],
+            dof_index["R_leg_hip_roll_joint"],
+        ]
+        self.support_leg_dof_idxs = torch.tensor(
+            [
+                [
+                    dof_index["L_leg_hip_yaw_joint"],
+                    dof_index["L_leg_hip_roll_joint"],
+                    dof_index["L_leg_hip_pitch_joint"],
+                    dof_index["L_leg_knee_joint"],
+                    dof_index["L_leg_ankle_joint"],
+                ],
+                [
+                    dof_index["R_leg_hip_yaw_joint"],
+                    dof_index["R_leg_hip_roll_joint"],
+                    dof_index["R_leg_hip_pitch_joint"],
+                    dof_index["R_leg_knee_joint"],
+                    dof_index["R_leg_ankle_joint"],
+                ],
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.shoulder_pitch_dof_idxs = [
             dof_index["L_arm_shoulder_pitch_joint"],
             dof_index["R_arm_shoulder_pitch_joint"],
@@ -526,6 +550,14 @@ class N2StairsEnv(N2Env):
             len(self.feet_indices),
             dtype=torch.bool,
             device=self.device,
+        )
+        # One-step touchdown pulse used for event-aligned stride shaping.
+        # Keeping the old displacement as a dense per-step penalty assigned
+        # the same landing error to hundreds of unrelated actions.  The event
+        # pulse instead gives PPO credit at the action sequence that produced
+        # the measured touchdown.
+        self.swing_displacement_event = torch.zeros_like(
+            self.swing_displacement_valid
         )
         self.swing_forward_displacement_sum = torch.zeros_like(
             self.last_swing_forward_displacement
@@ -1015,6 +1047,7 @@ class N2StairsEnv(N2Env):
 
     def _update_foot_step_progress(self):
         """Track stable landings and strict stair-over-stair alternation."""
+        self.swing_displacement_event.zero_()
         foot_surface_height_world = self._sample_terrain_height_xy(
             self.feet_pos[:, :, :2]
         )
@@ -1391,6 +1424,7 @@ class N2StairsEnv(N2Env):
             swing_forward_displacement,
             self.last_swing_forward_displacement,
         )
+        self.swing_displacement_event[:] = measured_swing_landing
         self.swing_displacement_valid |= measured_swing_landing
         self.swing_forward_displacement_sum += (
             swing_forward_displacement * measured_swing_landing.float()
@@ -2830,6 +2864,7 @@ class N2StairsEnv(N2Env):
         self.right_tread_advance_count[env_ids] = 0.0
         self.last_swing_forward_displacement[env_ids] = 0.0
         self.swing_displacement_valid[env_ids] = False
+        self.swing_displacement_event[env_ids] = False
         self.swing_forward_displacement_sum[env_ids] = 0.0
         self.swing_forward_displacement_count[env_ids] = 0.0
         self.foot_lateral_inward_error_sum[env_ids] = 0.0
@@ -3230,22 +3265,61 @@ class N2StairsEnv(N2Env):
         return failure.float() / self.dt
 
     def _reward_stairs_stride_symmetry(self):
-        """Penalize unequal measured left/right forward swing lengths."""
+        """Penalize unequal swing lengths on the touchdown that measured them."""
         both_measured = torch.all(self.swing_displacement_valid, dim=1)
-        stride_difference = (
+        stride_difference = torch.abs(
             self.last_swing_forward_displacement[:, 0]
             - self.last_swing_forward_displacement[:, 1]
         )
+        stride_difference = torch.clamp(
+            stride_difference
+            - float(self.cfg.env.stride_symmetry_deadband),
+            min=0.0,
+        )
         normalized_error = torch.clamp(
             stride_difference / float(self.cfg.terrain.step_width),
-            min=-1.0,
+            min=0.0,
             max=1.0,
         )
+        touchdown = torch.any(self.swing_displacement_event, dim=1)
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        # Reward preparation multiplies by dt.  This is a landing event, so
+        # cancel dt and make the configured scale the cost per touchdown.
+        return (
+            torch.square(normalized_error)
+            * (touchdown & both_measured & moving & upright).float()
+            / self.dt
+        )
+
+    def _reward_stairs_right_stride_excess(self):
+        """Shorten only the known over-long right step until it is balanced.
+
+        The inherited checkpoint repeatedly advances the right foot and lets
+        the left foot join it, producing a right swing roughly twice as long
+        as the left.  A symmetric error alone can lengthen the short leg
+        instead.  This bounded correction acts only on right touchdown and
+        becomes exactly zero inside the configured deadband.
+        """
+        both_measured = torch.all(self.swing_displacement_valid, dim=1)
+        right_excess = torch.clamp(
+            self.last_swing_forward_displacement[:, 1]
+            - self.last_swing_forward_displacement[:, 0]
+            - float(self.cfg.env.right_stride_excess_deadband),
+            min=0.0,
+        )
+        normalized_excess = torch.clamp(
+            right_excess / float(self.cfg.terrain.step_width),
+            min=0.0,
+            max=1.0,
+        )
+        right_touchdown = self.swing_displacement_event[:, 1]
         moving = self.root_states[:, 7] > 0.03
         upright = -self.projected_gravity[:, 2] > 0.80
         return (
-            torch.square(normalized_error)
-            * (both_measured & moving & upright).float()
+            torch.square(normalized_excess)
+            * (right_touchdown & both_measured & moving & upright).float()
+            / self.dt
         )
 
     def _reward_stairs_lateral_drift(self):
@@ -3388,33 +3462,70 @@ class N2StairsEnv(N2Env):
         )
 
     def _single_support_stability_state(self):
-        """Return support masks and a dense body/action shake cost."""
+        """Return support masks and a phase-local body/stance-leg shake cost."""
         support = self.stable_contacts & self.contacts
         single_support = torch.sum(support.int(), dim=1) == 1
         roll_tilt = self.projected_gravity[:, 1]
         roll_rate = self.base_ang_vel[:, 0]
+        lateral_position = (
+            self.root_states[:, 1] - self.env_origins[:, 1]
+        )
         lateral_velocity = self.base_lin_vel[:, 1]
-        action_rate = torch.mean(
-            torch.square(self.actions - self.last_actions), dim=1
+        vertical_velocity = self.base_lin_vel[:, 2]
+
+        support_weight = support.float()
+        support_count = torch.clamp(
+            torch.sum(support_weight, dim=1), min=1.0
         )
-        action_accel = torch.mean(
-            torch.square(
-                self.actions
-                + self.last_last_actions
-                - 2.0 * self.last_actions
-            ),
-            dim=1,
+        knee_velocity = self.dof_vel[:, self.knee_dof_idxs]
+        hip_roll_velocity = self.dof_vel[:, self.hip_roll_dof_idxs]
+        stance_knee_velocity = torch.sum(
+            torch.square(knee_velocity) * support_weight, dim=1
+        ) / support_count
+        stance_hip_roll_velocity = torch.sum(
+            torch.square(hip_roll_velocity) * support_weight, dim=1
+        ) / support_count
+
+        support_leg_weight = support_weight.unsqueeze(2)
+        action_delta = (
+            self.actions[:, self.support_leg_dof_idxs]
+            - self.last_actions[:, self.support_leg_dof_idxs]
         )
+        action_second_difference = (
+            self.actions[:, self.support_leg_dof_idxs]
+            + self.last_last_actions[:, self.support_leg_dof_idxs]
+            - 2.0 * self.last_actions[:, self.support_leg_dof_idxs]
+        )
+        support_action_rate = torch.sum(
+            torch.square(action_delta) * support_leg_weight,
+            dim=(1, 2),
+        ) / (support_count * self.support_leg_dof_idxs.shape[1])
+        support_action_accel = torch.sum(
+            torch.square(action_second_difference) * support_leg_weight,
+            dim=(1, 2),
+        ) / (support_count * self.support_leg_dof_idxs.shape[1])
         cost = (
             torch.square(roll_tilt)
             + float(self.cfg.env.single_support_roll_rate_scale)
             * torch.square(roll_rate)
+            + float(self.cfg.env.single_support_lateral_position_scale)
+            * torch.square(lateral_position)
             + float(self.cfg.env.single_support_lateral_velocity_scale)
             * torch.square(lateral_velocity)
+            + float(self.cfg.env.single_support_vertical_velocity_scale)
+            * torch.square(vertical_velocity)
+            + float(
+                self.cfg.env.single_support_stance_knee_velocity_scale
+            )
+            * stance_knee_velocity
+            + float(
+                self.cfg.env.single_support_stance_hip_roll_velocity_scale
+            )
+            * stance_hip_roll_velocity
             + float(self.cfg.env.single_support_action_rate_scale)
-            * action_rate
+            * support_action_rate
             + float(self.cfg.env.single_support_action_accel_scale)
-            * action_accel
+            * support_action_accel
         )
         moving = self.root_states[:, 7] > 0.03
         upright = -self.projected_gravity[:, 2] > 0.80

@@ -11,34 +11,35 @@ TRAIN_ENVS="${N2_NUM_ENVS:-256}"
 INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 
 # This is one continuous adaptation run.  Periodic checkpoints are evaluated
-# afterwards; training is not restarted from model_9050 for each candidate.
-TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-400}"
-CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"
-EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-256}"
+# afterwards; training is not restarted from the source for each candidate.
+TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"
+CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"
+EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-128}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
-# The inherited policy learns a low-step shuffle on 2/4 cm stairs. Focus
-# adaptation on 6--10 cm while retaining three riser heights.
-TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,2,3,4,4,4,4,4}"
+# The inherited policy uses a step-to shuffle on 2/4 cm stairs.  Do not
+# reinforce that local optimum during gait correction: retain 6 and 8 cm as
+# transition heights and devote six eighths of rollouts to the 10 cm target.
+TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
-# model_9050 already climbs.  Give the last two Actor layers enough freedom
-# to reshape the gait, while a strong teacher anchor and conservative learning
-# rate protect the climbing skill.  5e-6 is a 5x uplift from the original 1e-6
-# but avoids the catastrophic forgetting seen at 5e-5.
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-5.0e-6}"
-ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.05}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-1.0}"
+# Full-Actor, low-rate adaptation is needed to change a systematic gait bias;
+# training only the last two layers repeatedly returned to the same policy.
+# The frozen source remains a soft skill anchor, while periodic deterministic
+# screening and an independent holdout protect climbing performance.
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-2.0e-6}"
+ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.04}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.35}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
-SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.006}"
+SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
-ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-2}"
-OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.05}"
-REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.12,action_smoothness=-0.08,dof_acc=-4e-7,stairs_lateral_drift=-12,stairs_heading_alignment=4,stairs_stride_symmetry=-5,stairs_foothold_lateral=1.5,stairs_foothold_lateral_error=-3,stairs_foot_crossover=-6,stairs_foot_lane_error=-4,stairs_single_support_stability=-3,stairs_right_support_stability=-2,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2}"
+ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-4}"
+OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.03}"
+REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.12,dof_acc=-5e-7,stairs_lateral_drift=-20,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_right_stride_excess=-10,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-5,stairs_foot_crossover=-10,stairs_foot_lane_error=-8,stairs_single_support_stability=-5,stairs_right_support_stability=-8,stairs_swing_timeout=-5,stairs_alternating_tread=5,stairs_repeated_lead=-4,stairs_same_tread_join=-5}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
-SELECTION_MODE="${N2_ISAAC_STABILITY_SELECTION_MODE:-balanced}"
+SELECTION_MODE="${N2_ISAAC_STABILITY_SELECTION_MODE:-targeted}"
 export N2_ISAAC_STABILITY_SELECTION_MODE="${SELECTION_MODE}"
 
 LAUNCHER_DIR="${ROOT_DIR}/logs/isaac_launcher"
@@ -58,10 +59,10 @@ PREFLIGHT_EVALUATION=""
 
 usage() {
     echo "Usage: $0 smoke|pilot|long|diagnose|correct|final|status|log|stop|view"
-    echo "pilot: one 80-iteration run; long: one 400-iteration run."
+    echo "pilot: one 80-iteration run; long: one 600-iteration run."
     echo "diagnose: zero-training mirrored-policy safety/style preflight."
     echo "correct/final: preflight-gated 100-iteration full-Actor distillation."
-    echo "The guarded model_9050.pt is selected automatically."
+    echo "The newest guarded stability-selected model is selected automatically."
     echo "Set N2_STABILITY_INIT_CHECKPOINT only to override it."
 }
 
@@ -95,31 +96,78 @@ require_checkpoint() {
     local checkpoint_iter
     local numeric_checkpoint
     if [[ -z "${INIT_CHECKPOINT}" ]]; then
-        local preferred="${HOME}/n2_checkpoints/isaac_9050/model_9050.pt"
-        if [[ -f "${preferred}" ]]; then
-            INIT_CHECKPOINT="${preferred}"
-        else
-            local matches=()
-            local newest
-            local checkpoint
+        local matches=()
+        local newest=""
+        local checkpoint
+        local selected
+        local summary
+        local summaries=()
+
+        # Prefer the newest independently approved guarded selection.  The
+        # old launcher silently fell back to model_9050 even when a later
+        # model_9440/model_best already existed, wasting an entire long run.
+        shopt -s nullglob
+        summaries=(
+            "${LAUNCHER_DIR}"/stability_selected_s*/search_summary.txt
+        )
+        shopt -u nullglob
+        for summary in "${summaries[@]}"; do
+            if grep -qx 'approved=True' "${summary}" \
+                || grep -qx 'improved=True' "${summary}"; then
+                selected="$(
+                    sed -n 's/^selected=//p' "${summary}" | tail -n 1
+                )"
+                if [[ -f "${selected}" ]] \
+                    && [[ -z "${newest}" || "${selected}" -nt "${newest}" ]]; then
+                    newest="${selected}"
+                fi
+            fi
+        done
+        if [[ -n "${newest}" ]]; then
+            INIT_CHECKPOINT="${newest}"
+        fi
+
+        # A copied repository may retain the selected model but not the
+        # absolute path recorded by the originating server.
+        if [[ -z "${INIT_CHECKPOINT}" ]]; then
             shopt -s nullglob
             matches=(
-                "${ROOT_DIR}/logs/n2_stairs_walk/"*"_isaac_l4_guarded_pilot_from_9000_s${TRAIN_SEED}/model_9050.pt"
+                "${LAUNCHER_DIR}"/stability_selected_s*/model_best.pt
             )
             shopt -u nullglob
-            if [[ "${#matches[@]}" -gt 0 ]]; then
-                newest="${matches[0]}"
-                for checkpoint in "${matches[@]:1}"; do
-                    if [[ "${checkpoint}" -nt "${newest}" ]]; then
+            for checkpoint in "${matches[@]}"; do
+                if [[ -z "${newest}" || "${checkpoint}" -nt "${newest}" ]]; then
+                    newest="${checkpoint}"
+                fi
+            done
+            if [[ -n "${newest}" ]]; then
+                INIT_CHECKPOINT="${newest}"
+            fi
+        fi
+
+        if [[ -z "${INIT_CHECKPOINT}" ]]; then
+            local preferred="${HOME}/n2_checkpoints/isaac_9050/model_9050.pt"
+            if [[ -f "${preferred}" ]]; then
+                INIT_CHECKPOINT="${preferred}"
+            else
+                shopt -s nullglob
+                matches=(
+                    "${ROOT_DIR}/logs/n2_stairs_walk/"*"_isaac_l4_guarded_pilot_from_9000_s${TRAIN_SEED}/model_9050.pt"
+                )
+                shopt -u nullglob
+                for checkpoint in "${matches[@]}"; do
+                    if [[ -z "${newest}" || "${checkpoint}" -nt "${newest}" ]]; then
                         newest="${checkpoint}"
                     fi
                 done
-                INIT_CHECKPOINT="${newest}"
+                if [[ -n "${newest}" ]]; then
+                    INIT_CHECKPOINT="${newest}"
+                fi
             fi
         fi
     fi
     if [[ -z "${INIT_CHECKPOINT}" || ! -f "${INIT_CHECKPOINT}" ]]; then
-        echo "Cannot find model_9050.pt; set N2_STABILITY_INIT_CHECKPOINT." >&2
+        echo "Cannot find a guarded checkpoint; set N2_STABILITY_INIT_CHECKPOINT." >&2
         exit 2
     fi
     INIT_CHECKPOINT="$(readlink -f "${INIT_CHECKPOINT}")"
