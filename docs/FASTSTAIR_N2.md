@@ -17,13 +17,20 @@ Critic 还额外接收 DCM 规划信息。启动器现在执行经过约束的
 Actor-only bootstrap：
 
 1. 每帧共同的 70 维输入和全部后续 Actor 层逐值复制；
-2. 旧 4 x 3 地形点映射到新 9 x 5 地形图中的最近点；
+2. 新 9 x 5 地形图明确包含旧 4 x 3 地形点的全部物理坐标，逐点精确映射；
 3. 新增的 33 个地形输入权重置零；
 4. Critic 和优化器从零开始。
 
-这样初始 FastStair Actor 近似复现已批准 PPO 的爬楼动作，同时保留
+这样初始 FastStair Actor 精确保留旧输入子空间上的动作，同时保留
 学习更宽地形图的能力。旧 PPO 还继续作为不会覆盖的部署回退模型和
 相同 holdout seed 上的性能基准。
+
+正式训练前，启动器会先只生成 `model_0.pt`，不采样、不做 PPO
+更新；随后分别以 `n2_faststair` 和 `n2_stairs_walk` 在同一 seed
+上做确定性评估。只有日志出现
+`FASTSTAIR_BOOTSTRAP_GATE passed=True` 才会启动 Stage 1。如果迁移、
+地形图、相位时钟或物理配置破坏了旧策略，训练会在零次 PPO rollout
+时停止。
 
 ## 当前实现范围
 
@@ -33,15 +40,16 @@ Actor-only bootstrap：
 
 启动器内部使用三个地形阶段，而不是三个速度专家：
 
-- Stage 1：以 2/4 cm 为主，发现可靠抬脚和落脚。
-- Stage 2：加入更多 6/8 cm 与少量 10 cm。
-- Stage 3：以 8/10 cm 为主，完成目标楼梯专项训练。
+- Stage 1：固定 2 cm，发现可靠抬脚和落脚。
+- Stage 2：均衡训练 2/4/6 cm。
+- Stage 3：加入 8/10 cm，并提高目标楼梯占比。
 
-Stage 1 只训练 2 cm / 0.12 m/s；Stage 2 训练 2/4/6 cm /
-0.15 m/s；Stage 3 训练 4–10 cm / 0.18 m/s。每阶段都评估中间
-检查点，但只有至少一个模型通过该阶段的完成率、首步率、跌倒、
-路径和规划有效率门槛才会晋级。没有合格模型时立即停止，不再把
-“最不差的失败模型”传给下一阶段消耗 GPU。
+三个阶段默认都保持旧策略已经验证的 0.18 m/s 命令，只逐步增加楼梯
+高度，避免在迁移的同时改变相位时钟输入。探索噪声固定为 0.05，而
+不是会让首批采样直接跌倒的 0.12。每阶段都评估中间检查点，但只有
+至少一个模型通过该阶段的完成率、首步率、跌倒、路径和规划有效率
+门槛才会晋级。没有合格模型时立即停止，不再把“最不差的失败模型”
+传给下一阶段消耗 GPU。
 
 ## 服务器操作
 
@@ -57,8 +65,8 @@ PPO_BEST="$PWD/logs/isaac_launcher/stability_selected_s45/model_best.pt"
 test -f "$PPO_BEST"
 ```
 
-先运行 5 次迭代的接口烟雾测试。它只验证 Isaac Gym 环境、575/217
-观测、规划器、PPO 更新和保存路径是否能完整跑通：
+先运行迁移验收。它生成 `model_0.pt`，在相同 seed 下与旧模型逐级
+对照，但不会执行任何 PPO 更新：
 
 ```bash
 N2_SEED=46 \
@@ -67,7 +75,7 @@ N2_FASTSTAIR_BASELINE_CHECKPOINT="$PPO_BEST" \
 bash humanoid/scripts/run_faststair_n2.sh smoke
 ```
 
-烟雾测试无异常后启动正式训练：
+只有输出 `FASTSTAIR_SMOKE passed=True` 后才启动正式训练：
 
 ```bash
 N2_SEED=46 \
@@ -83,20 +91,31 @@ N2_SEED=46 bash humanoid/scripts/run_faststair_n2.sh status
 N2_SEED=46 bash humanoid/scripts/run_faststair_n2.sh log
 ```
 
-默认训练量为 400 + 600 + 800 = 1800 PPO iterations，4096 个并行
-环境，每 100 iterations 保存并筛选一次。按此前服务器约
-3.3 秒/iteration 的吞吐，纯训练约 100 分钟；若 Stage 1 未达到
-晋级门槛，会在约 22 分钟训练加筛选后停止。显存不足时先将环境数降到
-2048，不要改变筛选和 holdout：
+默认训练量为 400 + 600 + 800 = 1800 PPO iterations，1024 个并行
+环境，每 100 iterations 保存并筛选一次。FastStair 的大地图在
+4096 环境下会耗尽 PhysX `foundLostAggregatePairs` 缓冲并漏掉接触，
+因此启动器默认并硬性保护在 1024 环境以内；任务配置同时把 GPU
+contact-pair 容量提高到 `2**24`、内部 buffer multiplier 提高到 8。
+不要再用 4096 环境运行。显存仍不足时可降到 512：
 
 ```bash
 N2_SEED=46 \
-N2_FASTSTAIR_NUM_ENVS=2048 \
+N2_FASTSTAIR_NUM_ENVS=512 \
 N2_FASTSTAIR_BASELINE_CHECKPOINT="$PPO_BEST" \
 bash humanoid/scripts/run_faststair_n2.sh train
 ```
 
 ## 如何判断结果
+
+长训开始前必须先看到：
+
+```text
+FASTSTAIR_BOOTSTRAP_GATE passed=True
+FASTSTAIR_STAGE_TRAIN stage=1 ...
+```
+
+若出现 `FASTSTAIR_TRAINING_ABORT reason=bootstrap_preflight_failed`，
+表示迁移模型没有复现旧策略，启动器尚未执行任何 PPO rollout。
 
 只有日志出现以下内容，模型才被批准：
 

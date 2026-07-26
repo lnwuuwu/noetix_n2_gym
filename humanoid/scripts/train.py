@@ -110,6 +110,10 @@ def train(args):
         args: 命令行参数对象，包含训练所需的各种配置
     """
     bootstrap_actor = args.bootstrap_actor_checkpoint is not None
+    if args.bootstrap_only and not bootstrap_actor:
+        raise ValueError(
+            "--bootstrap_only requires --bootstrap_actor_checkpoint"
+        )
     if bootstrap_actor and args.resume:
         raise ValueError(
             "--bootstrap_actor_checkpoint and --resume are mutually exclusive"
@@ -623,6 +627,12 @@ def train(args):
                 initial_checkpoint
             )
         )
+    if args.bootstrap_only:
+        print(
+            "FastStair bootstrap-only mode complete; no rollout or PPO update "
+            "was executed."
+        )
+        return
     
     # max_iterations is treated as the total target iteration. On resume, run
     # only the remainder instead of adding another full training schedule.
@@ -674,6 +684,16 @@ if __name__ == '__main__':
                     "Initialize a fresh n2_faststair Actor from an approved "
                     "410-observation n2_stairs_walk checkpoint; the Critic "
                     "and optimizer remain fresh."
+                ),
+            },
+            {
+                "name": "--bootstrap_only",
+                "action": "store_true",
+                "default": False,
+                "help": (
+                    "Save and exit after Actor-only FastStair migration. This "
+                    "supports deterministic model_0 parity validation before "
+                    "any rollout is admitted to PPO."
                 ),
             },
             {

@@ -6,8 +6,12 @@ import torch
 
 from humanoid.utils.policy_bootstrap import (
     FASTSTAIR_FRAME_SIZE,
+    FASTSTAIR_TERRAIN_X,
+    FASTSTAIR_TERRAIN_Y,
     FRAME_STACK,
     LEGACY_FRAME_SIZE,
+    LEGACY_TERRAIN_X,
+    LEGACY_TERRAIN_Y,
     SHARED_PROPRIO_SIZE,
     bootstrap_faststair_actor,
     nearest_terrain_mapping,
@@ -95,6 +99,40 @@ class FastStairActorBootstrapTests(unittest.TestCase):
         self.assertEqual(report["source_iteration"], 9440)
         self.assertEqual(report["mapped_terrain_per_frame"], 12)
         self.assertEqual(report["new_terrain_per_frame"], 33)
+
+    def test_faststair_map_contains_every_legacy_coordinate_exactly(self):
+        faststair_points = {
+            (x_value, y_value)
+            for x_value in FASTSTAIR_TERRAIN_X
+            for y_value in FASTSTAIR_TERRAIN_Y
+        }
+        legacy_points = {
+            (x_value, y_value)
+            for x_value in LEGACY_TERRAIN_X
+            for y_value in LEGACY_TERRAIN_Y
+        }
+        self.assertTrue(legacy_points.issubset(faststair_points))
+        mapping = nearest_terrain_mapping()
+        flat_faststair = [
+            point
+            for point in (
+                (x_value, y_value)
+                for x_value in FASTSTAIR_TERRAIN_X
+                for y_value in FASTSTAIR_TERRAIN_Y
+            )
+        ]
+        flat_legacy = [
+            point
+            for point in (
+                (x_value, y_value)
+                for x_value in LEGACY_TERRAIN_X
+                for y_value in LEGACY_TERRAIN_Y
+            )
+        ]
+        self.assertEqual(
+            [flat_faststair[index] for index in mapping],
+            flat_legacy,
+        )
 
     def test_unmapped_faststair_inputs_start_at_zero(self):
         source = DummyPolicy(LEGACY_FRAME_SIZE * FRAME_STACK)

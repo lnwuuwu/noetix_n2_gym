@@ -1137,6 +1137,16 @@ class StairConfigurationTests(unittest.TestCase):
                 * len(faststair_cfg.terrain.actor_measured_points_y),
                 45,
             )
+            for legacy_x in walk_cfg.terrain.actor_measured_points_x:
+                self.assertIn(
+                    legacy_x,
+                    faststair_cfg.terrain.actor_measured_points_x,
+                )
+            for legacy_y in walk_cfg.terrain.actor_measured_points_y:
+                self.assertIn(
+                    legacy_y,
+                    faststair_cfg.terrain.actor_measured_points_y,
+                )
             self.assertEqual(
                 len(faststair_cfg.terrain.measured_points_x)
                 * len(faststair_cfg.terrain.measured_points_y),
@@ -1163,6 +1173,15 @@ class StairConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 faststair_train_cfg.algorithm.schedule,
                 "fixed",
+            )
+            self.assertAlmostEqual(
+                faststair_train_cfg.policy.init_noise_std, 0.05
+            )
+            self.assertEqual(
+                faststair_cfg.sim.physx.max_gpu_contact_pairs, 2**24
+            )
+            self.assertEqual(
+                faststair_cfg.sim.physx.default_buffer_size_multiplier, 8
             )
             with (
                 ROOT / "sim2sim" / "configs" / "n2_stairs_walk.yaml"
@@ -1531,6 +1550,7 @@ class StairConfigurationTests(unittest.TestCase):
         ).read_text()
         self.assertIn("--task=n2_faststair", launcher)
         self.assertIn("--bootstrap_actor_checkpoint", launcher)
+        self.assertIn("--bootstrap_only", launcher)
         self.assertIn("actor_bootstrap=True", launcher)
         self.assertIn("critic_bootstrap=False", launcher)
         self.assertIn("schedule=fixed", launcher)
@@ -1539,6 +1559,18 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn("--stage=${stage}", launcher)
         self.assertIn("FASTSTAIR_STAGE_GATE", launcher)
         self.assertIn("FASTSTAIR_STAGE_STOP", launcher)
+        self.assertIn("FASTSTAIR_BOOTSTRAP_GATE", launcher)
+        self.assertIn("FASTSTAIR_TRAINING_ABORT", launcher)
+        self.assertIn('NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"', launcher)
+        self.assertIn("SAFE_TRAIN_ENV_LIMIT=1024", launcher)
+        self.assertIn(
+            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"',
+            launcher,
+        )
+        self.assertIn(
+            'STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.05}"',
+            launcher,
+        )
         self.assertIn("STAGE1_MIX=", launcher)
         self.assertIn("STAGE2_MIX=", launcher)
         self.assertIn("STAGE3_MIX=", launcher)

@@ -700,9 +700,10 @@ class N2FastStairCfg(N2StairsWalkCfg):
         top_dwell_s = 0.25
         completion_dwell_s = 0.40
 
-        # Fresh training uses the tread-matched clock immediately.  The clock
-        # remains an observation, but planner targets follow the real airborne
-        # leg instead of enforcing an open-loop alternating sequence.
+        # A bootstrapped policy has already completed the legacy-to-tread clock
+        # transition.  FastStair therefore uses that same tread-matched clock
+        # immediately; the launcher keeps the familiar 0.18 m/s command during
+        # all terrain stages so the migrated phase observation is unchanged.
         gait_frequency_transition_steps = 0
         randomize_gait_phase = True
 
@@ -756,36 +757,44 @@ class N2FastStairCfg(N2StairsWalkCfg):
             -0.20,
             0.0,
             0.15,
-            0.30,
+            0.25,
             0.45,
-            0.60,
-            0.75,
-            0.90,
+            0.65,
+            0.85,
             1.05,
+            1.15,
             1.20,
             1.35,
         ]
         measured_points_y = [
             -0.30,
-            -0.20,
-            -0.10,
+            -0.24,
+            -0.12,
             0.0,
-            0.10,
-            0.20,
+            0.12,
+            0.24,
             0.30,
         ]
         actor_measured_points_x = [
             0.15,
-            0.30,
+            0.25,
             0.45,
-            0.60,
-            0.75,
-            0.90,
+            0.65,
+            0.85,
             1.05,
+            1.15,
             1.20,
             1.35,
         ]
-        actor_measured_points_y = [-0.20, -0.10, 0.0, 0.10, 0.20]
+        actor_measured_points_y = [-0.24, -0.12, 0.0, 0.12, 0.24]
+
+    class sim(N2StairsWalkCfg.sim):
+        class physx(N2StairsWalkCfg.sim.physx):
+            # FastStair adds a larger height map and candidate-contact workload.
+            # Keep a second safety margin in addition to the launcher's 1024-env
+            # cap so GPU broadphase/contact buffers never silently drop pairs.
+            max_gpu_contact_pairs = 2**24
+            default_buffer_size_multiplier = 8
 
     class commands(N2StairsWalkCfg.commands):
         curriculum = False
@@ -871,7 +880,10 @@ class N2FastStairCfg(N2StairsWalkCfg):
 
 class N2FastStairCfgPPO(N2StairsCfgPPO):
     class policy(N2StairsCfgPPO.policy):
-        init_noise_std = 0.12
+        # The approved stair policy was refined at approximately this standard
+        # deviation.  A 0.12-rad jump made the first bootstrapped rollout fall
+        # before the planner could observe a single valid swing.
+        init_noise_std = 0.05
 
     class algorithm(N2StairsCfgPPO.algorithm):
         learning_rate = 1.0e-5

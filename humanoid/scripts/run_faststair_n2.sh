@@ -7,12 +7,15 @@ cd "${ROOT_DIR}"
 MODE="${1:-}"
 SEED="${N2_SEED:-46}"
 DEVICE="${N2_DEVICE:-cuda:0}"
-NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-4096}"
+NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"
+PREFLIGHT_ENVS="${N2_FASTSTAIR_PREFLIGHT_ENVS:-64}"
 SCREEN_ENVS="${N2_FASTSTAIR_SCREEN_ENVS:-64}"
 HOLDOUT_ENVS="${N2_FASTSTAIR_HOLDOUT_ENVS:-128}"
 COMMAND_SPEED="${N2_FASTSTAIR_COMMAND_SPEED:-0.18}"
 BASELINE_CHECKPOINT="${N2_FASTSTAIR_BASELINE_CHECKPOINT:-}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
+ALLOW_PHYSX_OVERSUBSCRIPTION="${N2_FASTSTAIR_ALLOW_PHYSX_OVERSUBSCRIPTION:-0}"
+SAFE_TRAIN_ENV_LIMIT=1024
 
 CHECKPOINT_INTERVAL="${N2_FASTSTAIR_CHECKPOINT_INTERVAL:-100}"
 STAGE1_ITERATIONS="${N2_FASTSTAIR_STAGE1_ITERATIONS:-400}"
@@ -21,15 +24,15 @@ STAGE3_ITERATIONS="${N2_FASTSTAIR_STAGE3_ITERATIONS:-800}"
 STAGE1_MIX="${N2_FASTSTAIR_STAGE1_MIX:-0}"
 STAGE2_MIX="${N2_FASTSTAIR_STAGE2_MIX:-0,0,1,1,2,2}"
 STAGE3_MIX="${N2_FASTSTAIR_STAGE3_MIX:-1,2,2,3,3,4,4,4}"
-STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.12}"
-STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.15}"
-STAGE3_SPEED="${N2_FASTSTAIR_STAGE3_SPEED:-0.18}"
+STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"
+STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-${COMMAND_SPEED}}"
+STAGE3_SPEED="${N2_FASTSTAIR_STAGE3_SPEED:-${COMMAND_SPEED}}"
 STAGE1_LEARNING_RATE="${N2_FASTSTAIR_STAGE1_LR:-1.0e-5}"
 STAGE2_LEARNING_RATE="${N2_FASTSTAIR_STAGE2_LR:-7.0e-6}"
 STAGE3_LEARNING_RATE="${N2_FASTSTAIR_STAGE3_LR:-5.0e-6}"
-STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.12}"
-STAGE2_NOISE="${N2_FASTSTAIR_STAGE2_NOISE:-0.10}"
-STAGE3_NOISE="${N2_FASTSTAIR_STAGE3_NOISE:-0.08}"
+STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.05}"
+STAGE2_NOISE="${N2_FASTSTAIR_STAGE2_NOISE:-0.05}"
+STAGE3_NOISE="${N2_FASTSTAIR_STAGE3_NOISE:-0.05}"
 STAGE1_REFERENCE="${N2_FASTSTAIR_STAGE1_REFERENCE:-0.020}"
 STAGE2_REFERENCE="${N2_FASTSTAIR_STAGE2_REFERENCE:-0.010}"
 STAGE3_REFERENCE="${N2_FASTSTAIR_STAGE3_REFERENCE:-0.005}"
@@ -50,6 +53,7 @@ STAGE_TARGET_ITERATION=""
 SCREEN_BEST=""
 SCREEN_WINNER=""
 SCREEN_DECISION=""
+BOOTSTRAP_SOURCE=""
 
 usage() {
     echo "Usage: $0 smoke|train|status|log|stop|view"
@@ -184,13 +188,90 @@ evaluate_checkpoint() {
         "--output=${output}"
 }
 
+bootstrap_preflight() {
+    local baseline="$1"
+    local timestamp="$2"
+    local work_dir="$3"
+    local run_name="faststair_s${SEED}_bootstrap_${timestamp}"
+    local run_dir
+    local checkpoint
+    local candidate_evaluation="${work_dir}/bootstrap_candidate.csv"
+    local baseline_evaluation="${work_dir}/bootstrap_baseline.csv"
+    local baseline_numbered
+    local decision="${work_dir}/bootstrap_decision.json"
+    local approved
+
+    echo "FASTSTAIR_BOOTSTRAP_PREFLIGHT envs=${PREFLIGHT_ENVS} speed=${STAGE1_SPEED} checkpoint=${baseline}"
+    run_child python -u humanoid/scripts/train.py \
+        --task=n2_faststair \
+        "--bootstrap_actor_checkpoint=${baseline}" \
+        --bootstrap_only \
+        --headless \
+        "--sim_device=${DEVICE}" \
+        "--rl_device=${DEVICE}" \
+        "--num_envs=${PREFLIGHT_ENVS}" \
+        "--seed=${SEED}" \
+        --experiment_name=n2_faststair \
+        "--run_name=${run_name}" \
+        --terrain_level_mix=0 \
+        "--command_speed=${STAGE1_SPEED}" \
+        "--action_noise_std=${STAGE1_NOISE}" \
+        --freeze_action_noise
+    run_dir="$(latest_run_directory "${run_name}")"
+    checkpoint="${run_dir}/model_0.pt"
+    if [[ -z "${run_dir}" || ! -f "${checkpoint}" ]]; then
+        echo "FastStair bootstrap did not save model_0.pt" >&2
+        return 2
+    fi
+
+    # Compare the migrated Actor and its source on the same deterministic
+    # seeds before a single stochastic rollout can enter PPO.
+    evaluate_checkpoint \
+        n2_faststair "${checkpoint}" "${candidate_evaluation}" \
+        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}"
+    baseline_numbered="$(materialize_numbered_checkpoint \
+        "${baseline}" "${work_dir}")"
+    evaluate_checkpoint \
+        n2_stairs_walk "${baseline_numbered}" "${baseline_evaluation}" \
+        "${PREFLIGHT_ENVS}" "${SEED}" 1 "${STAGE1_SPEED}"
+    run_child python -u humanoid/scripts/select_faststair_checkpoint.py \
+        --stage=1 \
+        "--baseline=${baseline_evaluation}" \
+        "--baseline-checkpoint=${baseline}" \
+        --candidate \
+        "bootstrap_model_0|${candidate_evaluation}|${checkpoint}" \
+        "--output=${decision}"
+    approved="$(python -c \
+        'import json,sys; print(str(json.load(open(sys.argv[1]))["approved"]).lower())' \
+        "${decision}")"
+    if [[ "${approved}" != "true" ]]; then
+        cp -f "${checkpoint}" "${RESULT_DIR}/model_bootstrap_rejected.pt"
+        cp -f "${candidate_evaluation}" \
+            "${RESULT_DIR}/bootstrap_candidate.csv"
+        cp -f "${baseline_evaluation}" \
+            "${RESULT_DIR}/bootstrap_baseline.csv"
+        cp -f "${decision}" "${RESULT_DIR}/bootstrap_decision.json"
+        {
+            echo "new_approved=False"
+            echo "failure_stage=bootstrap_preflight"
+            echo "selected=NONE"
+            echo "screen_best=${RESULT_DIR}/model_bootstrap_rejected.pt"
+            echo "baseline=${baseline}"
+            echo "work_dir=${work_dir}"
+        } > "${RESULT_DIR}/search_summary.txt"
+        echo "FASTSTAIR_BOOTSTRAP_GATE passed=False decision=${decision}"
+        return 1
+    fi
+    BOOTSTRAP_SOURCE="${checkpoint}"
+    echo "FASTSTAIR_BOOTSTRAP_GATE passed=True checkpoint=${checkpoint}"
+}
+
 train_stage() {
     local stage="$1"
     local source="$2"
     local extra_iterations="$3"
     local terrain_mix="$4"
     local run_name="$5"
-    local bootstrap_checkpoint="$6"
     local source_iteration=0
     local target_iteration
     local resume_options=()
@@ -199,19 +280,17 @@ train_stage() {
     local action_noise
     local reference_coefficient
 
-    if [[ -n "${source}" ]]; then
-        source_iteration="$(checkpoint_iteration "${source}")"
-        resume_options=(
-            --resume
-            "--load_run=$(dirname "${source}")"
-            "--checkpoint=${source_iteration}"
-            --reset_optimizer
-        )
-    else
-        resume_options=(
-            "--bootstrap_actor_checkpoint=${bootstrap_checkpoint}"
-        )
+    if [[ -z "${source}" || ! -f "${source}" ]]; then
+        echo "FastStair stage ${stage} requires a preflight-approved source" >&2
+        return 2
     fi
+    source_iteration="$(checkpoint_iteration "${source}")"
+    resume_options=(
+        --resume
+        "--load_run=$(dirname "${source}")"
+        "--checkpoint=${source_iteration}"
+        --reset_optimizer
+    )
     case "${stage}" in
         1)
             command_speed="${STAGE1_SPEED}"
@@ -334,12 +413,20 @@ screen_stage() {
 
 run_training() {
     require_positive_integer N2_FASTSTAIR_NUM_ENVS "${NUM_ENVS}"
+    require_positive_integer N2_FASTSTAIR_PREFLIGHT_ENVS "${PREFLIGHT_ENVS}"
     require_positive_integer N2_FASTSTAIR_SCREEN_ENVS "${SCREEN_ENVS}"
     require_positive_integer N2_FASTSTAIR_HOLDOUT_ENVS "${HOLDOUT_ENVS}"
     require_positive_integer N2_FASTSTAIR_CHECKPOINT_INTERVAL "${CHECKPOINT_INTERVAL}"
     require_positive_integer N2_FASTSTAIR_STAGE1_ITERATIONS "${STAGE1_ITERATIONS}"
     require_positive_integer N2_FASTSTAIR_STAGE2_ITERATIONS "${STAGE2_ITERATIONS}"
     require_positive_integer N2_FASTSTAIR_STAGE3_ITERATIONS "${STAGE3_ITERATIONS}"
+    if (( NUM_ENVS > SAFE_TRAIN_ENV_LIMIT )) \
+        && [[ "${ALLOW_PHYSX_OVERSUBSCRIPTION}" != "1" ]]; then
+        echo "N2_FASTSTAIR_NUM_ENVS=${NUM_ENVS} exceeds the verified PhysX-safe limit ${SAFE_TRAIN_ENV_LIMIT}." >&2
+        echo "The previous 4096-env run exhausted found/lost aggregate-pair buffers and missed contacts." >&2
+        echo "Use at most ${SAFE_TRAIN_ENV_LIMIT}; override only for a separately capacity-validated simulator with N2_FASTSTAIR_ALLOW_PHYSX_OVERSUBSCRIPTION=1." >&2
+        return 2
+    fi
     trap terminate_driver TERM INT
     trap cleanup EXIT
 
@@ -347,7 +434,7 @@ run_training() {
     timestamp="$(date +%m%d_%H-%M-%S)"
     local work_dir="${WORK_ROOT}/${timestamp}"
     mkdir -p "${work_dir}"
-    local source=""
+    local source
     local stage
     local iterations
     local mix
@@ -367,8 +454,15 @@ run_training() {
     fi
 
     echo "FASTSTAIR_START seed=${SEED} envs=${NUM_ENVS} planner=dcm_gpu task=n2_faststair"
+    echo "FASTSTAIR_PHYSX_GUARD envs=${NUM_ENVS}/${SAFE_TRAIN_ENV_LIMIT} max_gpu_contact_pairs=16777216 buffer_multiplier=8"
     echo "FASTSTAIR_ARCHITECTURE actor_obs=575 critic_obs=217 actor_bootstrap=True critic_bootstrap=False schedule=fixed"
     echo "FASTSTAIR_BOOTSTRAP checkpoint=${baseline}"
+    if ! bootstrap_preflight "${baseline}" "${timestamp}" "${work_dir}"; then
+        echo "FASTSTAIR_TRAINING_ABORT reason=bootstrap_preflight_failed"
+        echo "No PPO rollout was started; the approved legacy policy is unchanged."
+        return 0
+    fi
+    source="${BOOTSTRAP_SOURCE}"
     for stage in 1 2 3; do
         case "${stage}" in
             1)
@@ -390,7 +484,7 @@ run_training() {
         run_name="faststair_s${SEED}_stage${stage}_${timestamp}"
         train_stage \
             "${stage}" "${source}" "${iterations}" "${mix}" \
-            "${run_name}" "${baseline}"
+            "${run_name}"
         run_dir="${TRAINED_RUN}"
         source_iteration="${STAGE_SOURCE_ITERATION}"
         target_iteration="${STAGE_TARGET_ITERATION}"
@@ -506,31 +600,23 @@ run_training() {
 
 smoke() {
     local baseline
+    local timestamp
+    local work_dir
     baseline="$(resolve_baseline || true)"
     if [[ -z "${baseline}" || ! -f "${baseline}" ]]; then
         echo "Smoke test requires N2_FASTSTAIR_BASELINE_CHECKPOINT." >&2
         exit 2
     fi
-    python -u humanoid/scripts/train.py \
-        --task=n2_faststair \
-        "--bootstrap_actor_checkpoint=${baseline}" \
-        --headless \
-        "--sim_device=${DEVICE}" \
-        "--rl_device=${DEVICE}" \
-        --num_envs=64 \
-        "--seed=${SEED}" \
-        --max_iterations=5 \
-        --experiment_name=n2_faststair_smoke \
-        --run_name=planner_smoke \
-        --terrain_level_mix=0 \
-        "--command_speed=${STAGE1_SPEED}" \
-        "--learning_rate=${STAGE1_LEARNING_RATE}" \
-        --fixed_learning_rate \
-        "--action_noise_std=${STAGE1_NOISE}" \
-        --freeze_action_noise \
-        "--actor_reference_loss_coeff=${STAGE1_REFERENCE}" \
-        --actor_policy_loss_scale=0.50 \
-        --save_interval=5
+    require_positive_integer N2_FASTSTAIR_PREFLIGHT_ENVS "${PREFLIGHT_ENVS}"
+    timestamp="$(date +%m%d_%H-%M-%S)"
+    work_dir="${WORK_ROOT}/smoke_${timestamp}"
+    mkdir -p "${work_dir}"
+    if bootstrap_preflight "${baseline}" "${timestamp}" "${work_dir}"; then
+        echo "FASTSTAIR_SMOKE passed=True checkpoint=${BOOTSTRAP_SOURCE}"
+    else
+        echo "FASTSTAIR_SMOKE passed=False"
+        return 1
+    fi
 }
 
 view_selected() {

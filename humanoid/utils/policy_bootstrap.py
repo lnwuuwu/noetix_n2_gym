@@ -6,10 +6,11 @@ same 70 deployable proprioceptive/navigation values.  The remaining values are
 terrain samples: 12 in the legacy layout and 45 in the wider FastStair layout.
 
 This module transfers the complete legacy Actor, maps every legacy terrain
-sample to its nearest FastStair sample, and leaves genuinely new map inputs at
-zero.  The Critic is deliberately not transferred because its observation
-layout changed.  As a result FastStair starts with a proven climbing behaviour
-instead of a random policy, while still being able to learn from its larger map.
+sample to the *same physical coordinate* in the FastStair map, and leaves
+genuinely new map inputs at zero.  The Critic is deliberately not transferred
+because its observation layout changed.  As a result FastStair starts with a
+proven climbing behaviour instead of a random policy, while still being able
+to learn from its larger map.
 """
 
 from __future__ import annotations
@@ -28,16 +29,16 @@ LEGACY_TERRAIN_X = (0.25, 0.45, 0.65, 0.85)
 LEGACY_TERRAIN_Y = (-0.24, 0.0, 0.24)
 FASTSTAIR_TERRAIN_X = (
     0.15,
-    0.30,
+    0.25,
     0.45,
-    0.60,
-    0.75,
-    0.90,
+    0.65,
+    0.85,
     1.05,
+    1.15,
     1.20,
     1.35,
 )
-FASTSTAIR_TERRAIN_Y = (-0.20, -0.10, 0.0, 0.10, 0.20)
+FASTSTAIR_TERRAIN_Y = (-0.24, -0.12, 0.0, 0.12, 0.24)
 
 
 def _grid_points(x_values, y_values):
@@ -49,16 +50,35 @@ def _grid_points(x_values, y_values):
 
 
 def nearest_terrain_mapping():
-    """Return legacy-index to FastStair-index nearest-neighbour mapping."""
+    """Return the exact legacy-index to FastStair-index coordinate mapping.
+
+    The historical public name is retained for checkpoint/tool compatibility.
+    A nearest-neighbour approximation is intentionally no longer accepted:
+    across a stair edge, a displacement of only a few centimetres can change a
+    height observation by a full riser and invalidate Actor parity.
+    """
     source = _grid_points(LEGACY_TERRAIN_X, LEGACY_TERRAIN_Y)
     target = _grid_points(FASTSTAIR_TERRAIN_X, FASTSTAIR_TERRAIN_Y)
     mapping = []
-    for source_x, source_y in source:
-        distances = [
-            (target_x - source_x) ** 2 + (target_y - source_y) ** 2
-            for target_x, target_y in target
+    for source_point in source:
+        matches = [
+            index
+            for index, target_point in enumerate(target)
+            if all(
+                abs(source_value - target_value) <= 1.0e-9
+                for source_value, target_value in zip(
+                    source_point, target_point
+                )
+            )
         ]
-        mapping.append(min(range(len(target)), key=distances.__getitem__))
+        if len(matches) != 1:
+            raise RuntimeError(
+                "Legacy terrain coordinate {} has {} exact FastStair "
+                "matches; Actor bootstrap requires one".format(
+                    source_point, len(matches)
+                )
+            )
+        mapping.append(matches[0])
     if len(set(mapping)) != len(mapping):
         raise RuntimeError(
             "Legacy terrain samples do not map uniquely into FastStair grid"
