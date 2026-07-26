@@ -495,6 +495,20 @@ class N2StairsEnv(N2Env):
         self.max_lateral_deviation = torch.zeros_like(
             self.best_forward_progress
         )
+        # The deterministic gate scores both maximum absolute translation and
+        # the inherited one-sided (+Y/left) drift.  Record only newly reached
+        # excursion so the corresponding reward is a bounded episode-level
+        # potential instead of another dense incentive that can be gamed by
+        # slowing down.
+        self.max_left_lateral_deviation = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.lateral_excursion_delta = torch.zeros_like(
+            self.best_forward_progress
+        )
+        self.left_lateral_excursion_delta = torch.zeros_like(
+            self.best_forward_progress
+        )
         self.max_yaw_deviation = torch.zeros_like(self.best_forward_progress)
         self.max_sagittal_foot_separation = torch.zeros_like(
             self.best_forward_progress
@@ -2087,6 +2101,16 @@ class N2StairsEnv(N2Env):
             self.foot_lateral_sample_count += lateral_samples.float()
 
         lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+        absolute_lateral_position = torch.abs(lateral_position)
+        left_lateral_position = torch.clamp(lateral_position, min=0.0)
+        self.lateral_excursion_delta[:] = torch.clamp(
+            absolute_lateral_position - self.max_lateral_deviation,
+            min=0.0,
+        )
+        self.left_lateral_excursion_delta[:] = torch.clamp(
+            left_lateral_position - self.max_left_lateral_deviation,
+            min=0.0,
+        )
         yaw = self.base_euler_xyz[:, 2]
         yaw_error = torch.atan2(torch.sin(yaw), torch.cos(yaw))
         forward_speed = self.root_states[:, 7]
@@ -2101,7 +2125,10 @@ class N2StairsEnv(N2Env):
             )
         self.double_flight_step_count += (~torch.any(self.contacts, dim=1)).float()
         self.max_lateral_deviation[:] = torch.maximum(
-            self.max_lateral_deviation, torch.abs(lateral_position)
+            self.max_lateral_deviation, absolute_lateral_position
+        )
+        self.max_left_lateral_deviation[:] = torch.maximum(
+            self.max_left_lateral_deviation, left_lateral_position
         )
         self.max_yaw_deviation[:] = torch.maximum(
             self.max_yaw_deviation, torch.abs(yaw_error)
@@ -2848,6 +2875,9 @@ class N2StairsEnv(N2Env):
         self.sagittal_foot_phase_match_sum[env_ids] = 0.0
         self.double_flight_step_count[env_ids] = 0.0
         self.max_lateral_deviation[env_ids] = 0.0
+        self.max_left_lateral_deviation[env_ids] = 0.0
+        self.lateral_excursion_delta[env_ids] = 0.0
+        self.left_lateral_excursion_delta[env_ids] = 0.0
         self.max_yaw_deviation[env_ids] = 0.0
         self.max_sagittal_foot_separation[env_ids] = 0.0
         self.swing_knee_flexion_sum[env_ids] = 0.0
@@ -3322,6 +3352,101 @@ class N2StairsEnv(N2Env):
             / self.dt
         )
 
+    def _reward_stairs_right_stride_excess_continuous(self):
+        """Shape an over-long right step throughout late swing.
+
+        Waiting until touchdown gives PPO one high-variance impulse after the
+        actions responsible for the error have already left the rollout
+        horizon.  This term starts once the current right displacement exceeds
+        the previous left stride (with a safe floor), and ramps through late
+        swing.  It is dense and therefore deliberately does not divide by dt.
+        """
+        reference = torch.maximum(
+            self.last_swing_forward_displacement[:, 0],
+            torch.full_like(
+                self.last_swing_forward_displacement[:, 0],
+                float(self.cfg.env.right_stride_reference_floor),
+            ),
+        )
+        current_right_displacement = torch.clamp(
+            self.feet_pos[:, 1, 0] - self.swing_start_pos[:, 1, 0],
+            min=0.0,
+            max=float(self.cfg.terrain.step_width),
+        )
+        excess = torch.clamp(
+            current_right_displacement
+            - reference
+            - float(self.cfg.env.right_stride_excess_deadband),
+            min=0.0,
+        )
+        normalized_excess = torch.clamp(
+            excess / float(self.cfg.terrain.step_width),
+            min=0.0,
+            max=1.0,
+        )
+        progress = self._swing_progress_state()[:, 1]
+        start_phase = float(
+            self.cfg.env.right_stride_excess_start_phase
+        )
+        ramp = torch.clamp(
+            (progress - start_phase) / max(1.0 - start_phase, 1.0e-3),
+            min=0.0,
+            max=1.0,
+        )
+        ramp = torch.square(ramp) * (3.0 - 2.0 * ramp)
+        active = (
+            self.swing_active[:, 1]
+            & self.swing_start_valid[:, 1]
+            & self.swing_displacement_valid[:, 0]
+            & (self.root_states[:, 7] > 0.03)
+            & (-self.projected_gravity[:, 2] > 0.80)
+        )
+        return torch.square(normalized_excess) * ramp * active.float()
+
+    def _reward_stairs_left_drift(self):
+        """Penalize the measured +Y translation after a small deadband."""
+        lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+        excess = torch.clamp(
+            lateral_position - float(self.cfg.env.left_drift_deadband),
+            min=0.0,
+        )
+        normalized = torch.clamp(
+            excess / float(self.cfg.env.lateral_error_normalizer),
+            min=0.0,
+            max=2.0,
+        )
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return torch.square(normalized) * (moving & upright).float()
+
+    def _reward_stairs_lateral_excursion(self):
+        """Charge once for newly reached lateral maxima.
+
+        The first component aligns with maximum absolute deviation.  The
+        second gives extra weight to the known +Y/left failure mode.  Dividing
+        by dt cancels reward-scale integration so their episode sums remain
+        bounded by the reached excursion rather than episode duration.
+        """
+        normalizer = float(self.cfg.env.lateral_excursion_normalizer)
+        normalized_delta = (
+            self.lateral_excursion_delta
+            + self.left_lateral_excursion_delta
+        ) / normalizer
+        moving = self.root_states[:, 7] > 0.03
+        upright = -self.projected_gravity[:, 2] > 0.80
+        return normalized_delta * (moving & upright).float() / self.dt
+
+    def _reward_stairs_terminal_lateral(self):
+        """Align the terminal reward with signed final-position acceptance."""
+        lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
+        normalized = torch.clamp(
+            lateral_position
+            / float(self.cfg.env.terminal_lateral_normalizer),
+            min=-2.0,
+            max=2.0,
+        )
+        return torch.square(normalized) * self.reset_buf.float() / self.dt
+
     def _reward_stairs_lateral_drift(self):
         lateral_position = self.root_states[:, 1] - self.env_origins[:, 1]
         lateral_velocity = self.root_states[:, 8]
@@ -3470,6 +3595,12 @@ class N2StairsEnv(N2Env):
         lateral_position = (
             self.root_states[:, 1] - self.env_origins[:, 1]
         )
+        normalized_lateral_position = (
+            lateral_position
+            / float(
+                self.cfg.env.single_support_lateral_position_normalizer
+            )
+        )
         lateral_velocity = self.base_lin_vel[:, 1]
         vertical_velocity = self.base_lin_vel[:, 2]
 
@@ -3509,7 +3640,7 @@ class N2StairsEnv(N2Env):
             + float(self.cfg.env.single_support_roll_rate_scale)
             * torch.square(roll_rate)
             + float(self.cfg.env.single_support_lateral_position_scale)
-            * torch.square(lateral_position)
+            * torch.square(normalized_lateral_position)
             + float(self.cfg.env.single_support_lateral_velocity_scale)
             * torch.square(lateral_velocity)
             + float(self.cfg.env.single_support_vertical_velocity_scale)

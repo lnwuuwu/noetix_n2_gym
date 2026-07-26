@@ -10,32 +10,34 @@ TRAIN_DEVICE="${N2_DEVICE:-cuda:0}"
 TRAIN_ENVS="${N2_NUM_ENVS:-256}"
 INIT_CHECKPOINT="${N2_STABILITY_INIT_CHECKPOINT:-}"
 
-# This is one continuous adaptation run.  Periodic checkpoints are evaluated
-# afterwards; training is not restarted from the source for each candidate.
-TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"
-CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"
+# Adapt in guarded stages.  Every stage screens its periodic checkpoints and
+# independently re-evaluates the winner before it can become the next source.
+# A rejected stage stops immediately and leaves the last approved model intact.
+TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-300}"
+STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-100}"
+CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"
 EVAL_ENVS="${N2_STABILITY_EVAL_ENVS:-128}"
 HOLDOUT_ENVS="${N2_STABILITY_HOLDOUT_ENVS:-256}"
-# The inherited policy uses a step-to shuffle on 2/4 cm stairs.  Do not
-# reinforce that local optimum during gait correction: retain 6 and 8 cm as
-# transition heights and devote six eighths of rollouts to the 10 cm target.
-TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"
+# Keep every evaluated height in the rollout distribution so a local style
+# correction cannot erase the 2/4/6 cm skills.  Half of environments remain on
+# the 10 cm target, matching the deterministic tournament weights.
+TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"
 COMMAND_SPEED="${N2_STABILITY_COMMAND_SPEED:-0.18}"
 
 # Full-Actor, low-rate adaptation is needed to change a systematic gait bias;
 # training only the last two layers repeatedly returned to the same policy.
 # The frozen source remains a soft skill anchor, while periodic deterministic
 # screening and an independent holdout protect climbing performance.
-LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-2.0e-6}"
-ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.04}"
-REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.35}"
+LEARNING_RATE="${N2_STABILITY_LEARNING_RATE:-1.0e-6}"
+ACTION_NOISE="${N2_STABILITY_ACTION_NOISE:-0.03}"
+REFERENCE_COEFF="${N2_STABILITY_REFERENCE_COEFF:-0.60}"
 SYMMETRIZE_REFERENCE="${N2_STABILITY_SYMMETRIZE_REFERENCE:-False}"
 REFERENCE_MIRROR_BLEND="${N2_STABILITY_REFERENCE_MIRROR_BLEND:-0.5}"
-SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.002}"
+SYMMETRY_COEFF="${N2_STABILITY_SYMMETRY_COEFF:-0.001}"
 POLICY_LOSS_SCALE="${N2_STABILITY_POLICY_LOSS_SCALE:-1.0}"
 ACTOR_LAYERS="${N2_STABILITY_ACTOR_LAYERS:-4}"
 OBSERVATION_NOISE="${N2_STABILITY_OBSERVATION_NOISE:-0.03}"
-REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.18,action_smoothness=-0.12,dof_acc=-5e-7,stairs_lateral_drift=-20,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_right_stride_excess=-10,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-5,stairs_foot_crossover=-10,stairs_foot_lane_error=-8,stairs_single_support_stability=-5,stairs_right_support_stability=-8,stairs_swing_timeout=-5,stairs_alternating_tread=5,stairs_repeated_lead=-4,stairs_same_tread_join=-5}"
+REWARD_OVERRIDES="${N2_STABILITY_REWARD_OVERRIDES:-action_rate=-0.15,action_smoothness=-0.10,dof_acc=-4e-7,stairs_lateral_drift=-12,stairs_left_drift=-4,stairs_lateral_excursion=-3,stairs_terminal_lateral=-2,stairs_heading_alignment=4,stairs_stride_symmetry=-3,stairs_right_stride_excess=-2,stairs_right_stride_excess_continuous=-3,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-2,stairs_foot_crossover=-6,stairs_foot_lane_error=-4,stairs_single_support_stability=-2,stairs_right_support_stability=-3,stairs_swing_timeout=-3,stairs_alternating_tread=3,stairs_repeated_lead=-3,stairs_same_tread_join=-4}"
 VIEW_PORT="${N2_STREAM_PORT:-18080}"
 SOURCE_APPROVED="${N2_STABILITY_SOURCE_APPROVED:-False}"
 CORRECTION_PREFLIGHT="${N2_STABILITY_CORRECTION_PREFLIGHT:-False}"
@@ -59,7 +61,7 @@ PREFLIGHT_EVALUATION=""
 
 usage() {
     echo "Usage: $0 smoke|pilot|long|diagnose|correct|final|status|log|stop|view"
-    echo "pilot: one 80-iteration run; long: one 600-iteration run."
+    echo "pilot: one 80-iteration run; long: up to 300 iterations in guarded 100-iteration stages."
     echo "diagnose: zero-training mirrored-policy safety/style preflight."
     echo "correct/final: preflight-gated 100-iteration full-Actor distillation."
     echo "The newest guarded stability-selected model is selected automatically."
@@ -427,6 +429,7 @@ run_reflection_preflight() {
 run_continuous() {
     require_checkpoint
     require_positive_integer N2_STABILITY_TRAIN_ITERATIONS "${TRAIN_ITERATIONS}"
+    require_positive_integer N2_STABILITY_STAGE_ITERATIONS "${STAGE_ITERATIONS}"
     require_positive_integer N2_STABILITY_CHECKPOINT_INTERVAL "${CHECKPOINT_INTERVAL}"
     require_positive_integer N2_STABILITY_EVAL_ENVS "${EVAL_ENVS}"
     require_positive_integer N2_STABILITY_HOLDOUT_ENVS "${HOLDOUT_ENVS}"
@@ -452,11 +455,20 @@ run_continuous() {
     local timestamp
     local work_dir
     local baseline_csv
+    local current_checkpoint
+    local current_evaluation
     local source_iteration
     local checkpoint
     local iteration
     local candidate_csv
     local decision_json
+    local stage
+    local stage_dir
+    local stage_iterations
+    local trained_iterations
+    local stage_selected_checkpoint
+    local stage_selected_evaluation
+    local stage_improved
     local selected_checkpoint
     local final_evaluation
     local improved
@@ -470,104 +482,157 @@ run_continuous() {
     local best_copy
     local trained_best_copy
     local candidate_count
+    local stage_candidate_count
     local expected_transitions
     local optimizer_updates
+    local stage_selected_iteration
+    local stage_selected_copy
     local effective_policy_blend="0.0"
-    local candidate_specs=()
+    local stage_candidate_specs=()
 
     timestamp="$(date +%m%d_%H-%M-%S)"
     work_dir="${WORK_ROOT}/${timestamp}"
     mkdir -p "${work_dir}"
-    source_iteration="$(checkpoint_iteration "${INIT_CHECKPOINT}")"
+    current_checkpoint="${INIT_CHECKPOINT}"
     baseline_csv="${work_dir}/baseline.csv"
     expected_transitions=$((TRAIN_ITERATIONS * TRAIN_ENVS * 24))
     optimizer_updates=$((TRAIN_ITERATIONS * 5 * 4))
 
-    echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${INIT_CHECKPOINT}"
-    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX} selection=${SELECTION_MODE}"
+    echo "ISAAC_STABILITY_CONTINUOUS_START checkpoint=${current_checkpoint}"
+    echo "ISAAC_STABILITY_CONTINUOUS_PLAN train_iterations=${TRAIN_ITERATIONS} stage_iterations=${STAGE_ITERATIONS} checkpoint_interval=${CHECKPOINT_INTERVAL} actor_layers=${ACTOR_LAYERS} learning_rate=${LEARNING_RATE} policy_loss_scale=${POLICY_LOSS_SCALE} reference=${REFERENCE_COEFF} symmetric_teacher=${SYMMETRIZE_REFERENCE} mirror_blend=${REFERENCE_MIRROR_BLEND} symmetry=${SYMMETRY_COEFF} noise=${ACTION_NOISE} terrain_mix=${TERRAIN_MIX} selection=${SELECTION_MODE}"
     echo "ISAAC_STABILITY_TRAINING_VOLUME transitions=${expected_transitions} optimizer_minibatch_updates=${optimizer_updates}"
     evaluate_checkpoint \
-        "${INIT_CHECKPOINT}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
-
-    train_trajectory \
-        "${INIT_CHECKPOINT}" "${TRAIN_ITERATIONS}" "${CHECKPOINT_INTERVAL}"
-
-    candidate_count=0
-    while IFS= read -r checkpoint; do
-        iteration="$(checkpoint_iteration "${checkpoint}")"
-        if (( iteration <= source_iteration || iteration > TARGET_ITERATION )); then
-            continue
-        fi
-        if (( iteration != TARGET_ITERATION && iteration % CHECKPOINT_INTERVAL != 0 )); then
-            continue
-        fi
-        candidate_count=$((candidate_count + 1))
-        candidate_csv="${work_dir}/checkpoint_${iteration}.csv"
-        echo "ISAAC_STABILITY_SCREEN iteration=${iteration} candidate=${candidate_count}"
-        evaluate_checkpoint \
-            "${checkpoint}" "${candidate_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
-        candidate_specs+=(
-            "iter_${iteration}|${candidate_csv}|${checkpoint}"
-        )
-    done < <(
-        find "${TRAINED_RUN}" -maxdepth 1 -type f -name 'model_*.pt' \
-            | sort -V
-    )
-
-    if (( candidate_count == 0 )); then
-        echo "No periodic checkpoints were found in ${TRAINED_RUN}" >&2
-        exit 1
-    fi
-
-    decision_json="${work_dir}/trajectory_decision.json"
-    run_tournament \
-        "${baseline_csv}" "${INIT_CHECKPOINT}" "${decision_json}" \
-        "${EVAL_ENVS}" "${candidate_specs[@]}"
-    selected_checkpoint="$(
-        decision_value "${decision_json}" 'd["winner"]["checkpoint"]'
-    )"
-    final_evaluation="$(
-        decision_value "${decision_json}" 'd["winner"]["evaluation"]'
-    )"
-    improved="$(
-        decision_value "${decision_json}" 'd["improved"]'
-    )"
+        "${current_checkpoint}" "${baseline_csv}" "${EVAL_ENVS}" "${TRAIN_SEED}"
+    current_evaluation="${baseline_csv}"
+    final_evaluation="${baseline_csv}"
+    selected_checkpoint="${current_checkpoint}"
+    improved="False"
     approved="${SOURCE_APPROVED}"
+    stage=0
+    trained_iterations=0
+    candidate_count=0
+    while (( trained_iterations < TRAIN_ITERATIONS )); do
+        stage=$((stage + 1))
+        stage_iterations="${STAGE_ITERATIONS}"
+        if (( trained_iterations + stage_iterations > TRAIN_ITERATIONS )); then
+            stage_iterations=$((TRAIN_ITERATIONS - trained_iterations))
+        fi
+        stage_dir="${work_dir}/stage_${stage}"
+        mkdir -p "${stage_dir}"
+        source_iteration="$(checkpoint_iteration "${current_checkpoint}")"
+        echo "ISAAC_STABILITY_STAGE_START stage=${stage} source=${source_iteration} iterations=${stage_iterations}"
 
-    if [[ "${selected_checkpoint}" != "${INIT_CHECKPOINT}" ]]; then
-        holdout_seed=$((TRAIN_SEED + 1000))
-        holdout_baseline_csv="${work_dir}/holdout_baseline.csv"
-        holdout_candidate_csv="${work_dir}/holdout_candidate.csv"
-        holdout_decision_json="${work_dir}/holdout_decision.json"
-        echo "ISAAC_STABILITY_HOLDOUT seed=${holdout_seed} envs=${HOLDOUT_ENVS}"
+        train_trajectory \
+            "${current_checkpoint}" "${stage_iterations}" \
+            "${CHECKPOINT_INTERVAL}"
+        trained_iterations=$((trained_iterations + stage_iterations))
+
+        stage_candidate_specs=()
+        stage_candidate_count=0
+        while IFS= read -r checkpoint; do
+            iteration="$(checkpoint_iteration "${checkpoint}")"
+            if (( iteration <= source_iteration || iteration > TARGET_ITERATION )); then
+                continue
+            fi
+            if (( iteration != TARGET_ITERATION && iteration % CHECKPOINT_INTERVAL != 0 )); then
+                continue
+            fi
+            stage_candidate_count=$((stage_candidate_count + 1))
+            candidate_count=$((candidate_count + 1))
+            candidate_csv="${stage_dir}/checkpoint_${iteration}.csv"
+            echo "ISAAC_STABILITY_SCREEN stage=${stage} iteration=${iteration} candidate=${candidate_count}"
+            evaluate_checkpoint \
+                "${checkpoint}" "${candidate_csv}" "${EVAL_ENVS}" \
+                "${TRAIN_SEED}"
+            stage_candidate_specs+=(
+                "iter_${iteration}|${candidate_csv}|${checkpoint}"
+            )
+        done < <(
+            find "${TRAINED_RUN}" -maxdepth 1 -type f -name 'model_*.pt' \
+                | sort -V
+        )
+
+        if (( stage_candidate_count == 0 )); then
+            echo "No periodic checkpoints were found in ${TRAINED_RUN}" >&2
+            exit 1
+        fi
+
+        decision_json="${stage_dir}/trajectory_decision.json"
+        run_tournament \
+            "${current_evaluation}" "${current_checkpoint}" \
+            "${decision_json}" "${EVAL_ENVS}" \
+            "${stage_candidate_specs[@]}"
+        stage_selected_checkpoint="$(
+            decision_value "${decision_json}" 'd["winner"]["checkpoint"]'
+        )"
+        stage_selected_evaluation="$(
+            decision_value "${decision_json}" 'd["winner"]["evaluation"]'
+        )"
+        stage_improved="$(
+            decision_value "${decision_json}" 'd["improved"]'
+        )"
+        if [[ "${stage_improved}" != "True" ]] \
+            || [[ "${stage_selected_checkpoint}" == "${current_checkpoint}" ]]; then
+            echo "ISAAC_STABILITY_STAGE_STOP stage=${stage} reason=no_screen_improvement keeping=${current_checkpoint}"
+            break
+        fi
+
+        # Every stage must independently reproduce its improvement before it
+        # becomes the source of another PPO update.  This is the online
+        # rollback boundary that the old 600-iteration trajectory lacked.
+        holdout_seed=$((TRAIN_SEED + 1000 + stage))
+        holdout_baseline_csv="${stage_dir}/holdout_baseline.csv"
+        holdout_candidate_csv="${stage_dir}/holdout_candidate.csv"
+        holdout_decision_json="${stage_dir}/holdout_decision.json"
+        echo "ISAAC_STABILITY_HOLDOUT stage=${stage} seed=${holdout_seed} envs=${HOLDOUT_ENVS}"
         evaluate_checkpoint \
-            "${INIT_CHECKPOINT}" "${holdout_baseline_csv}" \
+            "${current_checkpoint}" "${holdout_baseline_csv}" \
             "${HOLDOUT_ENVS}" "${holdout_seed}"
         evaluate_checkpoint \
-            "${selected_checkpoint}" "${holdout_candidate_csv}" \
+            "${stage_selected_checkpoint}" "${holdout_candidate_csv}" \
             "${HOLDOUT_ENVS}" "${holdout_seed}"
         run_tournament \
-            "${holdout_baseline_csv}" "${INIT_CHECKPOINT}" \
+            "${holdout_baseline_csv}" "${current_checkpoint}" \
             "${holdout_decision_json}" "${HOLDOUT_ENVS}" \
-            "selected|${holdout_candidate_csv}|${selected_checkpoint}"
-        selected_checkpoint="$(
+            "selected|${holdout_candidate_csv}|${stage_selected_checkpoint}"
+        stage_selected_checkpoint="$(
             decision_value "${holdout_decision_json}" \
                 'd["winner"]["checkpoint"]'
         )"
+        stage_improved="$(
+            decision_value "${holdout_decision_json}" 'd["improved"]'
+        )"
+        if [[ "${stage_improved}" != "True" ]] \
+            || [[ "${stage_selected_checkpoint}" == "${current_checkpoint}" ]]; then
+            echo "ISAAC_STABILITY_STAGE_STOP stage=${stage} reason=holdout_reject keeping=${current_checkpoint}"
+            break
+        fi
+
+        current_checkpoint="${stage_selected_checkpoint}"
+        current_evaluation="${stage_selected_evaluation}"
         final_evaluation="$(
             decision_value "${holdout_decision_json}" \
                 'd["winner"]["evaluation"]'
         )"
-        improved="$(
-            decision_value "${holdout_decision_json}" 'd["improved"]'
+        selected_checkpoint="${current_checkpoint}"
+        improved="True"
+        approved="True"
+        stage_selected_iteration="$(
+            checkpoint_iteration "${selected_checkpoint}"
         )"
-        if [[ "${improved}" == "True" ]]; then
-            echo "ISAAC_STABILITY_HOLDOUT_ACCEPT checkpoint=${selected_checkpoint}"
-            approved="True"
-        else
-            echo "ISAAC_STABILITY_HOLDOUT_REJECT restoring=${INIT_CHECKPOINT}"
+        stage_selected_copy="${RESULT_DIR}/model_${stage_selected_iteration}.pt"
+        if [[ "${selected_checkpoint}" != "${stage_selected_copy}" ]]; then
+            cp -f "${selected_checkpoint}" "${stage_selected_copy}"
         fi
-    fi
+        cp -f "${selected_checkpoint}" "${RESULT_DIR}/model_best.pt"
+        cp -f "${final_evaluation}" \
+            "${RESULT_DIR}/evaluation_all_levels.csv"
+        printf '%s\n' "${stage_selected_copy}" \
+            > "${RESULT_DIR}/selected_checkpoint.txt"
+        echo "ISAAC_STABILITY_BEST_UPDATE stage=${stage} checkpoint=${stage_selected_copy}"
+        echo "ISAAC_STABILITY_HOLDOUT_ACCEPT stage=${stage} checkpoint=${stage_selected_checkpoint}"
+    done
+
     if [[ "${improved}" == "True" ]]; then
         approved="True"
         printf '%s\n' "0.0" > "${SELECTED_BLEND_FILE}"
@@ -599,6 +664,8 @@ run_continuous() {
         "best=${best_copy}" \
         "evaluation=${RESULT_DIR}/evaluation_all_levels.csv" \
         "trained_run=${TRAINED_RUN}" \
+        "training_stages=${stage}" \
+        "trained_iterations=${trained_iterations}" \
         "screened_checkpoints=${candidate_count}" \
         "policy_symmetry_blend=${effective_policy_blend}" \
         > "${RESULT_DIR}/search_summary.txt"
@@ -705,7 +772,7 @@ case "${MODE}" in
             N2_STABILITY_POLICY_LOSS_SCALE=0.0 \
             N2_STABILITY_ACTOR_LAYERS=4 \
             N2_STABILITY_OBSERVATION_NOISE=0.0 \
-            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.25,action_smoothness=-0.14,dof_acc=-4e-7,stairs_lateral_drift=-18,stairs_heading_alignment=4,stairs_stride_symmetry=-8,stairs_foothold_lateral=2,stairs_foothold_lateral_error=-4,stairs_foot_crossover=-12,stairs_foot_lane_error=-8,stairs_single_support_stability=-4,stairs_right_support_stability=-4,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-2
+            N2_STABILITY_REWARD_OVERRIDES=action_rate=-0.20,action_smoothness=-0.12,dof_acc=-4e-7,stairs_lateral_drift=-12,stairs_left_drift=-4,stairs_lateral_excursion=-3,stairs_terminal_lateral=-2,stairs_heading_alignment=4,stairs_stride_symmetry=-3,stairs_right_stride_excess=-2,stairs_right_stride_excess_continuous=-3,stairs_foothold_lateral=1,stairs_foothold_lateral_error=-2,stairs_foot_crossover=-6,stairs_foot_lane_error=-4,stairs_single_support_stability=-2,stairs_right_support_stability=-3,stairs_alternating_tread=2,stairs_repeated_lead=-2,stairs_same_tread_join=-3
         ;;
     _run)
         run_continuous

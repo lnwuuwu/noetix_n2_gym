@@ -670,29 +670,38 @@ def compare(baseline_rows, candidate_rows, episodes=None):
         name: high_target_baseline[name] - high_target_candidate[name]
         for name in high_target_baseline
     }
+    # A group is only as good as its weakest video-visible component.  The old
+    # ``max`` aggregation could report "lateral improved" when the feet moved
+    # closer to their lanes while both pelvis excursion and final translation
+    # became worse (exactly what happened in the 9440 -> 10040 run).
     target_group_deltas = {
-        "lateral": max(
+        "lateral": min(
             target_deltas["max_lateral"],
             target_deltas["signed_lateral"],
-            target_deltas["foot_lane_center"],
         ),
         "stride": target_deltas["stride_imbalance"],
-        "right_support_shake": max(
+        "right_support_shake": min(
             target_deltas["left_swing_action_motion"],
             target_deltas["left_swing_body_motion"],
         ),
     }
     target_group_improvements = {
         "lateral": (
-            target_group_deltas["lateral"]
+            target_deltas["max_lateral"]
             >= cfg["target_lateral_improvement"]
+            and target_deltas["signed_lateral"]
+            >= cfg["target_lateral_improvement"]
+            and target_deltas["foot_lane_center"]
+            >= -cfg["target_foot_lane_tol"]
         ),
         "stride": (
             target_group_deltas["stride"]
             >= cfg["target_stride_improvement"]
         ),
         "right_support_shake": (
-            target_group_deltas["right_support_shake"]
+            target_deltas["left_swing_action_motion"]
+            >= cfg["target_shake_improvement"]
+            and target_deltas["left_swing_body_motion"]
             >= cfg["target_shake_improvement"]
         ),
     }
@@ -1109,11 +1118,18 @@ def main():
         )
         print(
             "ISAAC_STABILITY_TARGET_DELTAS name={} lateral={:+.4f} "
-            "stride={:+.4f} right_support_shake={:+.4f}".format(
+            "stride={:+.4f} right_support_shake={:+.4f} "
+            "max_lat={:+.4f} final_lat={:+.4f} lane={:+.4f} "
+            "support_action={:+.4f} support_body={:+.4f}".format(
                 candidate["name"],
                 result["target_group_deltas"]["lateral"],
                 result["target_group_deltas"]["stride"],
                 result["target_group_deltas"]["right_support_shake"],
+                result["target_deltas"]["max_lateral"],
+                result["target_deltas"]["signed_lateral"],
+                result["target_deltas"]["foot_lane_center"],
+                result["target_deltas"]["left_swing_action_motion"],
+                result["target_deltas"]["left_swing_body_motion"],
             )
         )
         for reason in result["reasons"]:

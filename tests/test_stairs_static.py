@@ -1762,15 +1762,19 @@ class SourceCompatibilityTests(unittest.TestCase):
         ).read_text()
 
         self.assertIn(
-            'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-2,3,4,4,4,4,4,4}"',
+            'TERRAIN_MIX="${N2_STABILITY_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"',
             launcher,
         )
         self.assertIn(
-            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-600}"',
+            'TRAIN_ITERATIONS="${N2_STABILITY_TRAIN_ITERATIONS:-300}"',
             launcher,
         )
         self.assertIn(
-            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-25}"',
+            'STAGE_ITERATIONS="${N2_STABILITY_STAGE_ITERATIONS:-100}"',
+            launcher,
+        )
+        self.assertIn(
+            'CHECKPOINT_INTERVAL="${N2_STABILITY_CHECKPOINT_INTERVAL:-20}"',
             launcher,
         )
         self.assertIn("--terrain_level_mix=${TERRAIN_MIX}", launcher)
@@ -1785,8 +1789,11 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("--save_interval=${checkpoint_interval}", launcher)
         self.assertIn("isaac_stability_tournament.py", launcher)
         self.assertIn("ISAAC_STABILITY_CONTINUOUS_TRAIN", launcher)
+        self.assertIn("ISAAC_STABILITY_STAGE_START", launcher)
+        self.assertIn("ISAAC_STABILITY_STAGE_STOP", launcher)
         self.assertIn("ISAAC_STABILITY_SCREEN", launcher)
         self.assertIn("ISAAC_STABILITY_HOLDOUT", launcher)
+        self.assertIn("ISAAC_STABILITY_BEST_UPDATE", launcher)
         self.assertNotIn("ISAAC_STABILITY_MICRO_TRAIN", launcher)
         self.assertNotIn("local profiles=", launcher)
         self.assertNotIn("for level in 0 1 2 3 4", launcher)
@@ -1806,11 +1813,17 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn("N2_STABILITY_POLICY_LOSS_SCALE=0.0", launcher)
         self.assertIn("N2_STABILITY_SYMMETRIZE_REFERENCE=True", launcher)
         self.assertIn("--symmetrize_actor_reference", launcher)
-        self.assertIn("stairs_foot_crossover=-12", launcher)
-        self.assertIn("stairs_foot_lane_error=-8", launcher)
-        self.assertIn("stairs_single_support_stability=-4", launcher)
-        self.assertIn("stairs_right_support_stability=-4", launcher)
-        self.assertIn("stairs_right_stride_excess=-10", launcher)
+        self.assertIn("stairs_left_drift=-4", launcher)
+        self.assertIn("stairs_lateral_excursion=-3", launcher)
+        self.assertIn("stairs_terminal_lateral=-2", launcher)
+        self.assertIn("stairs_foot_crossover=-6", launcher)
+        self.assertIn("stairs_foot_lane_error=-4", launcher)
+        self.assertIn("stairs_single_support_stability=-2", launcher)
+        self.assertIn("stairs_right_support_stability=-3", launcher)
+        self.assertIn("stairs_right_stride_excess=-2", launcher)
+        self.assertIn(
+            "stairs_right_stride_excess_continuous=-3", launcher
+        )
         self.assertIn(
             'SELECTION_MODE="${N2_ISAAC_STABILITY_SELECTION_MODE:-targeted}"',
             launcher,
@@ -1852,6 +1865,13 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertIn(
             "def _reward_stairs_right_stride_excess", stairs_source
         )
+        self.assertIn(
+            "def _reward_stairs_right_stride_excess_continuous",
+            stairs_source,
+        )
+        self.assertIn("def _reward_stairs_left_drift", stairs_source)
+        self.assertIn("def _reward_stairs_lateral_excursion", stairs_source)
+        self.assertIn("def _reward_stairs_terminal_lateral", stairs_source)
         self.assertIn("self.swing_displacement_event", stairs_source)
         self.assertIn("stance_knee_velocity", stairs_source)
         self.assertIn("stance_hip_roll_velocity", stairs_source)
@@ -1878,8 +1898,10 @@ class SourceCompatibilityTests(unittest.TestCase):
         tree = ast.parse(source_path.read_text(), filename=str(source_path))
         environment = nested_class(tree, "N2StairsEnv")
         wanted = {
+            "_swing_progress_state",
             "_reward_stairs_stride_symmetry",
             "_reward_stairs_right_stride_excess",
+            "_reward_stairs_right_stride_excess_continuous",
         }
         methods = [
             node for node in environment.body
@@ -1903,6 +1925,8 @@ class SourceCompatibilityTests(unittest.TestCase):
             env=types.SimpleNamespace(
                 stride_symmetry_deadband=0.015,
                 right_stride_excess_deadband=0.015,
+                right_stride_reference_floor=0.16,
+                right_stride_excess_start_phase=0.35,
             ),
             terrain=types.SimpleNamespace(step_width=0.30),
         )
@@ -1921,14 +1945,31 @@ class SourceCompatibilityTests(unittest.TestCase):
         instance.projected_gravity = torch.tensor(
             [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
         )
+        instance.feet_pos = torch.zeros(2, 2, 3)
+        instance.swing_start_pos = torch.zeros(2, 2, 3)
+        instance.feet_pos[:, 1, 0] = torch.tensor([0.22, 0.17])
+        instance.swing_active = torch.tensor(
+            [[False, True], [False, True]]
+        )
+        instance.swing_start_valid = instance.swing_active.clone()
+        instance.swing_elapsed_time = torch.ones(2, 2)
+        instance._nominal_swing_duration = lambda: torch.ones(2)
 
         symmetric = instance._reward_stairs_stride_symmetry()
         right_excess = instance._reward_stairs_right_stride_excess()
+        continuous = (
+            instance._reward_stairs_right_stride_excess_continuous()
+        )
         expected = ((0.12 - 0.015) / 0.30) ** 2 / 0.02
+        expected_continuous = ((0.22 - 0.16 - 0.015) / 0.30) ** 2
         self.assertAlmostEqual(symmetric[0].item(), expected, places=5)
         self.assertAlmostEqual(right_excess[0].item(), expected, places=5)
+        self.assertAlmostEqual(
+            continuous[0].item(), expected_continuous, places=5
+        )
         self.assertEqual(symmetric[1].item(), 0.0)
         self.assertEqual(right_excess[1].item(), 0.0)
+        self.assertEqual(continuous[1].item(), 0.0)
 
         # A stale displacement must not keep penalising unrelated timesteps,
         # and the asymmetric correction applies only on right touchdown.
@@ -1943,6 +1984,68 @@ class SourceCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             instance._reward_stairs_right_stride_excess()[0].item(), 0.0
         )
+        instance.swing_active[0, 1] = False
+        self.assertEqual(
+            instance._reward_stairs_right_stride_excess_continuous()[0].item(),
+            0.0,
+        )
+
+    def test_lateral_rewards_target_left_drift_and_episode_excursion(self):
+        source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        environment = nested_class(tree, "N2StairsEnv")
+        wanted = {
+            "_reward_stairs_left_drift",
+            "_reward_stairs_lateral_excursion",
+            "_reward_stairs_terminal_lateral",
+        }
+        methods = [
+            node for node in environment.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        ]
+        harness = ast.ClassDef(
+            name="LateralHarness",
+            bases=[],
+            keywords=[],
+            body=methods,
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[harness], type_ignores=[])
+        )
+        namespace = {"torch": torch}
+        exec(compile(module, str(source_path), "exec"), namespace)
+
+        instance = namespace["LateralHarness"]()
+        instance.cfg = types.SimpleNamespace(
+            env=types.SimpleNamespace(
+                left_drift_deadband=0.015,
+                lateral_error_normalizer=0.10,
+                lateral_excursion_normalizer=0.10,
+                terminal_lateral_normalizer=0.10,
+            )
+        )
+        instance.dt = 0.02
+        instance.root_states = torch.zeros(2, 13)
+        instance.root_states[:, 1] = torch.tensor([0.065, -0.065])
+        instance.root_states[:, 7] = 0.18
+        instance.env_origins = torch.zeros(2, 3)
+        instance.projected_gravity = torch.tensor(
+            [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
+        )
+        instance.lateral_excursion_delta = torch.tensor([0.01, 0.01])
+        instance.left_lateral_excursion_delta = torch.tensor([0.01, 0.00])
+        instance.reset_buf = torch.tensor([False, True])
+
+        left_drift = instance._reward_stairs_left_drift()
+        excursion = instance._reward_stairs_lateral_excursion()
+        terminal = instance._reward_stairs_terminal_lateral()
+        self.assertAlmostEqual(left_drift[0].item(), 0.25, places=5)
+        self.assertEqual(left_drift[1].item(), 0.0)
+        self.assertAlmostEqual(excursion[0].item(), 10.0, places=5)
+        self.assertAlmostEqual(excursion[1].item(), 5.0, places=5)
+        self.assertEqual(terminal[0].item(), 0.0)
+        self.assertAlmostEqual(terminal[1].item(), 21.125, places=4)
 
     def test_right_support_stability_targets_the_stance_leg(self):
         source_path = ROOT / "humanoid" / "envs" / "n2" / "n2_stairs_env.py"
@@ -1974,7 +2077,8 @@ class SourceCompatibilityTests(unittest.TestCase):
         instance.cfg = types.SimpleNamespace(
             env=types.SimpleNamespace(
                 single_support_roll_rate_scale=0.2,
-                single_support_lateral_position_scale=2.0,
+                single_support_lateral_position_scale=0.5,
+                single_support_lateral_position_normalizer=0.10,
                 single_support_lateral_velocity_scale=0.5,
                 single_support_vertical_velocity_scale=0.2,
                 single_support_stance_knee_velocity_scale=0.04,
@@ -2144,6 +2248,36 @@ class SourceCompatibilityTests(unittest.TestCase):
                 reason.startswith("10 cm")
                 for reason in rejected["hard_reasons"]
             )
+        )
+        self.assertFalse(
+            rejected["target_group_improvements"]["lateral"]
+        )
+
+        # Correcting only the feet's common lane offset must not count as a
+        # lateral-body improvement when pelvis excursion and final translation
+        # both get worse.
+        lane_biased_baseline = {
+            level: dict(values) for level, values in baseline.items()
+        }
+        lane_only_candidate = {
+            level: dict(values) for level, values in candidate.items()
+        }
+        for values in lane_biased_baseline.values():
+            values["mean_left_foot_lateral_position_m"] = 0.03
+            values["mean_right_foot_lateral_position_m"] = -0.15
+        for values in lane_only_candidate.values():
+            values["mean_max_lateral_deviation_m"] = 0.095
+            values["mean_final_lateral_position_m"] = 0.035
+        lane_only = tournament.compare(
+            lane_biased_baseline, lane_only_candidate, episodes=64
+        )
+        self.assertGreater(
+            lane_only["target_deltas"]["foot_lane_center"], 0.0
+        )
+        self.assertLess(lane_only["target_deltas"]["max_lateral"], 0.0)
+        self.assertLess(lane_only["target_deltas"]["signed_lateral"], 0.0)
+        self.assertFalse(
+            lane_only["target_group_improvements"]["lateral"]
         )
 
         # A tiny isolated style trade-off may use the balanced fallback only

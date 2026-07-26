@@ -513,8 +513,17 @@ class AMPStaticIntegrationTests(unittest.TestCase):
         self.assertIn("humanoid/scripts/train_amp.py", launcher)
         self.assertIn("--motion_manifest", launcher)
         self.assertIn("--reward_scale_overrides", launcher)
-        self.assertIn("stairs_right_stride_excess=-10", launcher)
-        self.assertIn("stairs_right_support_stability=-8", launcher)
+        self.assertIn("stairs_right_stride_excess=-2", launcher)
+        self.assertIn(
+            "stairs_right_stride_excess_continuous=-3", launcher
+        )
+        self.assertIn("stairs_left_drift=-4", launcher)
+        self.assertIn("stairs_lateral_excursion=-3", launcher)
+        self.assertIn("stairs_right_support_stability=-3", launcher)
+        self.assertIn(
+            'TERRAIN_MIX="${N2_AMP_TERRAIN_MIX:-0,1,2,3,4,4,4,4}"',
+            launcher,
+        )
         self.assertIn(
             'ACTOR_LAYERS="${N2_AMP_ACTOR_LAYERS:-4}"', launcher
         )

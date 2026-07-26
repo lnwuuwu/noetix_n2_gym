@@ -442,12 +442,28 @@ class N2StairsWalkCfg(N2StairsCfg):
         # remove the inherited right-foot overstride, then turns itself off.
         stride_symmetry_deadband = 0.015
         right_stride_excess_deadband = 0.015
+        # The approved checkpoint drifts in world +Y (the robot's left)
+        # without a comparable yaw error.  The legacy lateral reward uses
+        # unnormalised metres squared, so a visible 5 cm translation contributes
+        # almost no gradient.  These normalisers keep the correction bounded
+        # and make it commensurate with the metrics used by the deterministic
+        # tournament.
+        left_drift_deadband = 0.015
+        lateral_error_normalizer = 0.10
+        lateral_excursion_normalizer = 0.10
+        terminal_lateral_normalizer = 0.10
+        # A 16 cm floor prevents the inherited short left step from teaching
+        # the right foot to stop before it can clear a tread.  The continuous
+        # excess cost starts only after early swing and then ramps smoothly.
+        right_stride_reference_floor = 0.16
+        right_stride_excess_start_phase = 0.35
         # Single-support shake is measured from roll tilt/rate and lateral
         # body motion plus stance-leg joint/action motion.  Whole-policy
         # action averages previously diluted a shaking stance knee across all
         # 18 joints and could not see cumulative sideways translation.
         single_support_roll_rate_scale = 0.20
-        single_support_lateral_position_scale = 2.00
+        single_support_lateral_position_normalizer = 0.10
+        single_support_lateral_position_scale = 0.50
         single_support_lateral_velocity_scale = 0.50
         single_support_vertical_velocity_scale = 0.20
         single_support_stance_knee_velocity_scale = 0.04
@@ -598,6 +614,10 @@ class N2StairsWalkCfg(N2StairsCfg):
             # enables it after the checkpoint already knows how to climb.
             stairs_stride_symmetry = 0.0
             stairs_right_stride_excess = 0.0
+            stairs_right_stride_excess_continuous = 0.0
+            stairs_left_drift = 0.0
+            stairs_lateral_excursion = 0.0
+            stairs_terminal_lateral = 0.0
             stairs_forward_pitch = 1.25
             stairs_base_behind_support = -4.0
             stairs_foot_pitch = -2.0
