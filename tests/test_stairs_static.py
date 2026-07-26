@@ -1601,13 +1601,20 @@ class StairConfigurationTests(unittest.TestCase):
         self.assertIn('NUM_ENVS="${N2_FASTSTAIR_NUM_ENVS:-1024}"', launcher)
         self.assertIn("SAFE_TRAIN_ENV_LIMIT=1024", launcher)
         self.assertIn(
-            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-${COMMAND_SPEED}}"',
+            'STAGE1_SPEED="${N2_FASTSTAIR_STAGE1_SPEED:-0.14}"',
             launcher,
         )
         self.assertIn(
-            'STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.05}"',
+            'STAGE2_SPEED="${N2_FASTSTAIR_STAGE2_SPEED:-0.16}"',
             launcher,
         )
+        self.assertIn(
+            'STAGE1_NOISE="${N2_FASTSTAIR_STAGE1_NOISE:-0.08}"',
+            launcher,
+        )
+        self.assertIn("stairs_curriculum_completion=10", launcher)
+        self.assertIn("stairs_alternating_tread=8", launcher)
+        self.assertIn("stairs_swing_timeout=-4", launcher)
         self.assertIn("STAGE1_MIX=", launcher)
         self.assertIn("STAGE2_MIX=", launcher)
         self.assertIn("STAGE3_MIX=", launcher)

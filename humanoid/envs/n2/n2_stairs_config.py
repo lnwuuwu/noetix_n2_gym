@@ -710,9 +710,10 @@ class N2FastStairCfg(N2StairsWalkCfg):
         completion_dwell_s = 0.40
 
         # A bootstrapped policy has already completed the legacy-to-tread clock
-        # transition.  FastStair therefore uses that same tread-matched clock
-        # immediately; the launcher keeps the familiar 0.18 m/s command during
-        # all terrain stages so the migrated phase observation is unchanged.
+        # transition, so FastStair uses that clock immediately. The launcher
+        # nevertheless raises command speed gradually (0.14 -> 0.16 -> 0.18
+        # m/s): the easy row first has to remove the inherited repeated-lead
+        # gait before harder terrain is allowed to demand faster placements.
         gait_frequency_transition_steps = 0
         randomize_gait_phase = True
 
