@@ -11,6 +11,8 @@ control_decimation: 10
 
 kps: [80, 80, 120, 120, 20, 80, 80, 120, 120, 20]
 kds: [5, 5, 5, 5, 2, 5, 5, 5, 5, 2]
+# Per-actuator effort/torque limits (Nm), legs only: hip_yaw,hip_roll,hip_pitch,knee,ankle x2
+tau_limit: [90, 90, 150, 150, 70, 90, 90, 150, 150, 70]
 
 default_angles: [0.0, 0.0, -0.1495, 0.3215, -0.1720,
                  0.0, 0.0, -0.1495, 0.3215, -0.1720]
@@ -22,7 +24,7 @@ action_scale: 0.25
 cmd_scale: [2.0, 2.0, 1.0]
 num_actions: 10 #18
 num_single_obs: 39 #63
-frame_stack: 1 #5
-num_obs:  39 #num_single_obs * frame_stack #315
+frame_stack: 10 #5
+num_obs:  390 #num_single_obs * frame_stack #315
 
 cmd_init: [0, 0, 0]

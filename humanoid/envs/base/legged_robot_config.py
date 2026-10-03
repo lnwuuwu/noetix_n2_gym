@@ -98,6 +98,12 @@ class LeggedRobotCfg(BaseConfig):
 
 
     class domain_rand:
+        # 每次 reset 是否重新抽样摩擦/恢复系数（见 legged_robot.
+        # _refresh_actor_rigid_shape_props）。默认 True = 保持既有行为；
+        # 置 False 可跳过那个 per-env 的 Python 循环，大幅提升采样吞吐，
+        # 代价仅是失去"同一环境跨 episode 换摩擦"这一点额外多样性
+        # （建环境时的 per-env 随机化仍然生效）。
+        refresh_shape_props_on_reset = True
         randomize_gains = False
         p_gain_range = [0.8, 1.2]
         d_gain_range = [0.8, 1.2]

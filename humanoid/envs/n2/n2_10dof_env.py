@@ -127,15 +127,21 @@ class N2_10dof_Env(LeggedRobot):
         else:
             self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         
-        # 为部分环境设置特殊命令规则
+        # 为部分环境设置特殊命令规则。三个比例改为可配置，默认与历史行为完全一致
+        # （20% 全零 / 10% 仅 vx=0 / 10% 仅 wz=0），这样盲策略 n2_10dof / n2 不受影响；
+        # 感知爬楼任务需要远低的站立比例，见 N2PerceptiveCfg.commands.standing_prob。
         if len(env_ids) > 0:
+            p_stand = getattr(self.cfg.commands, 'standing_prob', 0.20)
+            t1 = p_stand
+            t2 = t1 + getattr(self.cfg.commands, 'zero_vx_prob', 0.10)
+            t3 = t2 + getattr(self.cfg.commands, 'zero_wz_prob', 0.10)
             random_tensor = torch.rand_like(self.commands[env_ids, 0])
-            # 20%概率设置所有命令为0
-            self.commands[env_ids[random_tensor < 0.20], :] = 0
-            # 10%概率只设置x方向线速度为0
-            self.commands[env_ids[torch.logical_and(random_tensor >= 0.20, random_tensor < 0.30)], 0] = 0
-            # 10%概率只设置偏航角速度为0
-            self.commands[env_ids[torch.logical_and(random_tensor >= 0.30, random_tensor < 0.40)], 2] = 0
+            # 全部命令置 0（站立）
+            self.commands[env_ids[random_tensor < t1], :] = 0
+            # 只把 x 方向线速度置 0
+            self.commands[env_ids[torch.logical_and(random_tensor >= t1, random_tensor < t2)], 0] = 0
+            # 只把偏航角速度置 0
+            self.commands[env_ids[torch.logical_and(random_tensor >= t2, random_tensor < t3)], 2] = 0
 
         # 将小命令设置为零
         self.commands[env_ids, :3] *= (torch.norm(self.commands[env_ids, :3], dim=1) > self.min_cmd_vel).unsqueeze(1)

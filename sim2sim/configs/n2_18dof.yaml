@@ -1,5 +1,6 @@
 # 
 policy_path: "{LEGGED_GYM_ROOT_DIR}/sim2sim/policy/policy.pt"
+#policy_path: "/home/jun/Downloads/policy (1).pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/n2_18dof.xml"
 
 # Total simulation time
@@ -11,6 +12,8 @@ control_decimation: 10
 
 kps: [30, 30, 30, 30, 80, 80, 120, 120, 20, 30, 30, 30, 30, 80, 80, 120, 120, 20]
 kds: [1, 1, 1, 1, 5, 5, 5, 5, 2, 1, 1, 1, 1, 5, 5, 5, 5, 2]
+# Per-actuator effort/torque limits (Nm), MJCF <actuator> order = URDF effort
+tau_limit: [27, 27, 27, 27, 90, 90, 150, 150, 70, 27, 27, 27, 27, 90, 90, 150, 150, 70]
 
 default_angles: [0.0, 0.2, 0.0, 0.0, 0.0, 0.0, -0.1495, 0.3215, -0.1720,
                  0.0, -0.2, 0.0, 0.0, 0.0, 0.0, -0.1495, 0.3215, -0.1720]

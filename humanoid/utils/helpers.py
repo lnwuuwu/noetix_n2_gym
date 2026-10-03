@@ -136,6 +136,8 @@ def get_args():
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--export_only", "action": "store_true", "default": False, "help": "Load and export a policy, then exit without running the viewer loop."},
+        {"name": "--export_policy_name", "type": str, "help": "Export filename stem. Defaults to 'policy'."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -235,7 +237,10 @@ class _OnnxPolicyExporter(torch.nn.Module):
 
     def export(self, path, filename):
         self.to("cpu")
-        obs = torch.zeros(1, self.actor[0].in_features)
+        # 同上：actor 可能是 ScanEncoderActor，用第一个 Linear 的 in_features。
+        first = next(m for m in self.actor.modules() if isinstance(m, torch.nn.Linear))
+        in_dim = getattr(self.actor, 'expected_input_dim', None) or first.in_features
+        obs = torch.zeros(1, in_dim)
         torch.onnx.export(
                 self,
                 obs,
@@ -247,4 +252,3 @@ class _OnnxPolicyExporter(torch.nn.Module):
                 output_names=["policy_output"],
                 dynamic_axes={},
             )
-

@@ -58,7 +58,7 @@ class N2_10dof_Cfg(LeggedRobotCfg):
         num_envs = 4096
 
         # 单次观测维度（注释掉的是帧堆叠相关配置）
-        # frame_stack = 5
+        frame_stack = 10
         """
         num_single_obs = 63 #39
         num_privileged_obs = 221 #77 + 96 
@@ -67,8 +67,8 @@ class N2_10dof_Cfg(LeggedRobotCfg):
         num_privileged_obs = 77 + 96 
 
         # 观测空间维度（注释掉的是帧堆叠版本）
-        # num_observations = int(frame_stack * num_single_obs)
-        num_observations = num_single_obs
+        num_observations = int(frame_stack * num_single_obs)
+        # num_observations = num_single_obs
         
         # 动作空间维度（18个自由度，注释中显示之前是10）
         #num_actions = 18 #10
@@ -198,9 +198,9 @@ class N2_10dof_Cfg(LeggedRobotCfg):
     class terrain(LeggedRobotCfg.terrain):
         """地形配置"""
         # 网格类型（平面或三角网格）
-        mesh_type = 'plane' # plane trimesh
+        mesh_type = 'trimesh' # plane trimesh
         # 是否启用课程学习
-        curriculum = False
+        curriculum = True
         
         # 仅用于复杂地形:
         # 是否测量高度
@@ -223,9 +223,10 @@ class N2_10dof_Cfg(LeggedRobotCfg):
         # 地形列数（类型）
         num_cols = 10  
         # 初始地形等级
-        max_init_terrain_level = 0 #10  
+        max_init_terrain_level = 0 #10
         # 地形比例分布 [平面; 障碍物; 均匀; 上坡; 下坡, 上楼梯, 下楼梯]
-        terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.6, 0.0, 0.4, 0.0, 0.0, 0., 0.]
+        # terrain_proportions = [0.2, 0.0, 0.2, 0.05, 0.05, 0.4, 0.1]
         # 恢复系数
         restitution = 0.
     
@@ -243,8 +244,8 @@ class N2_10dof_Cfg(LeggedRobotCfg):
         class scales:
             """奖励缩放因子"""
             # 速度跟踪奖励
-            tracking_lin_vel = 1.2
-            tracking_ang_vel = 1.0
+            tracking_lin_vel = 1.4
+            tracking_ang_vel = 1.2
             
             
             # 基础姿态奖励
@@ -253,7 +254,7 @@ class N2_10dof_Cfg(LeggedRobotCfg):
             
             # 步态风格奖励
             stand_still = -0.15
-            feet_air_time = 2
+            feet_air_time = 3.0
             default_joint_pos = 1.0
             #default_up_joint_pos = 1.0 #0.5
             
@@ -264,11 +265,12 @@ class N2_10dof_Cfg(LeggedRobotCfg):
             
             # 能耗奖励
             dof_acc = -2.5e-7
-            energy_cost = -1e-3
-            action_smoothness = -0.01
+            energy_cost = -3e-4
+            action_smoothness = -5e-3
             
             # 其他奖励
-            collision = 0.0
+            collision = -1.0
+            # stumble = -1.0
             dof_pos_limits = -5.0
 
     class noise:
@@ -299,10 +301,17 @@ class N2_10dof_Cfg(LeggedRobotCfg):
         # 命令重新采样时间间隔[s]
         resampling_time = [5, 15] 
         # 是否启用航向命令模式（如果为True，则从航向误差计算角速度命令）
-        heading_command = False 
+        heading_command = False
         # 最小命令速度
         min_cmd_vel = 0.2
-        
+
+        # 命令重采样时的特殊比例，见 N2_10dof_Env._resample_commands。
+        # 这里的默认值与改成可配置之前的硬编码常量完全一致，盲策略行为不变。
+        standing_prob = 0.20   # 全部命令置 0（站立）的比例
+        zero_vx_prob = 0.10    # 仅 vx=0 的比例
+        zero_wz_prob = 0.10    # 仅 wz=0 的比例
+
+
         class ranges:
             """命令范围配置"""
             # 线速度x方向范围 [m/s]

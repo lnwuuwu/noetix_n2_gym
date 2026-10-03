@@ -1,0 +1,173 @@
+# N2 perceptive-locomotion policy (10 DOF legs + terrain height scan)
+policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/n2_parkour/exported/policies/policy_11600_stability.pt"
+xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/N2_10dof.xml"
+
+# Existing policies were trained without robot self-collision. New policies
+# trained with leg self-collision can set this to cross_leg, which enables
+# only L_leg_* <-> R_leg_* contacts (visual meshes stay non-colliding).
+self_collision_mode: disabled
+
+# 0 means continuous simulation; stop it with Ctrl+C.
+simulation_duration: 0.0
+# Simulation time step
+simulation_dt: 0.002
+# Controller update frequency (meets the requirement of simulation_dt * controll_decimation=0.02; 50Hz)
+control_decimation: 10
+
+kps: [80, 80, 120, 120, 20, 80, 80, 120, 120, 20]
+kds: [5, 5, 5, 5, 2, 5, 5, 5, 5, 2]
+# Per-actuator effort/torque limits (Nm), legs only: hip_yaw,hip_roll,hip_pitch,knee,ankle x2
+tau_limit: [90, 90, 150, 150, 70, 90, 90, 150, 150, 70]
+
+default_angles: [0.0, 0.0, -0.1495, 0.3215, -0.1720,
+                 0.0, 0.0, -0.1495, 0.3215, -0.1720]
+
+ang_vel_scale: 1.0
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 1.0]
+num_actions: 10
+
+# Deployment-side alignment/safety. Training blends each new action with the
+# previous action; applying raw policy output instantaneously in MuJoCo makes
+# the closed loop oscillate and eventually flip. These values were regressed
+# for 5400 and 8200 checkpoints on the full staircase.
+action_filter_alpha: 0.5
+action_gain: 0.7
+kd_scale: 1.5
+clip_observations: 18.0
+clip_actions: 18.0
+start_height: 0.80
+
+# proprioception(39) + goal delta-yaw(2) + height scan(96) = 137，见 N2ParkourEnv.compute_observations
+num_single_obs: 137
+frame_stack: 10
+num_obs: 1370 # num_single_obs * frame_stack
+
+# Height-scan obs term: clip(base_z - base_height_offset - terrain_height, -height_clip, height_clip) * height_measurements_scale
+# matches normalization.obs_scales.height_measurements / clip(-1,1) in compute_observations.
+# base_height_offset = rewards.base_height_target (0.698m) -- NOT a hardcoded 0.5. Standing
+# on flat ground at the target height must land near 0, not carry a constant +~1.0 bias after
+# scaling (see N2PerceptiveEnv.compute_observations fix).
+height_measurements_scale: 5.0
+base_height_offset: 0.698
+height_clip: 1.0
+
+# Height sample grid in the base frame (x outer, y inner -> 12*8=96), copied
+# from N2ParkourCfg.terrain measured_points_x / measured_points_y.
+measured_points_x: [-0.40, -0.25, -0.10, 0.10, 0.25, 0.40, 0.55, 0.70, 0.85, 1.00, 1.15, 1.30]
+# measured_points_x: [-0.30, -0.15, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.05, 1.20, 1.35, 1.50]
+measured_points_y: [-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4]
+
+cmd_init: [0, 0, 0]
+# 与 N2ParkourCfg.commands.ranges.lin_vel_x 上限一致。
+ranges_lin_vel_x_max: 0.8
+# Stable sim2sim evaluation speed; override with --command_x when needed.
+sim_command_x: 0.5
+
+# Draw the height-scan grid (yellow spheres) in the MuJoCo viewer, matching
+# terrain.debug_viz in Isaac Gym (legged_robot._draw_debug_vis).
+# This is expensive because it adds 96 markers; leave it off for smooth playback
+# and enable it explicitly with --debug_viz when inspecting observations.
+debug_viz: false
+# Viewer refresh rate. Physics still runs at 500Hz and policy inference at 50Hz.
+render_fps: 30
+viewer_width: 960
+viewer_height: 540
+# Follow the robot from its rear-right side and above it.  Keeping the
+# camera's lateral offset inside the 4 m height field avoids its vertical
+# boundary wall occluding the robot while still showing the terrain ahead.
+# MuJoCo elevation is negative when the camera is above the look-at point.
+camera_distance: 4.5
+camera_azimuth_offset: 20.0
+camera_elevation: -28.0
+camera_lookahead: 0.35
+camera_lookat_z_offset: -0.10
+
+# ---------------- Parkour 专有 ----------------
+# goal 路点。Isaac Gym 里 goal 是地形生成时的真值，MuJoCo 没有这个上帝视角，
+# 所以这里从场景几何推算：沿 +x 每隔 goal_spacing 取一点，z 用向下射线打到的地形
+# 高度 —— 等价于"把 goal 放在台阶顶面上"，与 parkour_step_terrain 的做法一致。
+# N2_10dof.xml 的楼梯：20 级，x 从 1.125 起、间距 0.25m、每级升 0.10m。
+goal_first_x: 1.125
+goal_spacing: 0.25
+goal_count: 20
+# 也可以直接写死路点（世界坐标，[[x,y],...] 或 [[x,y,z],...]），会覆盖上面三项：
+# goals: [[1.125, 0.0], [1.375, 0.0], ...]
+
+# 到达半径(m)，与 N2ParkourCfg.rewards.goal_reach_dist 保持一致。
+# 【必须小于 goal_spacing】否则指针连跳：站在第 k 个 goal 上时第 k+1 个已经在圈内，
+# 每个控制步推进一格，目标被顶到两三级台阶之外，Δψ 的语义就和训练时不是一回事了。
+# 训练侧同样的耦合由 N2ParkourEnv._check_goal_reach_consistency 强制。
+# 原来写 0.5 而 goal_spacing 只有 0.25，正好踩中；训练侧早已降到 0.15，这里漏了。
+goal_reach_dist: 0.15
+# Generic route cross-track tolerance; the physical stair corridor is ±2.5m.
+goal_pass_lateral_tol: 1.25
+# Route progress still counts every stair, while the heading observation aims
+# four points ahead. This avoids near-90° steering corrections from a 25cm
+# target when the robot is merely a few decimeters off the centerline.
+goal_lookahead_steps: 4
+# A U-turn has coarser, curved points, so use a shorter steering lookahead.
+turn_goal_lookahead_steps: 2
+# Descending at the ascent speed causes the robot to run/slip down the stairs.
+downhill_command_scale: 0.60
+# Slow down further on both semicircular turns.
+turn_command_scale: 0.50
+
+# goal 模式：
+#   waypoints —— 用上面 goal_first_x/spacing/count 生成的固定路点（可复现的爬楼测试）
+#   carrot    —— 方向键牵引的世界系目标点（胡萝卜）
+goal_mode: waypoints
+# Route lifecycle modes are mutually exclusive:
+# campaign_mode: row 3 的五类 Isaac Gym 地形连续闯关；
+# repeat_course: up -> U-turn -> down -> U-turn;
+# up_only_reset: climb on the center line, then respawn and climb again.
+campaign_mode: true
+repeat_course: false
+up_only_reset: false
+
+# Isaac Gym parkour 课程的可复现 MuJoCo 连续跑道。row=3/8、seed=5；
+# 五段沿 +x 无缝连接：上楼、下楼回地面、跨栏、平地路点、踏石。
+campaign_row: 3
+campaign_num_rows: 8
+campaign_seed: 5
+campaign_add_roughness: true
+campaign_goal_lookahead_steps: 1
+campaign_goal_pass_lateral_tol: 0.5
+campaign_goal_success_hold_seconds: 0.3
+# 默认到终点后发 0 速度并保持画面，不自动传送回起点。
+campaign_restart_on_finish: false
+campaign_reset_grace_seconds: 2.0
+campaign_min_base_clearance: 0.35
+campaign_min_upright_cos: 0.35
+campaign_progress_min_x: 0.05
+# 每种地形独立限速；key 与 parkour_campaign.Stage.kind 保持一致。
+campaign_command_speeds:
+  up_stairs: 0.50
+  down_stairs: 0.30
+  hurdle: 0.50
+  flat: 0.50
+  stepping_stones: 0.40
+campaign_no_progress_seconds:
+  up_stairs: 30.0
+  down_stairs: 40.0
+  hurdle: 45.0
+  flat: 40.0
+  stepping_stones: 35.0
+
+# 原有单独上楼模式的失败恢复阈值（使用 --up_only_reset 可随时切回）。
+# Failed attempts reset without closing the viewer/browser stream.
+fall_reset_height: 0.35
+no_progress_reset_seconds: 10.0
+# Moving this much farther along +x refreshes the no-progress timer.
+no_progress_min_x: 0.05
+# Two parallel stair lanes joined by semicircles on the flat platforms.
+course_center_y: 0.0
+course_lane_offset: 1.25
+top_turnaround_center_x: 7.0
+bottom_turnaround_center_x: 0.0
+turnaround_samples: 9
+stop_on_final_goal: false
+carrot_lookahead: 1.5    # 胡萝卜每次自动前移的距离(m)
+carrot_step: 0.15        # 单次按键挪动量(m)

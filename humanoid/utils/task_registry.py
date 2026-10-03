@@ -123,7 +123,11 @@ class TaskRegistry():
             # load previously trained model
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
             print(f"Loading model from: {resume_path}")
-            runner.load(resume_path, load_optimizer=False)
+            # Training resume must restore Adam's moments as well as the policy.
+            # Evaluation sets env.test=True and does not need optimizer state.
+            load_optimizer = not getattr(env.cfg.env, "test", False)
+            print(f"Loading optimizer state: {load_optimizer}")
+            runner.load(resume_path, load_optimizer=load_optimizer)
         return runner, train_cfg
 
 # make global task registry

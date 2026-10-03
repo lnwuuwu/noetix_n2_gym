@@ -212,7 +212,7 @@ class N2_18DofCfg(LeggedRobotCfg):
         # 网格类型（平面或三角网格）
         mesh_type = 'trimesh' # plane trimesh
         # 是否启用课程学习
-        curriculum = True
+        curriculum = False
         
         # 仅用于复杂地形:
         # 是否测量高度
@@ -237,7 +237,8 @@ class N2_18DofCfg(LeggedRobotCfg):
         # 初始地形等级
         max_init_terrain_level = 0 #10  
         # 地形比例分布 [平面; 障碍物; 均匀; 上坡; 下坡, 上楼梯, 下楼梯]
-        terrain_proportions = [0.1, 0.0, 0.05, 0.05, 0.05, 0.45, 0.2]
+        # terrain_proportions = [0.1, 0.0, 0.05, 0.05, 0.05, 0.45, 0.2]
+        terrain_proportions = [1., 0., 0., 0., 0., 0., 0.]
         # 恢复系数
         restitution = 0.
     
@@ -268,7 +269,7 @@ class N2_18DofCfg(LeggedRobotCfg):
             feet_air_time = 2.
             default_joint_pos = 1.0
             default_up_joint_pos = 1.1 #0.5
-            feet_clearance = 0.01
+            #feet_clearance = 0.01
             
             # 接触奖励
             feet_contact = 1.0
@@ -312,7 +313,7 @@ class N2_18DofCfg(LeggedRobotCfg):
         # 命令重新采样时间间隔[s]
         resampling_time = [5, 15] 
         # 是否启用航向命令模式（如果为True，则从航向误差计算角速度命令）
-        heading_command = False 
+        heading_command = False
         # 最小命令速度
         min_cmd_vel = 0.2
         

@@ -438,6 +438,14 @@ class OnPolicyRunner:
         if load_optimizer and resumed_training:
             # -- 算法优化器
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if self.cfg["runner"].get(
+                    "reset_optimizer_lr_on_resume", False):
+                configured_lr = self.alg.learning_rate
+                for param_group in self.alg.optimizer.param_groups:
+                    param_group["lr"] = configured_lr
+                print(
+                    "Reset resumed optimizer learning rate to "
+                    f"{configured_lr:.3e}")
         # -- 加载当前学习迭代次数
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]

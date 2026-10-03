@@ -38,7 +38,8 @@ class LeggedRobot(BaseTask):
         self.cfg = cfg
         self.sim_params = sim_params
         self.height_samples = None
-        self.debug_viz = False
+        # 从配置读取(默认 False),否则 terrain.debug_viz=True 不会生效
+        self.debug_viz = getattr(cfg.terrain, 'debug_viz', False)
         self.init_done = False
         self._parse_cfg()
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
@@ -178,6 +179,10 @@ class LeggedRobot(BaseTask):
         self.feet_air_time[env_ids] = 0.
         self.feet_contact_time[env_ids] = 0.
         self.feet_both_contact_time[env_ids] = 0.
+        # clear frame-stack history so a new episode does not inherit the previous episode's frames
+        if self.cfg.env.frame_stack is not None:
+            for i in range(len(self.obs_history)):
+                self.obs_history[i][env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
 
@@ -360,6 +365,21 @@ class LeggedRobot(BaseTask):
         return props, total_mass
     
     def _refresh_actor_rigid_shape_props(self, env_ids):
+        # 两个开关都关时直接返回。下面那个 per-env 的 Python 循环原本写在
+        # if randomize_* 之外，即使随机化全部关闭也照跑一遍 get/set_actor_
+        # rigid_shape_properties——纯粹的空转。
+        if not (self.cfg.domain_rand.randomize_friction or self.cfg.domain_rand.randomize_restitution):
+            return
+        # 每次 reset 重新抽样摩擦/恢复系数是本仓库在 legged_gym 之上加的；上游只在
+        # 建环境时按 env 随机化一次（_process_rigid_shape_props），那已经让 4096 个
+        # 环境各自持有取自 256 个 bucket 的不同摩擦，策略照样看得到整个分布。
+        # 而这个循环对每个重置环境都要走一次 Python<->C++ 往返（get + set，中间还有
+        # 一个遍历所有碰撞体的内层循环）。实测（1024 env）：不含 reset 的步 52.7ms，
+        # 含 reset 的步 296.8ms —— 5.6 倍，且训练早期 episode 很短、几乎每步都在
+        # reset，于是它吃掉了绝大部分采样时间。关掉它只损失"同一环境跨 episode 换
+        # 摩擦"这一点额外多样性，换来数倍吞吐。
+        if not getattr(self.cfg.domain_rand, 'refresh_shape_props_on_reset', True):
+            return
         num_buckets = 256
         if self.cfg.domain_rand.randomize_friction:
             bucket_ids = torch.randint(0, num_buckets, (len(env_ids), 1))
@@ -793,6 +813,70 @@ class LeggedRobot(BaseTask):
         self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)   
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
+    def _actor_collision_filter(self):
+        """Return the Isaac actor filter used during creation.
+
+        ``cross_leg`` starts with all actor contacts enabled, then
+        :meth:`_apply_actor_self_collision_filters` keeps only left-vs-right
+        leg contacts.  Existing tasks without this explicit mode retain their
+        original ``asset.self_collisions`` semantics byte-for-byte.
+        """
+        mode = getattr(self.cfg.asset, 'self_collision_mode', None)
+        if mode is None:
+            return self.cfg.asset.self_collisions
+        if mode != 'cross_leg':
+            raise ValueError(
+                "asset.self_collision_mode 仅支持 'cross_leg'，当前为 %r"
+                % mode)
+        return 0
+
+    def _apply_actor_self_collision_filters(
+            self, env_handle, actor_handle, env_id):
+        """Enable only left-leg versus right-leg self contacts.
+
+        Isaac suppresses a shape pair when their integer filters share a bit.
+        Left=1, right=2 and all other bodies=3 therefore allow only L/R leg
+        pairs while preserving every robot/world contact (world filter is 0).
+        Avoiding same-leg adjacent-mesh contacts is substantially more stable
+        than indiscriminately enabling every self-contact.
+        """
+        if getattr(self.cfg.asset, 'self_collision_mode', None) != 'cross_leg':
+            return
+
+        body_names = self.gym.get_actor_rigid_body_names(
+            env_handle, actor_handle)
+        shape_ranges = self.gym.get_actor_rigid_body_shape_indices(
+            env_handle, actor_handle)
+        shape_props = self.gym.get_actor_rigid_shape_properties(
+            env_handle, actor_handle)
+        left_shapes = 0
+        right_shapes = 0
+        for body_idx, body_name in enumerate(body_names):
+            if body_name.startswith("L_leg_"):
+                mask = 0b01
+            elif body_name.startswith("R_leg_"):
+                mask = 0b10
+            else:
+                mask = 0b11
+            shape_range = shape_ranges[body_idx]
+            for shape_idx in range(
+                    shape_range.start, shape_range.start + shape_range.count):
+                shape_props[shape_idx].filter = mask
+                left_shapes += int(mask == 0b01)
+                right_shapes += int(mask == 0b10)
+
+        if left_shapes == 0 or right_shapes == 0:
+            raise RuntimeError(
+                "cross_leg 自碰撞过滤未找到左右腿 collision shapes："
+                "left=%d right=%d" % (left_shapes, right_shapes))
+        self.gym.set_actor_rigid_shape_properties(
+            env_handle, actor_handle, shape_props)
+        if env_id == 0:
+            print(
+                "[self-collision] ON (cross-leg only): "
+                "left_shapes=%d right_shapes=%d" %
+                (left_shapes, right_shapes))
+
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
@@ -871,7 +955,11 @@ class LeggedRobot(BaseTask):
                 
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
-            actor_handle = self.gym.create_actor(env_handle, robot_asset, start_pose, self.cfg.asset.name, i, self.cfg.asset.self_collisions, 0)
+            actor_handle = self.gym.create_actor(
+                env_handle, robot_asset, start_pose, self.cfg.asset.name, i,
+                self._actor_collision_filter(), 0)
+            self._apply_actor_self_collision_filters(
+                env_handle, actor_handle, i)
             dof_props = self._process_dof_props(dof_props_asset, i)
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)

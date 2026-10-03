@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "config_file": "n2_parkour_slow_stable.yaml",
+  "duration_limit_seconds": 180,
+  "command_x": 0.35,
+  "control_overrides": {},
+  "ranking_rules": [
+    "successful full campaign first",
+    "more cleared terrain stages",
+    "fewer failures",
+    "higher best course progress",
+    "fewer resets",
+    "shorter simulation time"
+  ],
+  "candidate_count": 1,
+  "successful_count": 1,
+  "best_policy_path": "sim2sim/policy/policy_best_stable.pt",
+  "best_checkpoint": null,
+  "candidates": [
+    {
+      "policy_path": "sim2sim/policy/policy_best_stable.pt",
+      "checkpoint": null,
+      "status": "ok",
+      "wall_time_seconds": 10.189960035029799,
+      "completed": true,
+      "stop_reason": "success",
+      "sim_steps": 59951,
+      "sim_time": 119.902,
+      "reached": 45,
+      "cycles": 1,
+      "resets": 0,
+      "failures": 0,
+      "fall_resets": 0,
+      "stuck_resets": 0,
+      "low_clearance_resets": 0,
+      "tilt_resets": 0,
+      "stage_clears": 5,
+      "campaign_finished": true,
+      "stage": 4,
+      "stage_number": 5,
+      "stage_count": 5,
+      "terrain_type": "stepping_stones",
+      "goal_index": 8,
+      "goal_count": 9,
+      "stage_attempt": 1,
+      "stage_failure_counts": {
+        "up_stairs": 0,
+        "down_stairs": 0,
+        "hurdle": 0,
+        "flat": 0,
+        "stepping_stones": 0
+      },
+      "stage_clear_attempts": {
+        "up_stairs": 1,
+        "down_stairs": 1,
+        "hurdle": 1,
+        "flat": 1,
+        "stepping_stones": 1
+      },
+      "final_progress_fraction": 1,
+      "best_progress_fraction": 1,
+      "course_end_x": 58.300000000000004,
+      "max_x": 58.292005739200526,
+      "x": 58.292005739200526,
+      "y": -0.04913598507015027,
+      "z": 0.7108931709733415,
+      "success": true
+    }
+  ],
+  "publication_provenance": {
+    "source_file": "mujoco_post_camera_geometry.json",
+    "source_type": "archived project evaluation; not a new run",
+    "sanitization": "Only the two absolute policy paths were replaced with repository-relative paths. All original measurements and null checkpoint values are unchanged."
+  }
+}

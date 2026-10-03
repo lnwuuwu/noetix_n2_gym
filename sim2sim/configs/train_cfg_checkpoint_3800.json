@@ -1,0 +1,483 @@
+{
+    "algorithm": {
+        "clip_param": 0.2,
+        "desired_kl": 0.01,
+        "entropy_coef": 0.008,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "learning_rate": 0.0005,
+        "max_grad_norm": 1.0,
+        "num_learning_epochs": 5,
+        "num_mini_batches": 4,
+        "schedule": "adaptive",
+        "use_clipped_value_loss": true,
+        "value_loss_coef": 1.0
+    },
+    "init_member_classes": {},
+    "policy": {
+        "activation": "elu",
+        "actor_hidden_dims": [
+            512,
+            256,
+            128
+        ],
+        "critic_hidden_dims": [
+            512,
+            256,
+            128
+        ],
+        "frame_stack": 10,
+        "init_noise_std": 0.8,
+        "n_proprio": 41,
+        "n_scan": 96,
+        "scan_encoder_dims": [
+            128,
+            64,
+            32
+        ]
+    },
+    "runner": {
+        "algorithm_class_name": "PPO",
+        "checkpoint": -1,
+        "empirical_normalization": true,
+        "experiment_name": "n2_parkour_slow_stable",
+        "init_at_random_ep_len": false,
+        "load_run": -1,
+        "logger": "tensorboard",
+        "max_iterations": 15001,
+        "num_steps_per_env": 24,
+        "policy_class_name": "ActorCritic",
+        "resume": false,
+        "resume_path": null,
+        "run_name": "rpl_sc_slow_straight_s5_v2",
+        "save_interval": 200
+    },
+    "runner_class_name": "OnPolicyRunner",
+    "seed": 5,
+    "asset": {
+        "angular_damping": 0.0,
+        "armature": 0.0,
+        "collapse_fixed_joints": true,
+        "default_dof_drive_mode": 3,
+        "density": 0.001,
+        "disable_gravity": false,
+        "file": "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/urdf/N2_10dof.urdf",
+        "fix_base_link": false,
+        "flip_visual_attachments": false,
+        "foot_name": "ankle",
+        "linear_damping": 0.0,
+        "max_angular_velocity": 1000.0,
+        "max_linear_velocity": 1000.0,
+        "name": "Ning",
+        "penalize_contacts_on": [
+            "hip",
+            "knee"
+        ],
+        "replace_cylinder_with_capsule": false,
+        "require_self_collisions": true,
+        "self_collision_mode": "cross_leg",
+        "self_collisions": 0,
+        "terminate_after_contacts_on": [
+            "base"
+        ],
+        "thickness": 0.01
+    },
+    "commands": {
+        "curriculum": false,
+        "heading_command": false,
+        "max_curriculum": 1.0,
+        "min_cmd_vel": 0.1,
+        "num_commands": 4,
+        "parkour_min_vx": 0.2,
+        "ranges": {
+            "ang_vel_yaw": [
+                0.0,
+                0.0
+            ],
+            "heading": [
+                -3.14,
+                3.14
+            ],
+            "lin_vel_x": [
+                0.2,
+                0.5
+            ],
+            "lin_vel_y": [
+                0.0,
+                0.0
+            ]
+        },
+        "resampling_time": [
+            5,
+            15
+        ],
+        "stairs_forward_only": false,
+        "stairs_min_vx": 0.25,
+        "standing_prob": 0.02,
+        "zero_vx_prob": 0.0,
+        "zero_wz_prob": 0.0
+    },
+    "control": {
+        "action_scale": 0.25,
+        "control_type": "P",
+        "damping": {
+            "leg_hip_yaw_joint": 5.0,
+            "leg_hip_roll_joint": 5.0,
+            "leg_hip_pitch_joint": 5.0,
+            "leg_knee_joint": 5.0,
+            "leg_ankle_joint": 2.0
+        },
+        "decimation": 10,
+        "stiffness": {
+            "leg_hip_yaw_joint": 80.0,
+            "leg_hip_roll_joint": 80.0,
+            "leg_hip_pitch_joint": 120.0,
+            "leg_knee_joint": 120.0,
+            "leg_ankle_joint": 20.0
+        }
+    },
+    "domain_rand": {
+        "added_mass_range": [
+            -1.5,
+            1.5
+        ],
+        "com_displacement_range": [
+            -0.02,
+            0.02
+        ],
+        "d_gain_range": [
+            0.9,
+            1.1
+        ],
+        "disturbance": false,
+        "disturbance_interval": [
+            10,
+            25
+        ],
+        "disturbance_probabilities": 0.002,
+        "friction_range": [
+            0.5,
+            1.25
+        ],
+        "max_push_vel_xy": 1.0,
+        "motor_strength_range": [
+            0.9,
+            1.1
+        ],
+        "p_gain_range": [
+            0.9,
+            1.1
+        ],
+        "push_force_range": [
+            50.0,
+            300.0
+        ],
+        "push_interval": 750.0,
+        "push_interval_s": 15,
+        "push_robots": false,
+        "push_torque_range": [
+            25.0,
+            100.0
+        ],
+        "randomize_base_mass": true,
+        "randomize_com_displacement": true,
+        "randomize_friction": true,
+        "randomize_gains": true,
+        "randomize_motor_strength": true,
+        "randomize_restitution": true,
+        "refresh_shape_props_on_reset": false,
+        "restitution_range": [
+            0.0,
+            0.2
+        ]
+    },
+    "env": {
+        "enable_early_termination": true,
+        "env_spacing": 3.0,
+        "episode_length_s": 20,
+        "frame_stack": 10,
+        "num_actions": 10,
+        "num_envs": 2048,
+        "num_observations": 1370,
+        "num_privileged_obs": 175,
+        "num_single_obs": 137,
+        "send_timeouts": true,
+        "termination_height": 0.4,
+        "test": false
+    },
+    "init_state": {
+        "ang_vel": [
+            0.0,
+            0.0,
+            0.0
+        ],
+        "default_joint_angles": {
+            "L_arm_shoulder_pitch_joint": 0.0,
+            "L_arm_shoulder_roll_joint": 0.6,
+            "L_arm_shoulder_yaw_joint": 0.0,
+            "L_arm_elbow_joint": 0.0,
+            "L_leg_hip_yaw_joint": 0.0,
+            "L_leg_hip_roll_joint": 0.0,
+            "L_leg_hip_pitch_joint": -0.1495,
+            "L_leg_knee_joint": 0.3215,
+            "L_leg_ankle_joint": -0.172,
+            "R_arm_shoulder_pitch_joint": 0.0,
+            "R_arm_shoulder_roll_joint": -0.6,
+            "R_arm_shoulder_yaw_joint": 0.0,
+            "R_arm_elbow_joint": 0.0,
+            "R_leg_hip_yaw_joint": 0.0,
+            "R_leg_hip_roll_joint": 0.0,
+            "R_leg_hip_pitch_joint": -0.1495,
+            "R_leg_knee_joint": 0.3215,
+            "R_leg_ankle_joint": -0.172
+        },
+        "lin_vel": [
+            0.0,
+            0.0,
+            0.0
+        ],
+        "pos": [
+            0.0,
+            0.0,
+            0.75
+        ],
+        "rot": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]
+    },
+    "noise": {
+        "add_noise": true,
+        "noise_level": 1.0,
+        "noise_scales": {
+            "ang_vel": 0.2,
+            "dof_pos": 0.05,
+            "dof_vel": 0.5,
+            "gravity": 0.05,
+            "height_measurements": 0.0,
+            "lin_vel": 0.05,
+            "quat": 0.05
+        }
+    },
+    "normalization": {
+        "clip_actions": 18.0,
+        "clip_observations": 18.0,
+        "obs_scales": {
+            "ang_vel": 1.0,
+            "dof_pos": 1.0,
+            "dof_vel": 0.05,
+            "height_measurements": 5.0,
+            "lin_vel": 2.0,
+            "quat": 1.0
+        }
+    },
+    "rewards": {
+        "anti_freeze_speed": 0.15,
+        "base_height_target": 0.698,
+        "feet_air_time_stale": 1.0,
+        "feet_contact_force_max_excess": 200.0,
+        "feet_separation_max_penalty": 4.0,
+        "feet_separation_min": 0.08,
+        "foot_length": 0.2,
+        "foot_n_x": 3,
+        "foot_n_y": 2,
+        "foot_width": 0.1,
+        "foothold_depth_tol": 0.04,
+        "foothold_flat_k": 20.0,
+        "goal_pass_lateral_tol": 0.5,
+        "goal_reach_dist": 0.15,
+        "max_contact_force": 400.0,
+        "only_positive_rewards": true,
+        "overspeed_max_penalty": 4.0,
+        "overspeed_reference": 0.3,
+        "overspeed_tolerance": 0.05,
+        "scales": {
+            "action_smoothness": -0.015,
+            "anti_freeze": 0.0,
+            "base_height": -30.0,
+            "collision": -1.0,
+            "contact_no_vel": -2,
+            "default_joint_pos": 1.0,
+            "dof_acc": -2.5e-07,
+            "dof_pos_limits": -5.0,
+            "energy_cost": -0.0003,
+            "feet_air_time": 0.5,
+            "feet_contact": 0.6,
+            "feet_contact_forces": -0.1,
+            "feet_separation": -0.3,
+            "foothold": -0.5,
+            "goal_reached": 0.0,
+            "orientation": 1.0,
+            "overspeed": -1.5,
+            "stand_still": -0.15,
+            "stumble": -6.0,
+            "tracking_ang_vel": 0.6,
+            "tracking_goal_vel": 2.8,
+            "tracking_lin_vel": 1.0,
+            "tracking_yaw": 1.0,
+            "world_heading": 0.0,
+            "world_progress": 0.0
+        },
+        "soft_dof_pos_limit": 0.9,
+        "stand_still_max": 20.0,
+        "stand_still_vel_weight": 0.05,
+        "stumble_min_force": 20.0,
+        "stumble_ref_force": 200.0,
+        "stumble_stance_force": 80.0,
+        "world_heading_max_err": 1.57,
+        "world_progress_min_speed": 0.1
+    },
+    "sim": {
+        "dt": 0.002,
+        "gravity": [
+            0.0,
+            0.0,
+            -9.81
+        ],
+        "physx": {
+            "bounce_threshold_velocity": 0.1,
+            "contact_collection": 2,
+            "contact_offset": 0.01,
+            "default_buffer_size_multiplier": 5,
+            "max_depenetration_velocity": 1.0,
+            "max_gpu_contact_pairs": 16777216,
+            "num_position_iterations": 4,
+            "num_threads": 10,
+            "num_velocity_iterations": 0,
+            "rest_offset": 0.0,
+            "solver_type": 1
+        },
+        "substeps": 1,
+        "up_axis": 1
+    },
+    "terrain": {
+        "border_size": 25,
+        "curriculum": true,
+        "curriculum_up_distance": 3.2,
+        "debug_viz": true,
+        "dynamic_friction": 0.6,
+        "horizontal_scale": 0.1,
+        "max_init_terrain_level": 0,
+        "measure_heights": true,
+        "measured_points_x": [
+            -0.4,
+            -0.25,
+            -0.1,
+            0.1,
+            0.25,
+            0.4,
+            0.55,
+            0.7,
+            0.85,
+            1.0,
+            1.15,
+            1.3
+        ],
+        "measured_points_y": [
+            -0.4,
+            -0.3,
+            -0.2,
+            -0.1,
+            0.1,
+            0.2,
+            0.3,
+            0.4
+        ],
+        "mesh_type": "trimesh",
+        "num_cols": 10,
+        "num_goals": 10,
+        "num_rows": 10,
+        "num_sub_terrains": 100,
+        "parkour_flat_center_goals": true,
+        "parkour_goals_to_level_down": 2,
+        "parkour_goals_to_level_up": 7,
+        "parkour_half_valid_width": [
+            0.7,
+            0.8
+        ],
+        "parkour_hurdle_half_valid_width": [
+            0.4,
+            0.8
+        ],
+        "parkour_hurdle_height_range": [
+            0.1,
+            0.3
+        ],
+        "parkour_hurdle_len": 0.3,
+        "parkour_hurdle_x_range": [
+            1.2,
+            1.8
+        ],
+        "parkour_hurdle_y_range": [
+            -0.4,
+            0.4
+        ],
+        "parkour_pad_height": 0.5,
+        "parkour_pad_width": 0.1,
+        "parkour_platform_len": 2.5,
+        "parkour_spawn_jitter": 0.1,
+        "parkour_step_count": 18,
+        "parkour_step_goal_power": 2.0,
+        "parkour_step_height_range": [
+            0.05,
+            0.2
+        ],
+        "parkour_stepdown_outside_margin": 0.3,
+        "parkour_stone_gap_range": [
+            0.05,
+            0.2
+        ],
+        "parkour_stone_len_range": [
+            0.9,
+            0.45
+        ],
+        "parkour_stone_pit_depth": 0.5,
+        "parkour_stone_width_range": [
+            1.0,
+            0.5
+        ],
+        "parkour_stone_y_range": [
+            0.1,
+            0.18
+        ],
+        "parkour_x_range": [
+            0.2,
+            0.4
+        ],
+        "parkour_y_range": [
+            -0.15,
+            0.15
+        ],
+        "restitution": 0.0,
+        "selected": false,
+        "slope_treshold": 0.75,
+        "stairs_platform_size": 1.5,
+        "static_friction": 0.6,
+        "terrain_kwargs": null,
+        "terrain_length": 18.0,
+        "terrain_proportions": [
+            0.3,
+            0.3,
+            0.2,
+            0.1,
+            0.1
+        ],
+        "terrain_width": 4.0,
+        "vertical_scale": 0.005
+    },
+    "viewer": {
+        "lookat": [
+            11.0,
+            5,
+            3.0
+        ],
+        "pos": [
+            10,
+            0,
+            6
+        ],
+        "ref_env": 0
+    }
+}

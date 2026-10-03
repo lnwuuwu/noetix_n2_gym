@@ -38,9 +38,7 @@
   <worldbody>
   <light directional="true" diffuse=".4 .4 .4" specular="0.1 0.1 0.1" pos="0 0 5.0" dir="0 0 -1" castshadow="false"/>
     <light directional="true" diffuse=".6 .6 .6" specular="0.2 0.2 0.2" pos="0 0 4" dir="0 0 -1"/>
-    <geom name="ground" type="plane" size="0 0 1" pos="0.001 0 0" quat="1 0 0 0" material="matplane" condim="1" conaffinity='15'/>
-
-    <body name="base_link" pos="0 0 0.75">
+    <body name="base_link" pos="0 0 0.80">
       <inertial pos="0.0033233 0.00022809 0.048682" quat="0.703725 0.704081 -0.0674394 0.0670304" mass="10.906" diaginertia="0.0371587 0.0298573 0.017205"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.89804 0.91765 0.92941 1" mesh="base_link"/>
       <geom type="mesh" rgba="0.89804 0.91765 0.92941 1" mesh="base_link" />
@@ -108,7 +106,7 @@
               <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="1 1 1 1" mesh="l_leg_knee_link"/>
               <geom type="mesh" rgba="1 1 1 1" mesh="l_leg_knee_link" />
               <body name="L_leg_ankle_link" pos="0.015 0 -0.25957">
-                <inertial pos="0.016737 0.019094 -0.019954" quat="-0.00314474 0.710307 -0.00552995 0.703863" mass="0.62716" diaginertia="0.00106349 0.00094107 0.000182528"/>
+                <inertial pos="0.016737 0.019094 -0.019954" quat="0.159886 0.912216 -0.0164985 0.376865" mass="0.62716" diaginertia="0.0100081 0.0100008 0.00999105"/>
                 <joint name="L_leg_ankle_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-1 0.75" />
                 <site name="L_leg_foot_contact_ground" pos="0 0 0" size="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="1 1 1 1" mesh="l_leg_ankle_link"/>                
@@ -139,7 +137,7 @@
               <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.89804 0.91765 0.92941 1" mesh="r_leg_knee_link"/>
               <geom type="mesh" rgba="0.89804 0.91765 0.92941 1" mesh="r_leg_knee_link" />
               <body name="R_leg_ankle_link" pos="0.015 0 -0.25957">
-                <inertial pos="0.016737 -0.019095 -0.019954" quat="0.00313996 0.710307 0.00553352 0.703863" mass="0.62716" diaginertia="0.00106349 0.00094106 0.000182538"/>
+                <inertial pos="0.016737 -0.019095 -0.019954" quat="-0.159886 0.912216 0.0164985 0.376865" mass="0.62716" diaginertia="0.0100081 0.0100008 0.00999105"/>
                 <joint name="R_leg_ankle_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-1 0.75" />
                 <site name="R_leg_foot_contact_ground" pos="0 0 0" size="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="1 1 1 1" mesh="r_leg_ankle_link"/>
@@ -150,6 +148,31 @@
         </body>
       </body>
     </body>
+
+      <geom name="ground" type="plane" size="0 0 1"
+            material="matplane" friction="0.6 0.005 0.0001"/>
+
+      <geom type="box" size="0.125 2.5 0.05" pos="1.125 0 0.05" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.1" pos="1.375 0 0.1" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.15" pos="1.625 0 0.15" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.2" pos="1.875 0 0.2" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.25" pos="2.125 0 0.25" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.3" pos="2.375 0 0.3" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.35" pos="2.625 0 0.35" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.4" pos="2.875 0 0.4" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.45" pos="3.125 0 0.45" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.5" pos="3.375 0 0.5" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.55" pos="3.625 0 0.55" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.6" pos="3.875 0 0.6" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.65" pos="4.125 0 0.65" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.7" pos="4.375 0 0.7" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.75" pos="4.625 0 0.75" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.8" pos="4.875 0 0.8" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.85" pos="5.125 0 0.85" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.9" pos="5.375 0 0.9" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 0.95" pos="5.625 0 0.95" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="0.125 2.5 1" pos="5.875 0 1" friction="0.6 0.005 0.0001"/>
+      <geom type="box" size="1.5 2.5 1" pos="7.5 0 1"/>
 
   </worldbody>
 
@@ -171,9 +194,9 @@
   <sensor>
       <force name="L_leg_foot_force" site="L_leg_foot_contact_ground"/>
       <force name="R_leg_foot_force" site="R_leg_foot_contact_ground"/>
-      <framequat     name='orientation' objtype='site' noise='0.001' objname='imu'/>
+      <framequat     name='orientation' objtype='site' objname='imu'/>
       <framepos      name='position' objtype='site' noise='0.001' objname='imu'/>
-      <gyro          name='angular-velocity'    site='imu' noise='0.005' cutoff='34.9'/>
+      <gyro          name='angular-velocity'    site='imu' cutoff='34.9'/>
       <velocimeter   name='linear-velocity'     site='imu' noise='0.001' cutoff='30'/>
       <accelerometer name='linear-acceleration' site='imu' noise='0.005' cutoff='157'/>
       <magnetometer  name='magnetometer'        site='imu'/>

@@ -1,0 +1,147 @@
+# N2 slow/stable perceptive-locomotion policy (10 DOF + terrain height scan)
+policy_path: "{LEGGED_GYM_ROOT_DIR}/sim2sim/policy/policy_best_stable.pt"
+xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/N2/mjcf/N2_10dof.xml"
+
+# Match the new Isaac Gym task: collide only left-leg versus right-leg links.
+self_collision_mode: cross_leg
+
+# 0 means continuous simulation; stop it with Ctrl+C.
+simulation_duration: 0.0
+simulation_dt: 0.002
+# 50 Hz policy/control loop.
+control_decimation: 10
+
+kps: [80, 80, 120, 120, 20, 80, 80, 120, 120, 20]
+kds: [5, 5, 5, 5, 2, 5, 5, 5, 5, 2]
+tau_limit: [90, 90, 150, 150, 70, 90, 90, 150, 150, 70]
+
+default_angles: [0.0, 0.0, -0.1495, 0.3215, -0.1720,
+                 0.0, 0.0, -0.1495, 0.3215, -0.1720]
+
+ang_vel_scale: 1.0
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 1.0]
+num_actions: 10
+
+# Cross-checkpoint deployment control selected by a controlled 12-setting
+# ablation. The legacy policy's gain=0.7/Kd x1.5 causes repeated low-clearance
+# falls here. This milder filter/gain/damping combination passed the complete
+# campaign with zero resets for checkpoints 3000, 3800, 4000 and 4200.
+action_filter_alpha: 0.5
+action_gain: 0.85
+kd_scale: 1.2
+clip_observations: 18.0
+clip_actions: 18.0
+start_height: 0.80
+
+# proprioception(39) + goal delta-yaw(2) + height scan(96) = 137
+num_single_obs: 137
+frame_stack: 10
+num_obs: 1370
+
+height_measurements_scale: 5.0
+base_height_offset: 0.698
+height_clip: 1.0
+
+measured_points_x: [-0.40, -0.25, -0.10, 0.10, 0.25, 0.40, 0.55, 0.70, 0.85, 1.00, 1.15, 1.30]
+measured_points_y: [-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4]
+
+cmd_init: [0, 0, 0]
+# Match N2ParkourSlowStableCfg.commands.ranges.lin_vel_x.
+ranges_lin_vel_x_max: 0.5
+# Conservative default used outside the per-stage campaign speed controller.
+sim_command_x: 0.35
+
+debug_viz: false
+render_fps: 30
+viewer_width: 960
+viewer_height: 540
+# True robot-right/high viewpoint. MuJoCo azimuth 90 degrees is the right
+# profile; 70 keeps a little forward context without falling behind stairs.
+camera_distance: 5.0
+camera_azimuth_offset: 70.0
+camera_elevation: -30.0
+camera_lookahead: 0.45
+camera_lookat_z_offset: -0.05
+# Smooth all three look-at coordinates and heading. Large reset teleports snap
+# immediately so the robot is never off-screen after an automatic retry.
+camera_follow_tau: 0.18
+camera_yaw_follow_tau: 0.25
+camera_snap_distance: 2.0
+
+# ---------------- Parkour route ----------------
+goal_first_x: 1.125
+goal_spacing: 0.25
+goal_count: 20
+goal_reach_dist: 0.15
+goal_pass_lateral_tol: 1.25
+goal_lookahead_steps: 4
+turn_goal_lookahead_steps: 2
+downhill_command_scale: 0.60
+turn_command_scale: 0.50
+
+goal_mode: waypoints
+campaign_mode: true
+repeat_course: false
+up_only_reset: false
+
+# Reproduce the Isaac Gym row-3/seed-5 continuous campaign.  The flat stage
+# uses centre-line goals, matching the new straight-walking training task.
+campaign_row: 3
+campaign_num_rows: 8
+campaign_seed: 5
+campaign_add_roughness: true
+campaign_center_flat_goals: true
+# MuJoCo hfields interpolate each 0.1 m riser cell into a short ramp. Shift
+# the paper-compatible [0.20, 0.40) m run range by exactly one grid cell so
+# every tread retains 0.20/0.30 m of genuinely flat support after that ramp.
+# Quantised collision treads are therefore 0.30 or 0.40 m; height is unchanged.
+campaign_step_x_range: [0.30, 0.50]
+# MuJoCo hfields always draw/collide with vertical side skirts. Replicate the
+# lateral edge for four extra metres per side so those skirts sit outside the
+# camera volume. The central 4 m policy terrain and distant catch plane remain
+# unchanged.
+campaign_mujoco_side_margin: 4.0
+# Remove only the generator's outermost 0.1 m-high side-pad columns in MuJoCo.
+# The 4 m solid shoulders and the lower catch plane still protect lateral falls.
+campaign_mujoco_remove_lateral_walls: true
+# Extend the up/down stair treads outside the central 1.0 m policy corridor.
+# This removes the tall side slabs from the true-right camera without changing
+# any terrain samples under the feet or the normal +/-0.4 m height scan.
+campaign_mujoco_widen_stair_shoulders: true
+campaign_goal_lookahead_steps: 1
+campaign_goal_pass_lateral_tol: 0.5
+campaign_goal_success_hold_seconds: 0.3
+campaign_restart_on_finish: false
+campaign_reset_grace_seconds: 2.0
+campaign_min_base_clearance: 0.35
+campaign_min_upright_cos: 0.35
+campaign_progress_min_x: 0.05
+
+campaign_command_speeds:
+  up_stairs: 0.40
+  down_stairs: 0.25
+  hurdle: 0.40
+  flat: 0.35
+  stepping_stones: 0.30
+campaign_no_progress_seconds:
+  up_stairs: 30.0
+  down_stairs: 40.0
+  hurdle: 45.0
+  flat: 40.0
+  stepping_stones: 35.0
+
+# Preserved single-stair/repeat-route recovery settings.
+fall_reset_height: 0.35
+no_progress_reset_seconds: 10.0
+no_progress_min_x: 0.05
+course_center_y: 0.0
+course_lane_offset: 1.25
+top_turnaround_center_x: 7.0
+bottom_turnaround_center_x: 0.0
+turnaround_samples: 9
+stop_on_final_goal: false
+carrot_lookahead: 1.5
+carrot_step: 0.15

@@ -1,0 +1,16 @@
+[
+  {
+    "path": "media/isaac-gym-multiterrain.mp4",
+    "source_filename": "02_IsaacGym多地形运动演示.mp4",
+    "bytes": 98472752,
+    "sha256": "ba2ebc9033517aa9e3049af45092fa2e6d6a181733eff8eb8500891a63d38be4",
+    "processing": "original recording; renamed only"
+  },
+  {
+    "path": "media/mujoco-sim2sim.mp4",
+    "source_filename": "03_MuJoCo跨引擎运动演示.mp4",
+    "bytes": 60894482,
+    "sha256": "e08f2275663b2f0f77044db3ca354db841e4ef2e05b0a0cad7eb5261399b8c52",
+    "processing": "original recording; renamed only"
+  }
+]

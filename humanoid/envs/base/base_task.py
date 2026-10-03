@@ -24,9 +24,14 @@ class BaseTask():
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
+        # Headless training normally disables graphics. Evaluation tools can
+        # explicitly retain the graphics device for off-screen camera sensors
+        # without creating Isaac Gym's viewer/X11 window.
+        self.enable_camera_sensors = bool(
+            getattr(cfg.env, "enable_camera_sensors", False)
+        )
         self.graphics_device_id = self.sim_device_id
-        if self.headless == True:
+        if self.headless and not self.enable_camera_sensors:
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs
@@ -85,14 +90,23 @@ class BaseTask():
             camera_handle = self.gym.create_camera_sensor(
                 self.envs[0], camera_properties)
             self.camera_handle = camera_handle
-        else:
-            # pass
+        elif self.enable_camera_sensors:
             camera_properties = gymapi.CameraProperties()
-            camera_properties.width = 720
-            camera_properties.height = 480
-            camera_handle = self.gym.create_camera_sensor(
+            camera_properties.width = int(
+                getattr(cfg.env, "camera_width", 640))
+            camera_properties.height = int(
+                getattr(cfg.env, "camera_height", 360))
+            camera_properties.horizontal_fov = float(
+                getattr(cfg.env, "camera_horizontal_fov", 75.0))
+            camera_properties.enable_tensors = False
+            self.camera_handle = self.gym.create_camera_sensor(
                 self.envs[0], camera_properties)
-            self.camera_handle = camera_handle
+            if self.camera_handle < 0:
+                raise RuntimeError(
+                    "Failed to create the off-screen camera sensor")
+        else:
+            # Do not allocate an unusable sensor on a graphics-disabled sim.
+            self.camera_handle = None
 
     def get_observations(self):
         return self.obs_buf

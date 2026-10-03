@@ -339,12 +339,12 @@ class N2Env(LeggedRobot):
         feet_orient = torch.cat((lfoot_pitch.unsqueeze(1), rfoot_pitch.unsqueeze(1)), dim=-1)
         # 指数衰减奖励
         return torch.exp(-torch.norm(feet_orient * self.contacts, dim=1) * 20)
-
-    def _reward_feet_clearance(self):
-        # 每只脚相对其脚下地形的高度,仅在摆动相
-        feet_z = self.feet_pos[:, :, 2] - self.terrain_h.unsqueeze(-1)  # 地形相对
-        swing = ~self.contacts  # 未接触的脚
-        target = 0.18
-        # 摆动时鼓励接近目标间隙;忽略支撑脚
-        err = torch.square(torch.clamp(target - feet_z, min=0.0)) * swing
-        return torch.exp(-err.sum(dim=1) * 50)
+    #
+    # def _reward_feet_clearance(self):
+    #     # 每只脚相对其脚下地形的高度,仅在摆动相
+    #     feet_z = self.feet_pos[:, :, 2] - self.terrain_h.unsqueeze(-1)  # 地形相对
+    #     swing = ~self.contacts  # 未接触的脚
+    #     target = 0.18
+    #     # 摆动时鼓励接近目标间隙;忽略支撑脚
+    #     err = torch.square(torch.clamp(target - feet_z, min=0.0)) * swing
+    #     return torch.exp(-err.sum(dim=1) * 50)
