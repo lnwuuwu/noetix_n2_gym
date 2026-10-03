@@ -4,7 +4,7 @@
 
 为 N2 人形机器人双腿 10 自由度学习统一运动策略，串联上楼、下楼、跨栏、平地路点和踏石五类地形，并将策略从 Isaac Gym 导出到 MuJoCo 验证。
 
-这是吴淑林的实习项目作品集。本人负责 **总体技术路线、任务与方法设计、模块协调及材料整合**；训练、检查点筛选与部署评测由团队按报告分工完成。本仓库保留 Noetix 上游与团队代码历史。
+这是吴淑林的实习项目作品集。本人负责 **强化学习训练、参数调整、日志分析及候选 checkpoint 量化筛选**。本仓库展示个人承担的训练与策略筛选工作，以及对应的项目代码、模型和实验记录；保留 Noetix 上游与原工程代码历史。
 
 ## 演示视频
 
@@ -15,16 +15,16 @@
 
 MP4 是报告材料中的原始录屏，仅重命名；[校验信息](media/manifest.json)可核对。GIF 为 MuJoCo 视频片段预览。归档演示与最终部署版本的量化回放分别列示，不凭录屏推导统计成功率。
 
-## 我的工作与团队分工
+## 我的贡献
 
-| 人员 | 报告记载职责 |
-|---|---|
-| **吴淑林** | 总体技术路线、任务与方法设计、各模块协调、答辩材料整合 |
-| 杜军 | 强化学习训练、参数调整、日志分析、候选 checkpoint 量化筛选 |
-| 赵汝坤 | 模型回放评测、实验数据整理、训练结果分析 |
-| 武天豪 | MuJoCo Sim2Sim 验证、演示检查、部署文件整理 |
+| 工作 | 具体内容 | 可查看的实现 |
+|---|---|---|
+| 强化学习训练 | 在 Isaac Gym 中开展 N2 多地形 PPO 训练，使用并行环境采样并生成候选策略 | [训练入口](humanoid/scripts/train.py)、[PPO 训练流程](humanoid/algo/ppo/on_policy_runner.py) |
+| 参数调整 | 根据训练与回放表现调整训练、奖励和课程相关参数，比较配置对运动稳定性与任务完成度的影响 | [任务及训练配置](humanoid/envs/n2/n2_parkour_config.py)、[归档配置](sim2sim/configs/train_cfg_checkpoint_3800.json) |
+| 日志分析 | 分析训练日志、奖励变化和回放表现，识别失败模式并据此安排后续调参 | [日志查看入口](humanoid/scripts/tbpeek.py)、[训练日志记录](humanoid/algo/ppo/on_policy_runner.py) |
+| 候选 checkpoint 量化筛选 | 对候选策略进行一致条件下的评测，结合地形完成度、失败/重置次数、进度与耗时筛选稳定策略 | [训练策略评测](humanoid/scripts/evaluate_parkour_checkpoints.py)、[批量回放](sim2sim/evaluate_parkour_batch.py)、[排序规则](sim2sim/parkour_evaluation.py) |
 
-我重点展示的技术工作是：比较盲走、感知运动与 Parkour 路线；围绕观测、任务目标、失败模式和跨引擎接口组织方案设计与实现协作。代码文件是团队方案的对应实现，不等同于本人独立编写所有算法。见 [贡献与材料依据](docs/CONTRIBUTIONS.md)。
+个人职责按本人确认的实际工作整理，仅列本人的贡献。代码链接用于展示训练、分析与筛选工作所使用的实现，不把上游框架或整个系统归为个人独立开发。见 [个人贡献说明](docs/CONTRIBUTIONS.md)。
 
 ## 方法与实现
 
@@ -108,7 +108,7 @@ python humanoid/scripts/train.py \
 
 ## 发布检查与文档
 
-- [贡献说明](docs/CONTRIBUTIONS.md)：本人工作、团队分工与材料来源。
+- [贡献说明](docs/CONTRIBUTIONS.md)：本人承担的训练、调参、日志分析与量化筛选工作。
 - [结果说明](docs/RESULTS.md)：配置、历史回放与适用范围。
 - [发布检查](docs/PUBLICATION_CHECKS.md)：72 项测试通过、2 项可选依赖测试跳过，JIT 输入输出检查通过。
 - [原团队 / 上游 README](docs/reference/UPSTREAM_README.md)：其他基线任务的安装与用法。
